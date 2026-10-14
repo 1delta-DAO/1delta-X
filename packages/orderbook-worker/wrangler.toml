@@ -50,7 +50,9 @@ RPC_URL = "https://public-node.rsk.co"
 # Backups in order when the primary errors, times out or rate-limits (the filler leads
 # with the gateway; the book leads with the public node so the two do not share one
 # endpoint's rate limit — 2026-10-13: gateway 429s made POST /orders fail).
+# (+ the secret RPC_FALLBACK_URLS_SECRET, tried first: a keyed provider, never committed)
 RPC_FALLBACK_URLS = "https://rpc-gateway.1delta.io/30,https://mycrypto.rsk.co"
+RPC_MULTICALL = "1"
 # Optional Durable Object location hint, e.g. "wnam" (near the public Rootstock RPCs).
 # Only affects where the object is first CREATED; an existing object never moves.
 DO_LOCATION_HINT = ""

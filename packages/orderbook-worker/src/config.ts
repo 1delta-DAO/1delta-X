@@ -24,6 +24,9 @@ export interface Env {
    * and every POST /orders failed "verification unavailable".
    */
   RPC_FALLBACK_URLS?: string;
+  /** Keyed fallback endpoint(s), a secret: tried before RPC_FALLBACK_URLS. */
+  RPC_FALLBACK_URLS_SECRET?: string;
+  RPC_MULTICALL?: string;
   /** Optional Durable Object location hint (`wnam`, `enam`, `weur`, …); only affects object CREATION. */
   DO_LOCATION_HINT?: string;
   DEFAULT_FILLER?: string;
@@ -61,6 +64,8 @@ export interface WorkerConfig {
   chain: OrderbookConfig;
   /** Backup RPC endpoints, in order (RPC_FALLBACK_URLS). */
   rpcFallbackUrls: string[];
+  /** Merge concurrent eth_call reads into Multicall3 (RPC_MULTICALL=1). */
+  rpcMulticall: boolean;
   /** Which binding `chain.rpcUrl` came from (status only; the URL itself is never echoed). */
   rpcSource: "RPC_URL_SECRET" | "RPC_URL" | "none";
   /** False while SETTLEMENT / PERMIT3 / LENS are still placeholders: writes 503, the alarm skips chain work. */
@@ -199,10 +204,13 @@ export function loadConfig(env: Env): WorkerConfig {
 
   return {
     chain: { chainId, settlement, permit3, lens, rpcUrl: rpc.url, ...(defaultFiller ? { defaultFiller } : {}) },
-    rpcFallbackUrls: (env.RPC_FALLBACK_URLS ?? "")
+    // RPC_FALLBACK_URLS_SECRET (a keyed endpoint, never in a committed file) goes first.
+    rpcFallbackUrls: [env.RPC_FALLBACK_URLS_SECRET ?? "", env.RPC_FALLBACK_URLS ?? ""]
+      .join(",")
       .split(",")
       .map((u) => u.trim())
       .filter((u) => /^https?:\/\//.test(u) && u !== rpc.url),
+    rpcMulticall: (env.RPC_MULTICALL ?? "") === "1",
     rpcSource: rpc.source,
     configured,
     ocoModules: addrList(env.OCO_MODULES, "OCO_MODULES"),

@@ -144,6 +144,8 @@ export function connect(cfg: Config, opts: ConnectOptions = {}): Chain {
     name: cfg.chainId === 30 ? "Rootstock" : `chain-${cfg.chainId}`,
     nativeCurrency: { name: "RBTC", symbol: "RBTC", decimals: 18 },
     rpcUrls: { default: { http: [cfg.rpcUrl] } },
+    // Multicall3 is deployed at its canonical address on Rootstock (code verified 2026-10-12).
+    contracts: { multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" } },
   });
   const account = privateKeyToAccount(cfg.privateKey);
   const one = (url: string) =>
@@ -158,7 +160,7 @@ export function connect(cfg: Config, opts: ConnectOptions = {}): Chain {
   const urls = [cfg.rpcUrl, ...(cfg.rpcFallbackUrls ?? []).filter((u) => u !== cfg.rpcUrl)];
   const transport = urls.length > 1 ? fallback(urls.map(one), { rank: false }) : one(cfg.rpcUrl);
   return {
-    pub: createPublicClient({ chain, transport }) as PublicClient,
+    pub: createPublicClient({ chain, transport, ...(cfg.rpcMulticall ? { batch: { multicall: { wait: 16 } } } : {}) }) as PublicClient,
     account,
     me: account.address,
     chainId: cfg.chainId,

@@ -19,6 +19,8 @@ export interface Env {
   QUOTE_BINDING_KEY?: string;
   RPC_URL?: string;
   RPC_URL_SECRET?: string;
+  /** Keyed fallback RPC endpoint(s), a secret (comma-separated): tried before RPC_FALLBACK_URLS. */
+  RPC_FALLBACK_URLS_SECRET?: string;
   DO_LOCATION_HINT?: string;
   [key: string]: unknown;
 }
@@ -31,6 +33,8 @@ export interface WorkerConfig {
   maxSubrequestsPerTick: number;
   subrequestsPerOrder: number;
   tickBudgetMs: number;
+  /** RPC health probe cadence, ms (`RPC_PROBE_SECONDS`, default 30 — ~one block; 0 = every tick). */
+  rpcProbeMs: number;
   intakeMaxPages: number;
   intakePageSize: number;
   balanceCheckMs: number;
@@ -99,6 +103,7 @@ export function loadWorkerConfig(env: Env): WorkerConfig {
     maxSubrequestsPerTick: num(v.MAX_SUBREQUESTS_PER_TICK, 500, "MAX_SUBREQUESTS_PER_TICK", 10),
     subrequestsPerOrder: num(v.SUBREQUESTS_PER_ORDER, 40, "SUBREQUESTS_PER_ORDER", 1),
     tickBudgetMs: num(v.TICK_BUDGET_MS, 20_000, "TICK_BUDGET_MS", 1_000),
+    rpcProbeMs: 1000 * num(v.RPC_PROBE_SECONDS, 30, "RPC_PROBE_SECONDS", 0),
     intakeMaxPages: num(v.INTAKE_MAX_PAGES, 2, "INTAKE_MAX_PAGES", 1),
     intakePageSize: num(v.INTAKE_PAGE_SIZE, 500, "INTAKE_PAGE_SIZE", 1),
     balanceCheckMs: 1000 * num(v.BALANCE_CHECK_SECONDS, 300, "BALANCE_CHECK_SECONDS", 1),
@@ -156,8 +161,10 @@ export function locationHint(env: Pick<Env, "DO_LOCATION_HINT">): DurableObjectL
 }
 
 /** Every RPC URL binding that may be secret (API-key-bearing): redacted from anything that leaves the worker. */
-export function rpcUrls(env: Pick<Env, "RPC_URL" | "RPC_URL_SECRET">): string[] {
-  return [env.RPC_URL_SECRET, env.RPC_URL].filter((u): u is string => typeof u === "string" && u.trim() !== "").map((u) => u.trim());
+export function rpcUrls(env: Pick<Env, "RPC_URL" | "RPC_URL_SECRET" | "RPC_FALLBACK_URLS_SECRET">): string[] {
+  return [env.RPC_URL_SECRET, env.RPC_URL, ...(env.RPC_FALLBACK_URLS_SECRET ?? "").split(",")]
+    .filter((u): u is string => typeof u === "string" && u.trim() !== "")
+    .map((u) => u.trim());
 }
 
 /** False while SETTLEMENT / LENS are still the zero-address placeholders. */

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { CancelVerifier, Verifier } from "@1delta-x/orderbook/pure";
-import { createPublicClient, fallback, http, type PublicClient } from "viem";
+import { createPublicClient, defineChain, fallback, http, type PublicClient } from "viem";
 
 import { viemChainReader } from "./chain";
 import { loadConfig, RPC_TIMEOUT_MS, type Env, type WorkerConfig } from "./config";
@@ -27,6 +27,20 @@ export const defaultDeps: DepsFactory = (cfg) => {
   let client: PublicClient | undefined;
   const getClient = (): PublicClient =>
     (client ??= createPublicClient({
+      // Concurrent reads (the verifier's permit / balance / allowance / lens reads) merge
+      // into one Multicall3 call when RPC_MULTICALL=1.
+      ...(cfg.rpcMulticall
+        ? {
+            chain: defineChain({
+              id: cfg.chain.chainId,
+              name: "rootstock",
+              nativeCurrency: { name: "RBTC", symbol: "RBTC", decimals: 18 },
+              rpcUrls: { default: { http: [cfg.chain.rpcUrl] } },
+              contracts: { multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" } },
+            }),
+            batch: { multicall: { wait: 16 } },
+          }
+        : {}),
       // Primary first; an error, timeout or 429 moves the call to the next endpoint.
       transport:
         (cfg.rpcFallbackUrls ?? []).length > 0

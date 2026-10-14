@@ -214,6 +214,8 @@ export class FillerDO extends DurableObject<Env> {
    * of its tick, so the new one loads exactly that. Readers (/status) take whatever
    * engine exists — never a second instance with its own in-memory state.
    */
+  private lastProbeAt: number | undefined;
+
   private getEngine(rebuildIfStale = false): Promise<Engine> {
     const ws = this.ws;
     const want = ws?.dryRun;
@@ -344,8 +346,13 @@ export class FillerDO extends DurableObject<Env> {
       const deadline = Date.now() + wcfg.tickBudgetMs;
       const canContinue = () =>
         !ws.paused && Date.now() < deadline && this.meter.used + wcfg.subrequestsPerOrder <= wcfg.maxSubrequestsPerTick;
+      // RPC health probe: once per ~block (30 s), not every 5 s tick — it was the single
+      // largest constant load on the endpoint (12 calls/min while the filler idles).
       try {
-        await engine.chain.pub.getBlockNumber();
+        if (this.lastProbeAt === undefined || Date.now() - this.lastProbeAt >= wcfg.rpcProbeMs) {
+          await engine.chain.pub.getBlockNumber();
+          this.lastProbeAt = Date.now();
+        }
       } catch (e) {
         ws.rpcErrorStreak++;
         summary.errors.push(`rpc: ${errMsg(e)}`);

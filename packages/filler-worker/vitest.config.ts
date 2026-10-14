@@ -28,6 +28,11 @@ export default defineConfig({
                 SUSHI_ENABLED: "0",
                 DRY_RUN: "0",
                 RPC_URL: "http://rpc.invalid",
+                // The fakes answer one eth_call at a time, from one endpoint, every tick.
+                RPC_MULTICALL: "0",
+                RPC_FALLBACK_URLS: "",
+                RPC_PROBE_SECONDS: "0",
+                GAS_PRICE_TTL_MS: "10000",
                 // The book's binding key: fills are reported to the (fake) book's /fills/report.
                 ORDERBOOK_BINDING_KEY: "test-book-key",
                 // Idle alarms far out, so no test DO ticks in the background against

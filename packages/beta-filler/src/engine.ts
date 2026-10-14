@@ -157,7 +157,7 @@ export class Engine {
     // ONE send gas price (latest block minimumGasPrice × GAS_PRICE_MIN_MULT_BPS,
     // eth_gasPrice without one) per ~10 s for every strategy and the rebalancer: the
     // gates, the budget and the signed tx all read it through chain.pub.getGasPrice().
-    const chain = withSendGasPrice(o.chain, { multBps: cfg.gas.minGasPriceMultBps, now: this.now, log });
+    const chain = withSendGasPrice(o.chain, { multBps: cfg.gas.minGasPriceMultBps, now: this.now, log, ttlMs: cfg.gasPriceTtlMs });
     this.chain = chain;
     const mark = () => {
       this.dirty = true;

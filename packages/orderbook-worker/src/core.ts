@@ -821,7 +821,10 @@ export class OrderBookCore {
   }
 
   private redact(text: string): string {
-    return redactRpcUrl(text, this.cfg.chain.rpcUrl);
+    // The primary AND every fallback (a keyed fallback secret must not leak either).
+    let out = redactRpcUrl(text, this.cfg.chain.rpcUrl);
+    for (const u of this.cfg.rpcFallbackUrls ?? []) out = redactRpcUrl(out, u);
+    return out;
   }
 
   // ──────────────────── maintenance (the alarm) ────────────────────

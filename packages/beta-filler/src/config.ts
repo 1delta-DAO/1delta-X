@@ -260,6 +260,14 @@ export interface Config {
    * every quote waited 10–30 s for a 422).
    */
   rpcFallbackUrls: string[];
+  /**
+   * Merge concurrent `eth_call` reads into one Multicall3 `aggregate3` call (viem client
+   * batching; `RPC_MULTICALL=1`). Reads with a sender (simulations, previews as the solver)
+   * are never merged. Off in code (tests answer per-call), on in production.
+   */
+  rpcMulticall: boolean;
+  /** Send-gas-price cache, ms (`GAS_PRICE_TTL_MS`, default 10 s; production ~one 30 s block). */
+  gasPriceTtlMs: number;
   /** Where {@link rpcUrl} came from: the `RPC_URL_SECRET` secret wins over `RPC_URL`. */
   rpcSource: "RPC_URL_SECRET" | "RPC_URL" | "default";
   privateKey: Hex;
@@ -713,7 +721,11 @@ export function loadConfig(env: Env): Config {
     chainId: posNum(env, "CHAIN_ID", ROOTSTOCK.chainId),
     rpcUrl: rpcSecret || rpcVar || ROOTSTOCK.rpcUrl,
     rpcTimeoutMs: posNum(env, "RPC_TIMEOUT_MS", 10_000),
-    rpcFallbackUrls: (env.RPC_FALLBACK_URLS ?? "")
+    rpcMulticall: (env.RPC_MULTICALL ?? "") === "1",
+    gasPriceTtlMs: posNum(env, "GAS_PRICE_TTL_MS", 10_000),
+    // RPC_FALLBACK_URLS_SECRET (a keyed endpoint, never in a committed file) goes first.
+    rpcFallbackUrls: [env.RPC_FALLBACK_URLS_SECRET ?? "", env.RPC_FALLBACK_URLS ?? ""]
+      .join(",")
       .split(",")
       .map((u) => u.trim())
       .filter((u) => /^https?:\/\//.test(u)),
