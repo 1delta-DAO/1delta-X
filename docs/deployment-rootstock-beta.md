@@ -49,6 +49,21 @@ so its spread stays on `0x48dbdC43…32F1` (no per-fill payout transfer: −5.2k
 `cast send 0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1 'sweep(address,address,uint256)' <token> <to> <amount>`.
 Leave one wei of each token behind — the solver's balance floor keeps the slot warm.
 
+## NativeUnwrapModule (2026-10-14, commit 8001ccc) — task 28, RBTC receipts
+
+Plain CREATE from the same deployer (nonce 5), `make deploy-native-unwrap`, profile
+`modules-transfer-deploy` (Cancun, runs 20,000), tx
+`0xe5f7fc5e4371ca2b9068aa4c75ca404d1c400a7a53985538b6c7133757a31439` (block 9,324,838,
+405,258 gas at 26,065,600 wei = 0.0000105633 RBTC). Blockscout: verified.
+
+| contract | address | constructor |
+| --- | --- | --- |
+| NativeUnwrapModule | `0xB6107a1DEa7Ae04129aBc27ce607249049f3C735` | weth = WRBTC `0x542fDA317318eBF1d3DEAf76E0b632741A7e677d`, settlement = Settlement |
+
+Read back: `WETH()` = WRBTC, `SETTLEMENT()` = Settlement, runtime 1,633 B. Stateless, no
+owner. Order shape and fork proof: tasks/28 and
+`packages/modules/transfer/test/fork/NativeUnwrapRootstock.fork.t.sol`.
+
 ## Read back on mainnet (2026-10-09)
 
 Settlement `PERMIT3()` = Permit3; lens `SETTLEMENT()` and `CHECKS()` as above; solver

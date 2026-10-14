@@ -1,6 +1,6 @@
 # 28. App: receive native RBTC from a fill (in-fill unwrap)
 
-- **Status:** open — steps 1–2 READY (2026-10-14): deploy script + Rootstock fork check pass; broadcast pending the owner
+- **Status:** open: steps 1–2 DONE (2026-10-14). The module is DEPLOYED at `0xB6107a1DEa7Ae04129aBc27ce607249049f3C735` (verified; docs/deployment-rootstock-beta.md). Still to do: steps 3–4 (app + filler) and the first live smoke fill.
 - **Layer:** contracts (deploy) + app + filler
 - **Package:** `packages/modules/transfer` (`NativeUnwrapModule`), `packages/app`, `packages/beta-filler`
 - **Severity:** feature — UX
