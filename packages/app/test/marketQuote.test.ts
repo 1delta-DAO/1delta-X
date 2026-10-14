@@ -83,6 +83,18 @@ function ladder(mid: number, side: "sell" | "buy", amount: number) {
 }
 
 describe("parseQuote: a quote the app cannot trust is no quote", () => {
+  it("`auto` against a filler that predates it (400 on delivery): asks again for direct", async () => {
+    const bodies: string[] = [];
+    const doFetch = async (_u: string, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return JSON.parse(String(init?.body)).delivery === "auto"
+        ? new Response(JSON.stringify({ error: 'delivery must be "direct" or "pull"' }), { status: 400 })
+        : new Response(JSON.stringify({ ...sellJson(), validUntil: Math.floor(Date.now() / 1000) + 30 }), { status: 200 });
+    };
+    const q = await fetchQuote(doFetch, "/q", { ...sellReq, delivery: "auto" });
+    expect(q.delivery).toBe("direct");
+    expect(bodies.map((b) => JSON.parse(b).delivery)).toEqual(["auto", "direct"]);
+  });
   it("an `auto` request takes whichever delivery the filler names (the RIF rail answers pull)", () => {
     expect(parseQuote(sellJson({ delivery: "pull", strategy: "inventory", route: { source: "moc-rail" } }), { ...sellReq, delivery: "auto" }, NOW)).toMatchObject({ delivery: "pull", source: "moc-rail" });
     expect(parseQuote(sellJson(), { ...sellReq, delivery: "auto" }, NOW).delivery).toBe("direct");

@@ -215,8 +215,23 @@ function parsePath(raw: unknown): { path: NonNullable<FillerQuote["path"]> } | u
 
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
-/** POST the request; a parsed, checked quote — or a {@link QuoteError} (status 0 = network / bad answer). */
+/**
+ * POST the request; a parsed, checked quote — or a {@link QuoteError} (status 0 = network / bad answer).
+ * A filler that predates `auto` delivery answers it 400: then ask again for `direct` (the
+ * app and the filler deploy separately).
+ */
 export async function fetchQuote(doFetch: FetchLike, url: string, req: QuoteRequest, signal?: AbortSignal): Promise<FillerQuote> {
+  try {
+    return await fetchQuoteOnce(doFetch, url, req, signal);
+  } catch (e) {
+    if (req.delivery === "auto" && e instanceof QuoteError && e.status === 400 && /delivery/.test(e.message)) {
+      return fetchQuoteOnce(doFetch, url, { ...req, delivery: "direct" }, signal);
+    }
+    throw e;
+  }
+}
+
+async function fetchQuoteOnce(doFetch: FetchLike, url: string, req: QuoteRequest, signal?: AbortSignal): Promise<FillerQuote> {
   const body = JSON.stringify({
     chainId: req.chainId,
     // Tokens only: the pair is whatever the user picked, and a derived (routed) market
