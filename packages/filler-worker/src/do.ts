@@ -628,7 +628,12 @@ export class FillerDO extends DurableObject<Env> {
         // The route strategy's pool graph; `?refresh=1` re-discovers it first (~3 eth_calls).
         const engine = await this.getEngine();
         if (!engine.route) return json({ error: "route strategy off" }, 404);
-        if (url.searchParams.get("refresh") === "1") await engine.route.ensureGraph(true);
+        if (url.searchParams.get("refresh") === "1") {
+          // The venues are read at the route strategy's first use: an idle filler (no
+          // orders) has not done that yet, and a refresh before it would be a no-op.
+          await engine.route.init();
+          await engine.route.ensureGraph(true);
+        }
         return json(engine.route.poolsReport((a) => symbolOfAddress(a)));
       }
       return json({ error: "not found" }, 404);
