@@ -282,6 +282,14 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .cta:disabled { opacity: .25; cursor: not-allowed; }
 .cta.line { background: none; border: 1px solid var(--line2); color: var(--ink); }
 .cta.ok { background: none; border: 1px solid var(--lime); color: var(--lime); cursor: default; }
+/* A funding step on ONE line: label (ellipsized if it must), "1/2" badge, info icon. */
+.cta .ctarow { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
+.cta .ctatext { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.cta .ctastep {
+  flex: none; padding: 1px 6px; border: 1px solid var(--line2); border-radius: 999px;
+  font-size: 10px; letter-spacing: .04em; color: var(--dim);
+}
+.cta .info { flex: none; text-transform: none; letter-spacing: 0; }
 
 .gas { text-align: center; font-family: var(--mono); font-size: 11px; color: var(--dim); }
 .gas b { color: var(--lime); }
