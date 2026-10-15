@@ -18,6 +18,10 @@
  *   PRICE_PCT owed output as % of the live route quote (default 50 — anvil prices gas at 1 gwei)
  *   NATIVE_OUT 1 = receive raw RBTC: the WRBTC leg to NATIVE_UNWRAP (the module) + its MAKE
  *             item, pull delivery — the app's lib/order.ts `nativeOut` shape (task 28)
+ *   NATIVE_BALANCE <addr> = receive raw RBTC through the `NativeBalance` view (task 30): a
+ *             DIRECT order whose leg 0 names the view instead of WRBTC — the app's
+ *             `nativeOut: { nativeBalance }` shape. Needs MODE=direct and TOKEN_OUT=WRBTC
+ *             (the route still ends in WRBTC; the solver unwraps and sends).
  */
 import { writeFileSync } from "node:fs";
 
@@ -140,15 +144,19 @@ const owed = (result[0] * pricePct) / 100n;
 const nativeOut = env("NATIVE_OUT", "0") === "1";
 const nativeModule = nativeOut ? getAddress(env("NATIVE_UNWRAP", ROOTSTOCK.nativeUnwrap)) : zeroAddress;
 if (nativeOut && (mode === "direct" || tOut.address.toLowerCase() !== ROOTSTOCK.wrbtc.toLowerCase())) throw new Error("NATIVE_OUT needs MODE=pull and TOKEN_OUT=WRBTC");
+const nativeView = process.env.NATIVE_BALANCE ? getAddress(process.env.NATIVE_BALANCE) : undefined;
+if (nativeView && (mode !== "direct" || nativeOut || tOut.address.toLowerCase() !== ROOTSTOCK.wrbtc.toLowerCase())) {
+  throw new Error("NATIVE_BALANCE needs MODE=direct, TOKEN_OUT=WRBTC and no NATIVE_OUT");
+}
 const direct = mode === "direct";
-const clock = nativeOut ? withItemPolicy(withFillOnce(packTiming(0, 0, 0)), ItemPolicy.CANONICAL) : withFillOnce(packTiming(0, 0, 0));
+const clock = nativeOut ? withItemPolicy(withFillOnce(packTiming(0, 0, 0)), ItemPolicy.ORDERED) : withFillOnce(packTiming(0, 0, 0));
 const order: Order = {
   maker: maker.address,
   side: OrderSide.SELL,
   nonce,
   expiry: now + 3600n,
   legsIn: [{ token: tIn.address, start: amountIn, end: 0n }],
-  legsOut: [{ token: tOut.address, start: owed, end: 0n, recipient: nativeOut ? nativeModule : zeroAddress }],
+  legsOut: [{ token: nativeView ?? tOut.address, start: owed, end: 0n, recipient: nativeOut ? nativeModule : zeroAddress }],
   timing: direct ? withDeltaVerifyOutputs(clock) : clock,
   exclusiveFiller: direct ? solver : zeroAddress,
   minFillAnchor: 0n,

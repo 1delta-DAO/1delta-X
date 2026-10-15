@@ -1,6 +1,6 @@
 # 16. Solver: the live `amountOutOffset` patch writes `pricedOut[0]`, not the anchor output leg
 
-- **Status:** open
+- **Status:** fixed in the tree (2026-10-14, branch `zero-capital-item-fills`): the exact-output word is the anchor leg's price (`pricedOut[0]` on direct orders, the sum of the anchor-token legs on pull orders); pinned by `AggregatorPatchAndItemGuards.t.sol`. Ships with the solver v3 deploy.
 - **Layer:** contract
 - **Package:** `packages/solvers` (`AggregatorFillSolver.sol`)
 - **Severity:** low — revert only, no funds; needs a solver redeploy

@@ -312,12 +312,13 @@ contract Review20261006LensTest is MockSettlementBase {
 
     // ═══════════ ACCEPTED-PATTERNS-REVIEW B8: late TAKE on an input-leg token ═══════════
     //
-    // A TAKE that credits an input leg, signed below CANONICAL, lets any `matchSettle`
-    // caller PULL that leg first — the maker's Permit3 allowance is spent twice for
-    // one fill. The core behaviour is pinned in
+    // A TAKE that credits an input leg, signed at ANY, lets any `matchSettle` caller
+    // PULL that leg first — the maker's Permit3 allowance is spent twice for one fill.
+    // Since task 31 (2026-10-14) ORDERED and ATOMIC refuse that PULL too (it waits for
+    // the order's non-MAKE items), so only ANY is flagged. The core behaviour is pinned in
     // `AggregatorAmountMismatch.t.sol::test_S2_lateTakeOnInputToken_burnsTheMakerAllowance`.
 
-    string constant B8_WHY = "input-funding TAKE needs ItemPolicy.CANONICAL (late TAKE spends the allowance twice)";
+    string constant B8_WHY = "input-funding TAKE needs ItemPolicy.ORDERED or stricter (late TAKE spends the allowance twice)";
 
     /// SELL tA for tB; one TAKE whose proceeds (`asset`) go to `to`, signed at `policy`.
     function _b8Order(uint256 nonce, address asset, address to, uint256 policy) internal returns (Order memory o) {
@@ -328,15 +329,15 @@ contract Review20261006LensTest is MockSettlementBase {
         o.timing = ItemPolicy.pack(o.timing, policy);
     }
 
-    function test_B8_inputFundingTake_belowCanonical_flagged() public {
+    function test_B8_inputFundingTake_atAny_flagged() public {
         _assertFlag(_b8Order(40, address(tA), address(0), ItemPolicy.ANY), B8_WHY);
         _assertFlag(_b8Order(41, address(tA), address(settlement), ItemPolicy.ANY), B8_WHY);
-        // ORDERED / ATOMIC order the items among themselves; the PULL stays free.
-        _assertFlag(_b8Order(42, address(tA), address(0), ItemPolicy.ORDERED), B8_WHY);
-        _assertFlag(_b8Order(43, address(tA), address(0), ItemPolicy.ATOMIC), B8_WHY);
     }
 
-    function test_B8_inputFundingTake_canonical_passes() public {
+    /// ORDERED / ATOMIC carry the PULL rule since task 31; CANONICAL always did.
+    function test_B8_inputFundingTake_orderedOrStricter_passes() public {
+        _assertOk(_b8Order(42, address(tA), address(0), ItemPolicy.ORDERED), "ordered");
+        _assertOk(_b8Order(43, address(tA), address(0), ItemPolicy.ATOMIC), "atomic");
         _assertOk(_b8Order(44, address(tA), address(0), ItemPolicy.CANONICAL), "canonical");
     }
 
@@ -365,10 +366,13 @@ contract Review20261006LensTest is MockSettlementBase {
         _assertOk(_plainOrder(49, address(tA), address(tB), IN_, OUT_), "no items");
     }
 
-    /// TAKE_FOR is exempt: `matchSettle` refuses any order carrying one, so no
-    /// schedule can put a PULL ahead of it.
-    function test_B8_takeFor_notFlagged() public view {
+    /// TAKE_FOR is no longer exempt (task 31): `matchSettle` admits it, so a schedule
+    /// can put a PULL ahead of an input-funding TAKE_FOR exactly as ahead of a TAKE.
+    /// Flagged at ANY, clean at ORDERED.
+    function test_B8_takeFor_flaggedAtAny_cleanWhenOrdered() public view {
         (Order memory o,) = _pullOrder(50);
-        _assertOk(o, "TAKE_FOR at ANY");
+        _assertFlag(o, B8_WHY);
+        o.timing = ItemPolicy.pack(o.timing, ItemPolicy.ORDERED);
+        _assertOk(o, "TAKE_FOR at ORDERED");
     }
 }

@@ -24,6 +24,7 @@ import {
 } from "@core/settlement/Settlement.sol";
 import {MinBalanceInvariant} from "@validators/MinBalanceInvariant.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
+import {MockDex, PresendSolver} from "./MatchSettleCoW.t.sol";
 
 /// @dev TAKE mock = a borrow/withdraw that DEFERS its own health check — it just
 ///      hands over `produce` of `token` (both in `data`) from its stash, with no
@@ -973,6 +974,97 @@ contract MatchSettleTest is CoreSettlementBase {
         settlement.matchSettle(p);
     }
 
+    // ──────────── ORDERED / ATOMIC carry the PULL half too (task 31) ────────────
+    //
+    // The allowance argument above needs only "no pull ahead of the item that funds
+    // the leg", not CANONICAL's whole forward shape. Since task 31 ORDERED and ATOMIC
+    // enforce exactly that half — a PULL waits for every non-MAKE item of its order —
+    // without waiting for the delivery, so a "sell out of a position" order keeps the
+    // protection AND fills with zero capital. That is why the SDK now defaults such an
+    // order to ORDERED rather than CANONICAL.
+
+    function test_itemPolicy_ordered_refusesPullAheadOfItem() public {
+        (Order memory spot, Order memory lev) = _pullFirstPair(ItemPolicy.ORDERED);
+        MatchPlan memory p = _two(spot, lev, makerPk, bobPk, _pullFirstSchedule());
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(Base.ItemPolicyViolated.selector, uint256(1), uint256(0)));
+        settlement.matchSettle(p);
+    }
+
+    function test_itemPolicy_atomic_refusesPullAheadOfItem() public {
+        (Order memory spot, Order memory lev) = _pullFirstPair(ItemPolicy.ATOMIC);
+        MatchPlan memory p = _two(spot, lev, makerPk, bobPk, _pullFirstSchedule());
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(Base.ItemPolicyViolated.selector, uint256(1), uint256(0)));
+        settlement.matchSettle(p);
+    }
+
+    /// @dev Withdraw-and-sell: Bob's USDC input is produced by a TAKE (proceeds to the
+    ///      pool), converted by a zero-inventory solver, and delivered as WETH.
+    function _withdrawAndSell(uint256 policy) internal returns (Order memory o) {
+        Item[] memory items = new Item[](1);
+        items[0] = Item({
+            op: ItemOp.TAKE, module: address(taker), amount: USDC_AMT, recipient: address(0), data: abi.encode(USDC, USDC_AMT)
+        });
+        o = _sellOrder(7, bob, USDC, WETH, USDC_AMT, WETH_AMT, items);
+        if (policy != ItemPolicy.ANY) o = _withPolicy(o, policy);
+        vm.prank(bob);
+        permit3.approveTaker(
+            address(settlement), address(taker), keccak256(abi.encode(USDC, USDC_AMT)), uint160(USDC_AMT), uint48(block.timestamp + 1 hours)
+        );
+        deal(USDC, address(taker), USDC_AMT);
+    }
+
+    function _sourceFirstPlan(Order memory o, PresendSolver ps) internal view returns (MatchPlan memory p) {
+        Order[] memory orders = new Order[](1);
+        orders[0] = o;
+        bytes[] memory sigs = new bytes[](1);
+        sigs[0] = _signAs(o, bobPk);
+        uint256[] memory fills = new uint256[](1);
+        fills[0] = USDC_AMT;
+        // Universe [USDC, WETH]: the TAKE funds the leg, the PULL is then a no-op,
+        // PRESEND hands the solver the USDC, CALL converts it, DELIVER pays Bob.
+        uint256[] memory s = new uint256[](5);
+        s[0] = _step(MatchStep.ITEM, 0, 0);
+        s[1] = _step(MatchStep.PULL, 0, 0);
+        s[2] = _step(MatchStep.PRESEND, 0, 0);
+        s[3] = _step(MatchStep.CALL, 0, 0);
+        s[4] = _step(MatchStep.DELIVER, 0, 0);
+        p = _plan(orders, sigs, fills, s);
+        p.callTargets = new address[](1);
+        p.callTargets[0] = address(ps);
+        p.callDatas = new bytes[](1);
+        p.callDatas[0] = abi.encodeCall(PresendSolver.swapAndCover, (USDC, USDC_AMT, WETH, WETH_AMT));
+    }
+
+    function test_itemPolicy_ordered_sourceOrderFillsWithZeroCapital() public {
+        MockDex dex = new MockDex();
+        PresendSolver ps = new PresendSolver(settlement, dex);
+        deal(WETH, address(dex), WETH_AMT);
+        Order memory o = _withdrawAndSell(ItemPolicy.ORDERED);
+        MatchPlan memory p = _sourceFirstPlan(o, ps);
+
+        ps.run(p);
+
+        assertEq(IERC20(WETH).balanceOf(bob), WETH_AMT, "Bob sold out of his position");
+        assertEq(IERC20(USDC).balanceOf(bob), 0, "his wallet funded nothing");
+        assertEq(IERC20(WETH).balanceOf(address(ps)), 0, "solver fronted nothing");
+    }
+
+    /// @dev The same plan under CANONICAL is refused at the TAKE: CANONICAL is the
+    ///      forward path's shape, so its items wait for a delivery the zero-capital
+    ///      plan can only fund with the very input the TAKE produces.
+    function test_itemPolicy_canonical_sourceOrderNeedsCapital() public {
+        MockDex dex = new MockDex();
+        PresendSolver ps = new PresendSolver(settlement, dex);
+        deal(WETH, address(dex), WETH_AMT);
+        Order memory o = _withdrawAndSell(ItemPolicy.CANONICAL);
+        MatchPlan memory p = _sourceFirstPlan(o, ps);
+
+        vm.expectRevert(abi.encodeWithSelector(Base.ItemPolicyViolated.selector, uint256(0), uint256(0)));
+        ps.run(p);
+    }
+
     // ──────────── live-state-sized items across two orders of one maker ────────────
 
     /// @dev DOCUMENTED BEHAVIOUR, not a settler defect — and the reason a maker with
@@ -1111,16 +1203,21 @@ contract MatchSettleTest is CoreSettlementBase {
 
     // ──────────────────── shape guards ────────────────────
 
-    // ── SETTLE routes to the filler, not the pool — rejected at open. ──
-    function test_settleItem_reverts() public {
+    // ── SETTLE is ADMITTED at open since task 31 (2026-10-14): it pays the filler,
+    //    which on this path is `msg.sender`, the party that owes the deliveries.
+    //    (It used to be refused here, which left every OCO bracket leg fillable only
+    //    with capital.) The plan passes Phase 1; with an empty schedule it then fails
+    //    the Phase-3 completeness check. The end-to-end SETTLE fill is pinned in
+    //    `MatchSettleDeliveryFunded.t.sol`. ──
+    function test_settleItem_admittedAtOpen() public {
         (Order memory a, Order memory b) = _cyclePair();
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.SETTLE, module: address(0x5E7), amount: 1, recipient: address(0), data: ""});
         b.items = PackedEncode.items(items);
 
-        MatchPlan memory p = _two(a, b, makerPk, bobPk, _cycleSchedule());
+        MatchPlan memory p = _two(a, b, makerPk, bobPk, new uint256[](0));
         vm.prank(solver);
-        vm.expectRevert(Base.MatchSettleItemUnsupported.selector);
+        vm.expectRevert(abi.encodeWithSelector(Base.PlanIncomplete.selector, uint256(0)));
         settlement.matchSettle(p);
     }
 

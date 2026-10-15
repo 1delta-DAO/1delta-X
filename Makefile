@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill simulate-native-unwrap deploy-native-unwrap size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill deploy-native-delivery simulate-native-unwrap deploy-native-unwrap size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── CI matrix source ──────────────────────────────────────────────────────────
 
@@ -413,6 +413,13 @@ deploy-aggregator-fill:
 	@test -n "$$SETTLEMENT" || { echo "SETTLEMENT (env) is required"; exit 1; }
 	FOUNDRY_PROFILE=solvers-deploy $(FORGE) script $(AGG_DEPLOY_SCRIPT) \
 		--rpc-url $(RPC) --broadcast $(DEPLOY_ARGS) $(VERIFY_ARGS)
+
+## Native RBTC delivery (task 30): `NativeBalance` + `AggregatorFillSolver` v3 in ONE
+## `forge script` run, signed with a Foundry keystore (ACCOUNT, default `deployer`).
+## Preflight + simulation against the live chain by default; BROADCAST=1 then deploys
+## after a typed "yes" (forge prompts for the keystore password). See the script header.
+deploy-native-delivery:
+	packages/solvers/script/deploy-native-delivery.sh $(if $(BROADCAST),--broadcast,)
 
 ## The whole solvers suite against the DEPLOYED AggregatorFillSolver bytecode (the
 ## `solvers-deploy` profile: via-IR, Cancun, runs 1e6). The suite itself compiles under

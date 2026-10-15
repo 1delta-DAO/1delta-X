@@ -425,15 +425,17 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(r.ok && [r.quote.strategy, r.quote.delivery]).toEqual(["route", "direct"]);
   });
 
-  it("native-out (task 28): no strategy can fill it yet, so it is never quoted (the app then never signs it)", async () => {
-    const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1" });
+  it("native-out (task 30): never quoted while NATIVE_BALANCE is off (the app then never signs it), never on pull", async () => {
+    // "" = off explicitly: unset now means the SDK's deployed chain-30 view (2026-10-15).
+    const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1", NATIVE_BALANCE: "" });
     const { chain } = fake();
     const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
     const req = sellReq({ tokenIn: USDT0, tokenOut: WRBTC, amountIn: 500_000_000n, side: "buy" });
     expect((await e.quote(req)).ok).toBe(true);
-    const native = await e.quote({ ...req, nativeOut: true });
-    expect(native.ok).toBe(false);
-    if (!native.ok) expect(native.reason).toMatch(/pre-funded MAKE/);
+    const native = await e.quote({ ...req, delivery: "direct", nativeOut: true });
+    expect(!native.ok && native.reason).toMatch(/NATIVE_BALANCE unset/);
+    const pull = await e.quote({ ...req, nativeOut: true });
+    expect(!pull.ok && pull.reason).toMatch(/DIRECT only/);
   });
 
   it("inventory refuses what it could not fill (wallet balance): the route quote stands", async () => {

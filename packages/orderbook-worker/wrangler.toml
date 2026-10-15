@@ -65,6 +65,10 @@ OCO_MODULES = ""
 # them). Leg tokens outside this list are 422; without WRBTC
 # and WETH every route-market order was refused, and without RIF every RIF order.
 ALLOWED_TOKENS = "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37,0x779ded0c9e1022225f8e0630b35a9b54be713736,0x542fda317318ebf1d3deaf76e0b632741a7e677d,0x2f6f07cdcf3588944bf4c42ac74ff24bf56e7590,0x2acc95758f8b5f583470ba265eb685a8f45fc9d5,0xaf368c91793cb22739386dfcbbb2f1a9e4bcbebf,0x74c9f2b00581f1b11aa7ff05aa9f608b7389de67,0xf4d27c56595ed59b66cc7f03cff5193e4bd74a61"
+# NATIVE_BALANCE (task 30): the NativeBalance view an order names as its DIRECT output token
+# to receive raw RBTC (deployed 2026-10-15). It is added to ALLOWED_TOKENS and only ever
+# admitted as legsOut[0] of a delta-verify order naming a filler (never an input / pull).
+NATIVE_BALANCE = "0xA45ec37619C9F9B2f9d54692d578D1b1246c854c"
 # 1000 = the beta filler's intake window (INTAKE_MAX_PAGES 2 × INTAKE_PAGE_SIZE 500 in
 # packages/filler-worker/wrangler.toml): every order this book holds is one the filler
 # sees. Raise both together.

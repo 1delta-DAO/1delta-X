@@ -106,6 +106,8 @@ export interface RestingOrder {
   expiresAt: number;
   /** True when this account signed it — drives the "you" marker in the ladder. */
   mine: boolean;
+  /** The order receives the RAW native coin (a NativeBalance output leg): shown as RBTC, not WRBTC. */
+  native?: boolean;
   /**
    * The EIP-712 artefact behind this row. Present for orders this account
    * signed; the seeded book has none, because nobody signed those.
@@ -190,6 +192,8 @@ export interface Fill {
   /** The order this entry belongs to (struct hash), when known. */
   orderHash?: string;
   orderType?: OrderType;
+  /** The order received the RAW native coin (a NativeBalance output leg): shown as RBTC, not WRBTC. */
+  native?: boolean;
   /**
    * What this entry says about its order: a fill that completed it ("filled"),
    * one that left some open ("partial"), or the order's end without (more) fill —

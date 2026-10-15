@@ -970,14 +970,16 @@ contract SettlementLensChecks {
         // whose proceeds credit an INPUT leg lets a permissionless `matchSettle`
         // schedule that leg's PULL first. {Batch._stepPull} then draws the whole leg
         // from the maker's wallet, the late TAKE credits it again and Phase 3 refunds
-        // the tokens — but not the Permit3 ALLOWANCE the first draw spent. Only
-        // {ItemPolicy.CANONICAL} orders PULL after the item group; ORDERED/ATOMIC
-        // order the items among themselves and leave the PULL free. Plain TAKE only:
-        // `matchSettle` refuses any order carrying a TAKE_FOR. `got != 0` here already
-        // means "an input-leg token" (the rule above returned otherwise), so an item
-        // routed to the maker (borrow after deposit) or a silent module never trips it.
-        if (got != address(0) && op == uint256(ItemOp.TAKE) && order.itemPolicy() < ItemPolicy.CANONICAL) {
-            return (false, "input-funding TAKE needs ItemPolicy.CANONICAL (late TAKE spends the allowance twice)", nxt);
+        // the tokens — but not the Permit3 ALLOWANCE the first draw spent. Since task 31
+        // (2026-10-14) every policy above ANY refuses that PULL: ORDERED and ATOMIC make
+        // a PULL wait for the order's non-MAKE items, CANONICAL for everything. ORDERED
+        // is the one to sign — CANONICAL also forces the forward shape, which needs
+        // filler capital. TAKE_FOR counts too: `matchSettle` admits it now. `got != 0`
+        // here already means "an input-leg token" (the rule above returned otherwise),
+        // so an item routed to the maker (borrow after deposit) or a silent module never
+        // trips it.
+        if (got != address(0) && order.itemPolicy() == ItemPolicy.ANY) {
+            return (false, "input-funding TAKE needs ItemPolicy.ORDERED or stricter (late TAKE spends the allowance twice)", nxt);
         }
         return (true, "", nxt);
     }

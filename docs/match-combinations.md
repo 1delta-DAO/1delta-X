@@ -83,17 +83,18 @@ refuses outright. The catalogue below is the **row and column set** of the matri
 | `BUY_FIXED` | fixed in → fixed out | **BUY** | the denominator moves to `legsOut[0]`; outputs cumulate, inputs floor |
 | `BUY_RISING` | **rising** in → fixed out | **BUY** | both the auction and the exact-output guarantee at once |
 
-### The four refusals
+### The refusals
 
 Not rows, because the settler rejects them before any of this applies. Each is
 pinned in [`MatchSettle.t.sol`](../packages/core/test/swaps/MatchSettle.t.sol) /
-[`MatchSettleGates.t.sol`](../packages/core/test/swaps/MatchSettleGates.t.sol)
+[`MatchSettleGates.t.sol`](../packages/core/test/swaps/MatchSettleGates.t.sol) /
+[`TakeForItem.t.sol`](../packages/core/test/items/TakeForItem.t.sol)
 rather than duplicated in the matrix.
 
 | Refused | Error | Why |
 | --- | --- | --- |
-| a `SETTLE` item | `MatchSettleItemUnsupported` | routes the maker's asset to the **filler**, not the pool — the netted accounting has no entry for it |
-| a `TAKE_FOR` item | `MatchSettleItemUnsupported` | its value-IN leg resolves **at item time**, and the netted engine schedules `ITEM` and `DELIVER` independently — so the ordering that makes the resolution deterministic would become the filler's choice. See [§2.1](#21-why-take_for-in-particular-stays-out) |
+| a `TAKE_FOR` item in the **BALANCE** funding form | `MatchSettleItemUnsupported` | it resolves `min(balanceOf(token, maker), cap)` **at item time**, and the netted engine schedules `ITEM` and `DELIVER` independently — so what the wallet holds when it is read would become the filler's choice. See [§2.1](#21-why-the-balance-form-of-take_for-stays-out) |
+| an item op above the enum | `MatchSettleItemUnsupported` | a malformed record |
 | a repeated input token in one order | `MatchDuplicateInput` | item proceeds are attributed per token per step window, so a duplicate leg would double-count one arrival |
 | delta-verified outputs | `DeltaVerifyNotBatchable` | needs a per-order callback and a recipient snapshot the PRESEND/DELIVER flow does not have — refused rather than delivered nominally |
 
@@ -104,7 +105,15 @@ Settlement itself is refused mid-schedule (`OutputToSettlement`) — on the nett
 path it would be a self-transfer that discharges the obligation while leaving the
 money above the pre-context floor, i.e. a gift to the filler.
 
-### 2.1 Why `TAKE_FOR` in particular stays out
+### 2.1 Why the BALANCE form of `TAKE_FOR` stays out
+
+> **Update, task 31 (2026-10-14).** `SETTLE`, the pre-funded `MAKE` and `TAKE_FOR` in
+> the LITERAL and LEG-reference forms are now ADMITTED (they used to be refused with
+> `SETTLE`, keyed on the op). The narrowing below was done the way this section asked:
+> by descriptor FORM, keeping the BALANCE form out. The leg-reference form's "can the
+> maker fund it yet" question became structural: `_stepDeliver` writes the order's
+> delivery ledger, and a leg reference read before it fails closed. See
+> [fill-ordering-capital-plan.md](fill-ordering-capital-plan.md).
 
 Worth its own section, because the reason is stronger than "the ordering is
 inconvenient" and the guard should not be relaxed on the weaker reading.
@@ -136,18 +145,14 @@ made filler-controllable, and **`ForBalanceEmpty` does not close it**: that guar
 catches a resolved *zero*, so a maker holding one wei pre-delivery passes it and ends
 up near-totally under-collateralised.
 
-The LEG-reference form is benign by comparison — if the pull succeeds the end state
-is identical whichever order the steps ran in, and if the maker cannot fund it yet
-the fill simply reverts. The LITERAL form is schedule-independent outright. Both are
-refused anyway, because the guard keys on the **op**, not on a descriptor it would
-have to decode.
-
-> **If this is ever narrowed**, it must discriminate by descriptor *form*, not by op,
-> and the BALANCE form must stay out. Pinned per form by
-> `TakeForItem:test_matchSettle_refusesTakeFor_{literal,legRef,balance}Form`, plus
-> `..._pairedWithAPlainOrder` for the per-order property — the refusal fires in
-> Phase 1, so nothing half-settles and the plain order in the same plan does not fill
-> either.
+The LEG-reference form is benign by comparison: it reads the delivery ledger, so
+scheduled before its DELIVER it fails closed and after it the end state is the
+forward path's. The LITERAL form is schedule-independent outright. Both are admitted
+since task 31; the guard discriminates by descriptor form. Pinned by
+`TakeForItem:test_matchSettle_takeFor_{legRefForm_fillsAfterItsDelivery,literalForm_fills,legRefForm_beforeDelivery_failsClosed}`
+and `test_matchSettle_refusesTakeFor_balanceForm{,_pairedWithAPlainOrder}` — the
+balance-form refusal fires in Phase 1, so nothing half-settles and the plain order in
+the same plan does not fill either.
 
 `PROPORTIONAL` is matchable but **full-fill only**
 (`ProportionalNeedsFullFill`): a balance-derived denominator moves between fills,
@@ -255,8 +260,11 @@ Five configurations, each attachable to any shape
 | `MAKE` | one `MAKE` pulling the maker's funds into their position | value leaving the wallet under the maker's own signature |
 | `MAKE_THEN_TAKE` | both | the per-item progress bits, and a schedule that runs item 1 before item 0 |
 
-`SETTLE` and `TAKE_FOR` are not configurations because `matchSettle` refuses them
-([§2](#the-four-refusals)).
+`SETTLE`, `TAKE_FOR` and the pre-funded `MAKE` are not configurations of this matrix
+(they were refused when it was built). Since task 31 they are admitted; their
+netted-path behaviour is pinned in
+[`MatchSettleDeliveryFunded.t.sol`](../packages/core/test/swaps/MatchSettleDeliveryFunded.t.sol),
+`TakeForItem.t.sol` and the schedule-fuzzed invariant walk.
 
 ### N1 — item configuration × order shape
 

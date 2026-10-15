@@ -284,9 +284,13 @@ and the order signature is the authorization. The caller pin is `msg.sender ==
 settlement`, asserted by the EVM rather than carried in a forwarded `spender` word.
 Measured against the composite shape it used to wear: **860,684 → 820,877 gas**.
 
-`matchSettle` refuses a pre-funded `MAKE` for the same reason it refuses `TAKE_FOR`:
-it schedules deliveries and items independently, so "the delivery landed before the
-item ran" would become a solver obligation rather than a structural fact.
+`matchSettle` admits a pre-funded `MAKE` since task 31 (2026-10-14). It schedules
+deliveries and items independently, so "the delivery landed before the item ran" is
+enforced by the ledger rather than by the ordering: `_stepDeliver` writes the order's
+`FillCtx.outs` only when it delivers, and a leg reference read before that finds it
+empty and fails closed (`ForLegInvalid`). That is what lets a zero-capital solver
+fill swap→supply, swap→repay and native-out with `PULL → PRESEND → CALL → DELIVER →
+ITEM` (see [fill-ordering-capital-plan.md](fill-ordering-capital-plan.md)).
 
 For a **composite**, Settlement calls `PERMIT3.takeFor(module, maker, amount,
 forAmount, receiver, data)`, which gates `amount` against the **identical**

@@ -143,13 +143,14 @@ contract ItemOpRangeTest is CoreSettlementBase {
 
     // ──────────────── netted path: the shape guard ────────────────
 
-    /// `matchSettle` refuses every op at or above SETTLE. TAKE_FOR (3) is a real,
-    /// dispatchable op on the single-order path but is refused here: its funding leg
-    /// is usually an output leg the maker must already have RECEIVED, and this path
-    /// schedules deliveries and items independently.
-    function test_matchSettle_rejectsTakeForOp() public {
+    /// `matchSettle` refuses only ops ABOVE the enum. TAKE_FOR (3) and SETTLE (2) used
+    /// to be refused here too; since task 31 (2026-10-14) both pass the shape guard —
+    /// a delivery-funded item is kept behind its order's DELIVER by the ledger
+    /// `_stepDeliver` writes, not by refusing the op. Proven by the plan getting PAST
+    /// Phase 1: with an empty schedule it fails at the Phase-3 completeness check.
+    function test_matchSettle_admitsTakeForOp_pastTheShapeGuard() public {
         Order memory o = _orderWithRawOp(5, uint8(ItemOp.TAKE_FOR));
-        _expectMatchSettleRejection(o);
+        _expectPastShapeGuard(o);
     }
 
     /// And an op past the enum is refused at the same guard, in PHASE 1 — the
@@ -159,12 +160,39 @@ contract ItemOpRangeTest is CoreSettlementBase {
         _expectMatchSettleRejection(o);
     }
 
-    function test_matchSettle_rejectsSettleOp() public {
+    function test_matchSettle_admitsSettleOp_pastTheShapeGuard() public {
         Order memory o = _orderWithRawOp(6, uint8(ItemOp.SETTLE));
-        _expectMatchSettleRejection(o);
+        _expectPastShapeGuard(o);
     }
 
-    /// @dev Both cases must fail at `_assertMatchShape` — i.e. in PHASE 1, before
+    /// @dev Phase 1 accepted the order; the empty schedule then trips Phase 3.
+    function _expectPastShapeGuard(Order memory o) internal {
+        MatchPlan memory p = _emptyPlan(o); // built first: `_sign` would eat the prank
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(Base.PlanIncomplete.selector, uint256(0)));
+        settlement.matchSettle(p);
+    }
+
+    function _emptyPlan(Order memory o) internal view returns (MatchPlan memory) {
+        Order[] memory orders = new Order[](1);
+        orders[0] = o;
+        bytes[] memory sigs = new bytes[](1);
+        sigs[0] = _sign(o);
+        uint256[] memory fills = new uint256[](1);
+        fills[0] = PRICE;
+        return MatchPlan({
+            orders: orders,
+            sigs: sigs,
+            fillAmounts: fills,
+            takerDatas: new bytes[](0),
+            schedule: new uint256[](0),
+            callTargets: new address[](0),
+            callDatas: new bytes[](0),
+            profitRecipient: address(0)
+        });
+    }
+
+    /// @dev The rejection must fire at `_assertMatchShape` — i.e. in PHASE 1, before
     ///      any schedule step runs — so the plan carries no steps at all. A guard
     ///      that fired later would already have moved funds.
     function _expectMatchSettleRejection(Order memory o) internal {

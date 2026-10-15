@@ -6,9 +6,15 @@ import {Script, console} from "forge-std/Script.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 import {AggregatorFillSolver, SurplusPolicy, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 import {RouteSandbox} from "@solvers/aggregator/RouteSandbox.sol";
+import {NativeBalance} from "@periphery/NativeBalance.sol";
 
 interface IERC20Min {
     function transfer(address to, uint256 amount) external returns (bool);
+}
+
+interface INativeBalanceMin {
+    function balanceOf(address a) external view returns (uint256);
+    function decimals() external view returns (uint8);
 }
 
 interface IV3FactoryMin {
@@ -65,6 +71,18 @@ interface IV3FactoryMin {
 ///                          0x6d77…Fd71 — the script re-derives them after deploying).
 ///                          Unset elsewhere = no venues (pool routes off).
 ///    NO_POOL_VENUES        default false — true deploys with no venues even on 30.
+///    NATIVE_BALANCE        default 0x0 — the deployed `NativeBalance` view token
+///                          (packages/periphery/src/NativeBalance.sol) DIRECT orders
+///                          name to receive raw native coin (task 30, solver v3).
+///                          Unset = native delivery OFF (both immutables zero).
+///    DEPLOY_NATIVE_BALANCE default false — true deploys a fresh `NativeBalance` in the
+///                          same run, BEFORE the solver, and wires it in (so one run —
+///                          and one simulation — covers both). Refused together with
+///                          NATIVE_BALANCE.
+///    WNATIVE               the wrapped native such an order's route ends in. Default
+///                          on chain 30 when NATIVE_BALANCE is set: WRBTC
+///                          0x542fDA317318eBF1d3DEAf76E0b632741A7e677d. Elsewhere it
+///                          is REQUIRED with NATIVE_BALANCE, and refused without it.
 ///    FLOOR_TOKENS          optional, and NO LONGER NEEDED (2026-10) — comma list of
 ///                          tokens to pre-seed a 1-wei balance floor of on the
 ///                          SOLVER (the deployer must hold 1 wei of each). The
@@ -114,6 +132,8 @@ contract DeployAggregatorFill is Script {
             "PROTOCOL_RECIPIENT is required when PROTOCOL_SURPLUS_PPM != 0"
         );
         PoolVenue[] memory venues = _venues();
+        bool deployNative = vm.envOr("DEPLOY_NATIVE_BALANCE", false);
+        (address nativeBalance, address wnative) = deployNative ? _nativeToDeploy() : _native();
         address[] memory floorTokens = _addrList("FLOOR_TOKENS");
         for (uint256 i; i < floorTokens.length; i++) {
             require(floorTokens[i].code.length != 0, "a FLOOR_TOKENS entry has no code on this chain");
@@ -123,9 +143,13 @@ contract DeployAggregatorFill is Script {
         console.log("settlement      ", settlement);
         console.log("operators       ", operators.length);
         console.log("pool venues     ", venues.length);
+        if (deployNative) console.log("native balance   (deployed in this run)");
+        else console.log("native balance  ", nativeBalance);
+        console.log("wnative         ", wnative);
 
         vm.startBroadcast();
-        agg = new AggregatorFillSolver(settlement, operators, policy, venues);
+        if (deployNative) nativeBalance = address(new NativeBalance());
+        agg = new AggregatorFillSolver(settlement, operators, policy, venues, nativeBalance, wnative);
         // OPTIONAL pre-seed of the solver's balance floor: one wei per listed token,
         // so even the FIRST fill's inbound transfer rewrites a live slot. Without it
         // the solver keeps one wei of each token out of its own first fill of it.
@@ -138,6 +162,13 @@ contract DeployAggregatorFill is Script {
         console.log("RouteSandbox        ", address(agg.SANDBOX()));
         _assertDeployed(agg, settlement, operators, policy);
         _assertVenues(agg, venues);
+        if (deployNative) {
+            console.log("NativeBalance       ", nativeBalance);
+            _probeNative(nativeBalance);
+        }
+        (address nbDeployed, address wDeployed) = agg.nativeDelivery();
+        require(nbDeployed == nativeBalance, "NATIVE_BALANCE mismatch");
+        require(wDeployed == wnative, "WNATIVE mismatch");
         console.log("immutables verified");
     }
 
@@ -188,6 +219,43 @@ contract DeployAggregatorFill is Script {
             require(factories[i].code.length != 0, "a POOL_FACTORIES entry has no code on this chain");
             v[i] = PoolVenue({factory: factories[i], initCodeHash: hashes[i]});
         }
+    }
+
+    /// @dev The native-delivery pair (task 30): NATIVE_BALANCE / WNATIVE, both or
+    ///      neither (the constructor's {AggregatorFillSolver.BadNative}). The view token
+    ///      is probed — `balanceOf(x) == x.balance` and 18 decimals — so a wrong address
+    ///      fails HERE, not as a `DeltaTooLow` on the first native fill.
+    function _native() internal view returns (address nb, address w) {
+        nb = vm.envOr("NATIVE_BALANCE", address(0));
+        w = vm.envOr("WNATIVE", address(0));
+        if (nb == address(0)) {
+            require(w == address(0), "WNATIVE set without NATIVE_BALANCE");
+            return (nb, w);
+        }
+        if (w == address(0) && block.chainid == 30) w = RSK_WRBTC;
+        require(w != address(0), "WNATIVE is required with NATIVE_BALANCE off chain 30");
+        require(nb.code.length != 0, "NATIVE_BALANCE has no code on this chain");
+        require(w.code.length != 0, "WNATIVE has no code on this chain");
+        _probeNative(nb);
+    }
+
+    /// @dev DEPLOY_NATIVE_BALANCE: the view is created in the broadcast, so only the
+    ///      wrapped native is resolved here (same default and checks as {_native}).
+    function _nativeToDeploy() internal view returns (address nb, address w) {
+        require(vm.envOr("NATIVE_BALANCE", address(0)) == address(0), "set NATIVE_BALANCE or DEPLOY_NATIVE_BALANCE, not both");
+        w = vm.envOr("WNATIVE", address(0));
+        if (w == address(0) && block.chainid == 30) w = RSK_WRBTC;
+        require(w != address(0), "WNATIVE is required with DEPLOY_NATIVE_BALANCE off chain 30");
+        require(w.code.length != 0, "WNATIVE has no code on this chain");
+        nb = address(0); // assigned in the broadcast
+    }
+
+    /// @dev `balanceOf(x) == x.balance` and 18 decimals — a wrong address fails HERE,
+    ///      not as a `DeltaTooLow` on the first native fill.
+    function _probeNative(address nb) internal view {
+        address probe = address(0xdead);
+        require(INativeBalanceMin(nb).balanceOf(probe) == probe.balance, "NATIVE_BALANCE is not a NativeBalance view");
+        require(INativeBalanceMin(nb).decimals() == 18, "NATIVE_BALANCE decimals != 18");
     }
 
     address internal constant ROOTSTOCK_OKU_FACTORY = 0xaF37EC98A00FD63689CF3060BF3B6784E00caD82;

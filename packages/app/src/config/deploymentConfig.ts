@@ -103,6 +103,14 @@ export interface DeploymentConfig extends Deployment {
    * native coin may then ask for the raw coin instead (lib/order.ts `nativeOut`).
    */
   nativeUnwrap?: Address;
+  /**
+   * The deployed `NativeBalance` view (task 30), or absent. When set, a ticket that would
+   * receive the wrapped native coin on a DIRECT market may receive the RAW coin instead:
+   * the order signs this view as its output token (lib/order.ts `nativeOut.nativeBalance`)
+   * and the deployment's `solver` — which must be the native-delivering AggregatorFillSolver
+   * v3 — unwraps and sends it. Wins over {@link nativeUnwrap}.
+   */
+  nativeBalance?: Address;
 }
 
 /** Net gas of one filler fill, per delivery (lib/marketFloor.ts). */
@@ -196,7 +204,7 @@ export const PULL_MODE = "pull";
 
 type RawDeployments = Record<
   string,
-  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers" | "pullExclusivity" | "marketExclusivity" | "fillGas" | "nativeUnwrap", unknown>>
+  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers" | "pullExclusivity" | "marketExclusivity" | "fillGas" | "nativeUnwrap" | "nativeBalance", unknown>>
 >;
 
 /**
@@ -294,6 +302,11 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       console.warn(`VITE_DEPLOYMENTS[${key}].nativeUnwrap is invalid — treating chain ${key} as not deployed`);
       continue;
     }
+    const nativeBalance = addr(entry.nativeBalance, false);
+    if (nativeBalance === null) {
+      console.warn(`VITE_DEPLOYMENTS[${key}].nativeBalance is invalid — treating chain ${key} as not deployed`);
+      continue;
+    }
     out[chainId] = {
       chainId,
       settlement,
@@ -305,6 +318,7 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       marketExclusivity,
       fillGas,
       ...(nativeUnwrap !== zeroAddress ? { nativeUnwrap } : {}),
+      ...(nativeBalance !== zeroAddress ? { nativeBalance } : {}),
     };
   }
   return out;
@@ -346,4 +360,23 @@ export function exclusivityForMarket(deployment: DeploymentConfig | null, market
     ? deployment.marketExclusivity[marketId]!
     : deployment.pullExclusivity;
   return w.seconds > 0 ? { filler: deployment.solver, seconds: w.seconds, overrideBps: w.overrideBps } : undefined;
+}
+
+/** How an order on `marketId` receives the RAW native coin, when it may (see {@link nativeOutFor}). */
+export type NativeOutShape = { nativeBalance: Address } | { module: Address };
+
+/**
+ * The native-out shape an order on `marketId` signs, or `undefined` (not offered):
+ *  • `{ nativeBalance }` — the deployment has a NativeBalance view AND the market is
+ *    DIRECT (a non-zero solver: the view can only be delta-verified, never pulled);
+ *  • `{ module }` — else, the NativeUnwrapModule shape (pull; dormant: no deployed filler
+ *    can fill it, so a deployment should not list `nativeUnwrap` without a filler for it);
+ *  • `undefined` — neither.
+ */
+export function nativeOutFor(deployment: DeploymentConfig | null, marketId: string): NativeOutShape | undefined {
+  if (!deployment) return undefined;
+  const solver = solverForMarket(deployment, marketId);
+  if (deployment.nativeBalance && solver && solver !== zeroAddress) return { nativeBalance: deployment.nativeBalance };
+  if (deployment.nativeUnwrap) return { module: deployment.nativeUnwrap };
+  return undefined;
 }

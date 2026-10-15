@@ -247,6 +247,10 @@ maker's own Permit3 authority. Fillers must simulate — see
 > **UniswapX M-02:** a 6,900-gas ceiling in `CurrencyLibrary` excluded
 > smart-contract wallets and multisig fee recipients from any native-currency swap.
 > **1inch diff audit, Low:** the same shape at 5,000 gas.
+> **CoW Protocol (design, not a finding):** `GPv2Transfer` pays the ETH buy token with
+> Solidity `transfer` (2,300 gas). The driver attaches an `eth_createAccessList`-derived
+> access list for every contract receiver so a Safe proxy fits. That removes the cold-access
+> cost only: a `receive()` that does real work still cannot be paid.
 
 **Mechanism.** A fixed stipend is a bet on opcode pricing that goes stale across
 upgrades and does not hold across chains.
@@ -258,6 +262,15 @@ instead: **any module that forwards native value must not cap the gas.** Modules
 unwrap deliver WETH rather than raw ETH wherever the recipient is not the maker:
 `CompoundV2Native*`, `ListaNative*` and, since 2026-09-30 (L-FSE-3), the Fluid
 custody modules (`FluidCustodyBase._operateOut`) — a native Fluid leg is a WETH leg.
+The native senders that do exist forward all gas: `NativeUnwrapModule` and the
+`AggregatorFillSolver` v3 native delivery
+([native-rbtc-delivery-plan.md](../native-rbtc-delivery-plan.md) §6).
+
+**The stipend we cannot avoid is inbound.** WETH9 / WRBTC `withdraw` pays the unwrapper
+with `transfer`, so every contract that unwraps must keep its `receive()` inside 2,300
+gas under the target chain's own schedule. Today these are the modules' empty bodies and
+the solver's one immutable compare. Rootstock prices opcodes its own way, and anvil forks
+run the Ethereum schedule, so only a live fill proves it there.
 
 ### C11 — The permit as a liveness bomb
 

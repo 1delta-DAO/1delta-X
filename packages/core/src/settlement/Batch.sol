@@ -246,6 +246,9 @@ abstract contract Batch is Core {
         uint256[][] owed; //      per-order per-INPUT-leg amount  (computed at open)
         uint256[][] credit; //    per-order per-input-leg credited value
         uint256[] done; //        per-order progress mask (item bits + DELIVERED_BIT)
+        uint256[] need; //        per-order `done` bits a PULL requires ({ItemPolicy}):
+        //                        CANONICAL = everything, ORDERED/ATOMIC = the non-MAKE
+        //                        items, ANY = nothing
         uint256 lastItem; //      `(order+1) << 16 | item` of the PREVIOUS step, 0 if
         //                        it was not an ITEM — all {ItemPolicy.ATOMIC} needs
         //                        to know, and the dispatcher is its only writer.
@@ -384,13 +387,19 @@ abstract contract Batch is Core {
         st.owed = new uint256[][](n);
         st.credit = new uint256[][](n);
         st.done = new uint256[](n);
+        st.need = new uint256[](n);
         st.outstanding = new uint256[](st.tokens.length);
         address solver = msg.sender;
         for (uint256 i; i < n;) {
             Order calldata order = p.orders[i];
             // The shape assertion already proves `legsIn`, so its count is reused for
             // the credit ledger rather than re-validating the same blob.
-            uint256 nIn = _assertMatchShape(order); // items allowed here — that is the point
+            // items allowed here — that is the point. The same walk yields the pull mask.
+            (uint256 nIn, uint256 src) = _assertMatchShape(order);
+            // What a PULL of this order must find already done — resolved once here, so
+            // `_stepPull` is one mask test whatever the policy.
+            uint256 policy = order.itemPolicy();
+            st.need[i] = policy >= ItemPolicy.CANONICAL ? _doneMask(order) : policy != ItemPolicy.ANY ? src : 0;
             st.fills[i] = _openGated(order, p.sigs[i], p.fillAmounts[i], solver, _tdc(p.takerDatas, i));
             st.outs[i] = _batchComputeOutputs(order, st.fills[i]);
             st.owed[i] = _computeOwed(order, st.fills[i]);
@@ -412,12 +421,14 @@ abstract contract Batch is Core {
         }
     }
 
-    /// @dev The four shape constraints the netted match relies on:
-    ///        • no SETTLE item — it routes the maker's asset to the filler, not the
-    ///          pool ({MatchSettleItemUnsupported});
-    ///        • no TAKE_FOR and no PRE-FUNDED MAKE item — both are funded by one of
-    ///          the order's own `legsOut`, a delivery this path schedules
-    ///          independently of the item (same error);
+    /// @dev The shape constraints the netted match relies on:
+    ///        • no item op above the enum, and no BALANCE-relative TAKE_FOR funding
+    ///          descriptor ({MatchSettleItemUnsupported}). Every other real op is
+    ///          admitted: MAKE (pull and PRE-FUNDED), TAKE, SETTLE and TAKE_FOR
+    ///          (2026-10-14, task 31). The delivery-funded ones are safe
+    ///          here because {_stepDeliver} hands an order its delivery ledger only
+    ///          when it delivers, so a leg reference scheduled earlier fails closed
+    ///          in {Base._forSlice} — see the note at the guard below;
     ///        • no repeated input token — item proceeds are attributed per token
     ///          within a step window, so a duplicate leg would double-count the
     ///          same arrival ({MatchDuplicateInput});
@@ -429,7 +440,11 @@ abstract contract Batch is Core {
     ///      shapes are handled correctly and the guard would only cost gas).
     /// @return nIn the validated `legsIn` count, handed back so the caller can size
     ///         the credit ledger from it instead of validating the same blob twice.
-    function _assertMatchShape(Order calldata order) internal pure returns (uint256 nIn) {
+    /// @return src bit `k` set iff item `k` is NOT a `MAKE` (a TAKE, TAKE_FOR or SETTLE —
+    ///         an item that can credit an input leg). Under ORDERED and ATOMIC a PULL of
+    ///         the order requires all of them to have run ({_stepPull}). Built here
+    ///         because this walk already decodes every op.
+    function _assertMatchShape(Order calldata order) internal pure returns (uint256 nIn, uint256 src) {
         bytes calldata items = order.items;
         // The packed count is a `uint8`, so the 255 ceiling is structural now rather
         // than checked — but the walk still proves the blob is well formed.
@@ -437,30 +452,65 @@ abstract contract Batch is Core {
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < nItems;) {
             (uint256 op,,,, bytes calldata idata, uint256 next) = PackedArrays.itemAt(items, cursor);
-            // `>=`, NOT `==`, and the difference is load-bearing. `op` is a RAW
-            // BYTE out of the signed blob ({PackedArrays.itemAt} deliberately does
-            // not narrow it), so the guard has to name a RANGE rather than one
-            // value. It rejects four things at once:
-            //   • SETTLE (2) — routes to the filler, not the pool;
-            //   • TAKE_FOR (3) — its funding leg is usually one of the order's own
-            //     `legsOut`, i.e. value the maker has to have RECEIVED before the
-            //     item runs. This path lets the solver schedule items and
-            //     deliveries independently, so that precondition is a scheduling
-            //     obligation the netted engine does not currently enforce. Fill
-            //     composite orders through the single-order path, which runs
-            //     deliveries before items by construction;
-            //   • anything above — a malformed record, which {Base._runItem}
-            //     rejects too, so the guard and the dispatcher agree.
-            //   • a PRE-FUNDED MAKE (op 0, so the range test above sails past it) —
-            //     its funding leg is one of the order's own `legsOut`, i.e. value the
-            //     module has to have RECEIVED before the item runs. The forward path
-            //     guarantees that by construction; here deliveries and items are
-            //     INDEPENDENTLY SCHEDULED steps, so the precondition would be a
-            //     solver obligation. It does not fail closed either: the module's
-            //     balance floor underflows only on an empty module, so a schedule
-            //     that ran the item first would silently consume whatever residue
-            //     was sitting there. Same exclusion, same reason, as TAKE_FOR.
-            if (op >= uint256(ItemOp.SETTLE) || _isPreFundDesc(idata)) revert MatchSettleItemUnsupported();
+            // `op` is a RAW BYTE out of the signed blob ({PackedArrays.itemAt}
+            // deliberately does not narrow it), so anything above the enum is a
+            // malformed record. {Base._runItem} rejects it too; refusing it at open
+            // keeps the guard and the dispatcher in agreement.
+            //
+            // EVERY REAL OP IS ADMITTED but one form (2026-10-14, task 31). This used to refuse
+            // SETTLE, TAKE_FOR and the PRE-FUNDED MAKE, which made every order that
+            // consumes its own delivery (swap→supply, swap→repay, native-out, an LP
+            // mint) and every SETTLE order (OCO bracket legs, NFT sales) unfillable
+            // without filler capital: the single-order path runs items only after
+            // the filler has fronted the outputs, and `PostInputs` refuses items.
+            // See docs/fill-ordering-capital-plan.md.
+            //
+            // • DELIVERY-FUNDED ITEMS (pre-funded MAKE, leg-reference TAKE_FOR). The
+            //   refusal's reason was that "the delivery landed before the item ran"
+            //   would be a solver obligation, and that an item scheduled first would
+            //   fund itself from residue on a shared module. Both are now closed by
+            //   the CORE: {_stepDeliver} writes the order's delivery ledger
+            //   (`FillCtx.outs`) only when it delivers, and {Base._forSlice} fails
+            //   closed on an empty ledger (`ForLegInvalid`). So an item scheduled
+            //   before its order's DELIVER reverts, and one scheduled after it spends
+            //   exactly what was delivered — the forward path's guarantee, reached by
+            //   the ledger instead of by a fixed ordering. Another order's delivery
+            //   to the SAME singleton sitting in the module between the two steps is
+            //   the module's {PreFundGuard} floor's job, as it is for residue on the
+            //   forward path. A leverage TAKE_FOR whose delivery its own borrow must
+            //   fund is a CYCLE: no flash and no counter-order ⇒ `BatchNotWhole` /
+            //   `LegUnfunded`, as before.
+            // • SETTLE. The filler it pays is `msg.sender` — this context's solver,
+            //   the same party that owes the deliveries — and `_stepItem` measures the
+            //   pool around it like any op. ⚠ VALIDATORS RUN AT OPEN, for every order,
+            //   before any item: a module whose safety needs a validator to SEE another
+            //   order's item effect must enforce it in the item itself (as
+            //   `OcoGroupModule`'s claim does, `GroupAlreadyClaimed`).
+            // • EXCEPT THE BALANCE-RELATIVE `TAKE_FOR` FUNDING FORM (descriptor bits
+            //   255 and 254 set). It resolves `min(balanceOf(token, maker), cap)` AT
+            //   ITEM TIME, so here — unlike on the forward path, where the ordering is
+            //   a property of the code — the solver's schedule would decide what the
+            //   maker's wallet holds when it is read (before or after this plan's
+            //   deliveries and pulls), and a maker who signed a lenient `floorBps`
+            //   could be funded with a fraction of the position while the value-OUT
+            //   leg draws in full (the [F16] shape, made schedule-controllable). It
+            //   loses nothing by staying refused: the form exists for the
+            //   no-conversion shape, which has no output leg to front, so the forward
+            //   path already fills it with zero capital.
+            //   One comparison for both refusals: `bal` is 1 for the balance form, so
+            //   `op + bal` exceeds TAKE_FOR exactly for (TAKE_FOR, balance) and for any
+            //   op above the enum — a MAKE/TAKE/SETTLE blob that happens to open with
+            //   those bits stays admitted. No length test: a blob shorter than a word
+            //   reads into the next record and can at worst REFUSE a malformed order,
+            //   which `_forSlice` would reject at fill time anyway.
+            uint256 bal;
+            /// @solidity memory-safe-assembly
+            assembly {
+                bal := eq(shr(254, calldataload(idata.offset)), 3)
+                // Bit `i` of `src` = "item `i` is not a MAKE" (MAKE is op 0).
+                src := or(src, shl(i, gt(op, 0)))
+            }
+            if (op + bal > uint256(ItemOp.TAKE_FOR)) revert MatchSettleItemUnsupported();
             cursor = next;
             unchecked {
                 ++i;
@@ -596,9 +646,14 @@ abstract contract Batch is Core {
         //
         // It is the SAME word {_matchFlush} asserts at the end, which is what makes
         // the rule cheap: `_doneMask` exists once and both callers share it.
-        if (order.itemPolicy() >= ItemPolicy.CANONICAL && st.done[i] != _doneMask(order)) {
-            revert ItemPolicyViolated(i, j);
-        }
+        //
+        // ORDERED and ATOMIC (task 31) keep ONLY the half of that rule the allowance
+        // argument needs: every item that can CREDIT a leg — anything but a MAKE — has
+        // run. They do not wait for the delivery, so the order's inputs can fund its
+        // own outputs (`PULL → PRESEND → CALL → DELIVER`) and a zero-capital solver can
+        // fill it. The required bits are resolved once at open (`st.need`).
+        uint256 req = st.need[i]; // resolved at open from the policy
+        if (st.done[i] & req != req) revert ItemPolicyViolated(i, j);
         uint256 owed = st.owed[i][j]; // resolved at open — single source
         uint256 have = st.credit[i][j]; // already covered by an earlier PULL or ITEM
         // Draw only what is still missing. See the allowance note above for why this
@@ -622,6 +677,13 @@ abstract contract Batch is Core {
         st.done[i] |= DELIVERED_BIT;
         Order calldata order = orders[i];
         uint256[] memory amts = st.outs[i];
+        // HAND THE DELIVERY LEDGER TO THIS ORDER'S ITEMS — {Core._settleForward}'s
+        // `ctx.outs = outs`, written HERE and only here. Until this step runs the
+        // ledger is empty and every leg-reference item (pre-funded MAKE, TAKE_FOR)
+        // fails closed in {Base._forSlice}; after it, such an item spends exactly
+        // what this step paid. That is what makes delivery-before-consumption a
+        // property of the core rather than of the schedule (task 31).
+        st.fills[i].outs = amts;
         uint256 n = amts.length;
         for (uint256 j; j < n;) {
             uint256 amt = amts[j];

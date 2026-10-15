@@ -4,6 +4,7 @@ import {
   OrderSide,
   forLegPreFund,
   hashOrderStruct,
+  nativeOutLeg,
   overrideHasCarrier,
   packTiming,
   randomOrderNonce as sdkRandomOrderNonce,
@@ -78,14 +79,19 @@ export interface BuildOrderArgs {
    */
   fillOnce?: boolean;
   /**
-   * NATIVE-OUT (task 28): the maker receives the RAW native coin instead of the wrapped
-   * token `recv` (which must be it — WRBTC). The output leg is delivered to `module`
-   * (the deployed NativeUnwrapModule), and one MAKE item on it unwraps exactly what the
-   * fill delivered and sends it to the maker, inside the same fill. PULL delivery only
-   * (no `solver`, no `exclusivity`: the module, not the maker, is the leg's recipient,
-   * so neither a delta-verify check nor a window carrier would hold).
+   * NATIVE-OUT: the maker receives the RAW native coin instead of the wrapped token
+   * `recv` (which must be it — WRBTC; amounts stay 18-dec wei). Two shapes:
+   *
+   *  • `{ nativeBalance }` (task 30, the one the app signs): the output leg's token is the
+   *    deployed `NativeBalance` view (SDK `nativeOutLeg`), DIRECT delivery to `solver`
+   *    (required): the solver routes into WRBTC, unwraps it and sends the coin, and the
+   *    settler verifies the maker's NATIVE balance delta. No item, no extra approval.
+   *  • `{ module }` (task 28, dormant — no deployed filler can fill it): the leg is
+   *    delivered to the NativeUnwrapModule and one MAKE item unwraps it, PULL delivery
+   *    only (no `solver`, no `exclusivity`: the module, not the maker, is the leg's
+   *    recipient, so neither a delta-verify check nor a window carrier would hold).
    */
-  nativeOut?: { module: Address };
+  nativeOut?: { module: Address } | { nativeBalance: Address };
   now?: number;
 }
 
@@ -277,10 +283,19 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
 
   const solver = args.solver ?? zeroAddress;
   const direct = solver !== zeroAddress;
-  if (args.nativeOut) {
+  const nativeModule = args.nativeOut && "module" in args.nativeOut ? args.nativeOut.module : undefined;
+  const nativeView = args.nativeOut && "nativeBalance" in args.nativeOut ? args.nativeOut.nativeBalance : undefined;
+  if (nativeModule) {
     if (direct || args.exclusivity) throw new Error("a native-out order is pull delivery: no solver, no exclusivity window");
     // The leg goes to the module; its item pays the maker the raw coin.
-    legsOut = legsOut.map((l) => ({ ...l, recipient: args.nativeOut!.module }));
+    legsOut = legsOut.map((l) => ({ ...l, recipient: nativeModule }));
+  }
+  if (nativeView !== undefined) {
+    // The settler measures the maker's native balance through the view; only the named
+    // solver can deliver it (and only a delta-verified output can be a view).
+    if (!direct) throw new Error("a native (NativeBalance) order is DIRECT delivery: it needs the solver that delivers native");
+    if (recv.decimals !== 18) throw new Error("a native (NativeBalance) order receives the 18-decimal wrapped native coin");
+    legsOut = legsOut.map((l) => nativeOutLeg({ nativeBalance: nativeView, start: l.start, end: l.end }));
   }
   // SOFT EXCLUSIVITY WINDOW (pull only, B13). A direct order needs none: the core
   // already fills it for its named filler only, for its whole life (F30).
@@ -292,8 +307,11 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
   const windowEnd = win ? now + win.seconds : 0;
   const clock = decaying ? packTiming(now, decaySeconds, windowEnd) : packTiming(0, 0, windowEnd);
   const once = args.fillOnce ? withFillOnce(clock) : clock;
-  // CANONICAL: the unwrap runs after this order's own delivery, never hoisted ahead of it.
-  const timing = args.nativeOut ? withItemPolicy(once, ItemPolicy.CANONICAL) : once;
+  // ORDERED (task 31; was CANONICAL): the unwrap is a MAKE, so the netted path may pull
+  // the input before the delivery and run it late — zero-capital fillable on the task-31
+  // Settlement. Its leg reference already makes it fail closed if hoisted ahead of the
+  // delivery (the core's delivery ledger). CANONICAL would be forward-only (needs capital).
+  const timing = nativeModule ? withItemPolicy(once, ItemPolicy.ORDERED) : once;
 
   const order: Order = {
     maker,
@@ -331,7 +349,7 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     gasBumpBps: 0n,
     gasPriceRef: 0n,
     priorityScale: 0n,
-    items: args.nativeOut ? [nativeOutItem(args.nativeOut.module, recv.address)] : [],
+    items: nativeModule ? [nativeOutItem(nativeModule, recv.address)] : [],
     validators: [],
     invariants: [],
     fillModule: zeroAddress,

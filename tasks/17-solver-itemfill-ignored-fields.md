@@ -1,6 +1,6 @@
 # 17. Solver: `executeItemFill` silently ignores `minBumpBps` and `amountOutOffset`
 
-- **Status:** open
+- **Status:** fixed in the tree (2026-10-14, branch `zero-capital-item-fills`): `executeItemFill` reverts `ItemFillUnsupported` on `minBumpBps != 0` or a set `amountOutOffset`; the SDK encoder refuses both too. Ships with the solver v3 deploy.
 - **Layer:** contract
 - **Package:** `packages/solvers` (`AggregatorFillSolver.sol`)
 - **Severity:** low — an operator's floor silently does nothing; needs a solver redeploy

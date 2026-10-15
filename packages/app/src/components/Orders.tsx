@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { BOOK_IS_REMOTE } from "../backend/book";
-import { marketById } from "../config/markets";
+import { marketById, rowSymbols } from "../config/markets";
 import { ago, fmtAmt, fmtPrice, shortHex, until } from "../lib/format";
 import { belongsTo, fillStatusLabel, orderTypeLabel, rowStatus, rowStatusLabel } from "../lib/orderLifecycle";
 import type { TxState } from "../lib/txFlow";
@@ -53,12 +53,12 @@ function Wallet({ maker, account }: { maker: string | undefined; account: string
   );
 }
 
-function Pair({ marketId, tokens }: { marketId: string; tokens: TokenIndex }) {
-  const m = marketById(marketId);
+function Pair({ marketId, tokens, native }: { marketId: string; tokens: TokenIndex; native?: boolean }) {
+  const s = rowSymbols(marketId, native);
   return (
-    <span className="in">
-      <PairIcon base={tokens.view(m.base)} quote={tokens.view(m.quote)} small />
-      {m.base} / {m.quote}
+    <span className="in" title={native ? `received as the native coin (${s.base === marketById(marketId).base ? s.quote : s.base})` : undefined}>
+      <PairIcon base={tokens.view(s.base)} quote={tokens.view(s.quote)} small />
+      {s.base} / {s.quote}
     </span>
   );
 }
@@ -164,7 +164,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                           </td>
                         )}
                         <td className="pc">
-                          <Pair marketId={o.marketId} tokens={tokens} />
+                          <Pair marketId={o.marketId} tokens={tokens} native={o.native} />
                         </td>
                         <td>
                           <span className="ty">
@@ -178,7 +178,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                           </span>
                         </td>
                         <td>
-                          {fmtAmt(o.size)} {marketById(o.marketId).base}
+                          {fmtAmt(o.size)} {rowSymbols(o.marketId, o.native).base}
                         </td>
                         <td>{fmtPrice(o.price, tickOf(o.marketId))}</td>
                         <td>
@@ -299,7 +299,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                       )}
                       <td className="faint">{ago(f.at)}</td>
                       <td className="pc">
-                        <Pair marketId={f.marketId} tokens={tokens} />
+                        <Pair marketId={f.marketId} tokens={tokens} native={f.native} />
                       </td>
                       <td>
                         <span className="ty" title={`filled from ${SOURCE_NAME[f.source]}`}>{f.orderType ? orderTypeLabel({ type: f.orderType }) : f.simulated ? "—" : "Limit"}</span>
@@ -312,7 +312,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                       <td>
                         {f.size > 0 ? (
                           <>
-                            {fmtAmt(f.size)} {marketById(f.marketId).base}
+                            {fmtAmt(f.size)} {rowSymbols(f.marketId, f.native).base}
                           </>
                         ) : (
                           <span className="faint">—</span>

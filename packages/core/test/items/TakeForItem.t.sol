@@ -11,11 +11,12 @@ import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
-import {Order, Item, ItemOp, LegIn, LegOut, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, ItemPolicy, LegIn, LegOut, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {SettlementLens} from "@periphery/SettlementLens.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
+import {MockSolver} from "../swaps/MatchSettleCoW.t.sol";
 
 /// @dev TAKE_FOR mock, shaped like a real leverage adapter: it pulls the funding
 ///      leg from the maker (the "deposit") and hands `amount` of a stashed token to
@@ -183,6 +184,7 @@ contract TakeForItemTest is CoreSettlementBase {
     MockTakeFor takeFor;
     MockPreFundTakeFor preFundTakeFor;
     MockPlainTaker plainTaker;
+    MockSolver coverSolver;
 
     address constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
 
@@ -199,6 +201,7 @@ contract TakeForItemTest is CoreSettlementBase {
         takeFor = new MockTakeFor(address(permit3));
         preFundTakeFor = new MockPreFundTakeFor(address(permit3));
         plainTaker = new MockPlainTaker(address(permit3));
+        coverSolver = new MockSolver(settlement);
         vm.label(address(takeFor), "mockTakeFor");
         vm.label(address(preFundTakeFor), "mockPreFundTakeFor");
 
@@ -241,7 +244,9 @@ contract TakeForItemTest is CoreSettlementBase {
     }
 
     /// @dev SELL order: maker gives USDC (funded by the take), receives WETH (which
-    ///      the same call supplies back into the position).
+    ///      the same call supplies back into the position). Signed ORDERED — the
+    ///      policy the SDK defaults an input-funding TAKE / TAKE_FOR to since task 31
+    ///      (the lens flags one at ANY, B8) — which changes nothing on `fill`.
     function _order(uint256 nonce, address module, bytes memory data) internal view returns (Order memory o) {
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.TAKE_FOR, module: module, amount: USDC_IN, recipient: address(0), data: data});
@@ -268,6 +273,7 @@ contract TakeForItemTest is CoreSettlementBase {
             fillModule: address(0),
             fillTotal: 0
         });
+        o.timing = ItemPolicy.pack(o.timing, ItemPolicy.ORDERED);
     }
 
     /// @dev Both books the composite item passes through: the TAKER allowance caps
@@ -1040,7 +1046,7 @@ contract TakeForItemTest is CoreSettlementBase {
         legsOut[0] = LegOut(WETH, WETH_OUT, 0, address(0)); //   the maker's own leg
         legsOut[1] = LegOut(WETH, 1e15, 0, address(0xFEE)); //   an originator fee leg
 
-        return Order({
+        Order memory o = Order({
             params: 0,
             pricingModule: address(0),
             maker: maker,
@@ -1057,6 +1063,8 @@ contract TakeForItemTest is CoreSettlementBase {
             fillModule: address(0),
             fillTotal: 0
         });
+        o.timing = ItemPolicy.pack(o.timing, ItemPolicy.ORDERED); // as {_order}
+        return o;
     }
 
     /// The lens must reject the fee-leg reference too, not just the settler.
@@ -1342,37 +1350,33 @@ contract TakeForItemTest is CoreSettlementBase {
         assertTrue(ok, "unknown proceeds must skip the check, not fail it");
     }
 
-    // ──────────────── the CoW case: `matchSettle` must refuse this op ────────────────
+    // ──────────────── the netted path (`matchSettle`) ────────────────
     //
-    // `Batch._assertMatchShape` rejects every item op at or above SETTLE, so
-    // `TAKE_FOR` never reaches the netted engine. The refusal is pinned per
-    // DESCRIPTOR FORM below rather than once, because the three forms fail for
-    // materially different reasons and only one of them is a mere ordering
-    // inconvenience — see the guard's own comment in {Batch}.
+    // Since task 31 (2026-10-14) `Batch._assertMatchShape` ADMITS `TAKE_FOR` in the
+    // literal and leg-reference forms and keeps refusing only the BALANCE form. The
+    // three forms are pinned separately because they behave differently under a
+    // free schedule:
     //
-    // ⚠ THE SHARP REASON, and the one that decides the guard stays: the BALANCE
-    // form resolves `forAmount = min(balanceOf(token, maker), cap)` AT ITEM TIME.
-    // On the single-order path that read is deterministic because the ordering is
-    // a property of the CODE — `Core._settleForward` runs `_deliverOutputs` →
-    // `_executeItems` → `_payInputsToSolver`, and the one mode that reorders those
-    // (`_settlePostInputs`) forbids items outright ({ReverseModeRequiresNoItems}).
-    // `test_balance_fundsWhateverTheMakerHolds` is that property, measured: the
-    // maker is funded with `held + WETH_OUT`, i.e. the delivered leg included.
+    // • LEG REFERENCE — reads the order's delivery LEDGER, which `_stepDeliver`
+    //   writes. Scheduled before its DELIVER the ledger is empty and `_forSlice`
+    //   fails closed (`ForLegInvalid`); after it, the item funds exactly what was
+    //   delivered. The end state is the forward path's.
+    // • LITERAL — cumulates off `ctx`, never off a balance: schedule-independent.
+    // • BALANCE — resolves `min(balanceOf(token, maker), cap)` AT ITEM TIME. On the
+    //   single-order path that read is deterministic because the ordering is a
+    //   property of the CODE (`test_balance_fundsWhateverTheMakerHolds` measures it:
+    //   the delivered leg is included). Under a schedule it would be the SOLVER'S
+    //   choice whether the read sees this plan's deliveries and pulls — the [F16]
+    //   under-collateralisation shape made filler-controllable for any maker who
+    //   signed a lenient `floorBps`. So it stays refused, and loses nothing: the form
+    //   exists for the no-conversion shape, which has no output leg to front, so the
+    //   forward path already fills it with zero capital.
     //
-    // Under `matchSettle` the ordering would be a property of the SOLVER'S
-    // SCHEDULE instead. `ITEM` and `DELIVER` are independently schedulable steps,
-    // so a filler could run the item FIRST and resolve the same descriptor against
-    // the maker's pre-delivery wallet — funding the position with a fraction of the
-    // intended collateral while the value-OUT leg still draws in full. That is
-    // exactly the [F16] shape, made filler-controllable, and {ForBalanceEmpty} does
-    // NOT close it: that guard only catches a resolved ZERO, so a maker holding one
-    // wei pre-delivery would pass it and be near-totally under-collateralised.
-    //
-    // The LEG-reference form is the benign one — if the pull succeeds the end state
-    // is identical whichever order the steps ran in, and if it does not the fill
-    // reverts. It is refused anyway because the guard keys on the OP, not on a
-    // descriptor it would have to decode; narrowing it later means discriminating
-    // by form, which is a bigger change than it looks.
+    // These composites are CYCLES (the take's proceeds pay the input the delivery is
+    // converted from), so the netted fills below front the delivery through a
+    // `CALL` step from solver inventory — exactly the capital the forward path needs
+    // too. Zero-capital netting of a cycle needs a counter-order (`MatchSettle.t.sol`
+    // `_cyclePair`) or a flash around the plan.
 
     /// @dev A one-order plan carrying `o`. Enough to prove the refusal fires in
     ///      PHASE 1, before the schedule runs at all.
@@ -1412,24 +1416,55 @@ contract TakeForItemTest is CoreSettlementBase {
         assertEq(IERC20(USDC).balanceOf(address(takeFor)), modUsdc, "module stash moved on a refused match");
     }
 
-    /// LITERAL funding descriptor — the form that is genuinely schedule-independent
-    /// (it cumulates off `ctx`, never off a balance). Refused all the same: the
-    /// guard keys on the op.
-    function test_matchSettle_refusesTakeFor_literalForm() public {
-        _fundSolver();
-        bytes memory data = _data(WETH_OUT);
-        _authorise(address(takeFor), data, USDC_IN, WETH_OUT);
-        Order memory o = _order(80, address(takeFor), data);
-        _assertMatchRefused(o, _sign(o));
+    /// @dev One-order plan run by the inventory-holding {MockSolver}: `CALL` fronts
+    ///      the WETH delivery into the pool, then the steps in `order`.
+    function _coverPlan(Order memory o, bytes memory sig, bool itemFirst) internal view returns (MatchPlan memory p) {
+        p = _matchPlan(o, sig);
+        uint256[] memory schedule = new uint256[](3);
+        schedule[0] = MatchStep.pack(MatchStep.CALL, 0, 0);
+        schedule[1] = itemFirst ? MatchStep.pack(MatchStep.ITEM, 0, 0) : MatchStep.pack(MatchStep.DELIVER, 0, 0);
+        schedule[2] = itemFirst ? MatchStep.pack(MatchStep.DELIVER, 0, 0) : MatchStep.pack(MatchStep.ITEM, 0, 0);
+        p.schedule = schedule;
+        p.callTargets = new address[](1);
+        p.callTargets[0] = address(coverSolver);
+        p.callDatas = new bytes[](1);
+        p.callDatas[0] = abi.encodeCall(MockSolver.cover, (WETH, WETH_OUT));
     }
 
-    /// LEG-REFERENCE form — the one the guard's original comment describes.
-    function test_matchSettle_refusesTakeFor_legRefForm() public {
-        _fundSolver();
+    function _assertNettedFill(Order memory o) internal {
+        deal(WETH, address(coverSolver), WETH_OUT);
+        uint256 makerWeth = IERC20(WETH).balanceOf(maker);
+        uint256 makerUsdc = IERC20(USDC).balanceOf(maker);
+        coverSolver.run(_coverPlan(o, _sign(o), false));
+        assertEq(takeFor.totalFor(), WETH_OUT, "the item funded exactly the delivered leg");
+        assertEq(IERC20(WETH).balanceOf(maker), makerWeth, "maker net-zero in the delivered token");
+        assertEq(IERC20(USDC).balanceOf(maker), makerUsdc, "the take's proceeds paid the input");
+        assertEq(IERC20(USDC).balanceOf(address(coverSolver)), USDC_IN, "solver paid in the input it was owed");
+        assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "nothing pooled");
+    }
+
+    function test_matchSettle_takeFor_legRefForm_fillsAfterItsDelivery() public {
         bytes memory data = _data(_forLeg(0));
         _authorise(address(takeFor), data, USDC_IN, WETH_OUT);
-        Order memory o = _order(81, address(takeFor), data);
-        _assertMatchRefused(o, _sign(o));
+        _assertNettedFill(_order(81, address(takeFor), data));
+    }
+
+    function test_matchSettle_takeFor_literalForm_fills() public {
+        bytes memory data = _data(WETH_OUT);
+        _authorise(address(takeFor), data, USDC_IN, WETH_OUT);
+        _assertNettedFill(_order(80, address(takeFor), data));
+    }
+
+    /// The ledger is what keeps a leg reference behind its delivery: scheduled first,
+    /// it finds no ledger and fails closed rather than pricing a leg nothing paid.
+    function test_matchSettle_takeFor_legRefForm_beforeDelivery_failsClosed() public {
+        bytes memory data = _data(_forLeg(0));
+        _authorise(address(takeFor), data, USDC_IN, WETH_OUT);
+        Order memory o = _order(85, address(takeFor), data);
+        deal(WETH, address(coverSolver), WETH_OUT);
+        MatchPlan memory p = _coverPlan(o, _sign(o), true);
+        vm.expectRevert(Base.ForLegInvalid.selector);
+        coverSolver.run(p);
     }
 
     /// BALANCE form — the one that MUST stay refused. See the note above.
@@ -1442,13 +1477,14 @@ contract TakeForItemTest is CoreSettlementBase {
         _assertMatchRefused(o, _sign(o));
     }
 
-    /// The guard is PER ORDER, not per plan-position: a composite order paired with
-    /// a perfectly ordinary one is still refused, and the ordinary one does not
-    /// settle either. `_matchOpenAll` loops every order before any step runs.
-    function test_matchSettle_refusesTakeFor_pairedWithAPlainOrder() public {
+    /// The guard is PER ORDER, not per plan-position: a balance-form composite
+    /// paired with a perfectly ordinary order is still refused, and the ordinary one
+    /// does not settle either. `_matchOpenAll` loops every order before any step runs.
+    function test_matchSettle_refusesTakeFor_balanceForm_pairedWithAPlainOrder() public {
         _fundSolver();
-        bytes memory data = _data(_forLeg(0));
-        _authorise(address(takeFor), data, USDC_IN, WETH_OUT);
+        deal(WETH, maker, 2 ether);
+        bytes memory data = _data(_forBalance(WETH), 10 ether);
+        _authorise(address(takeFor), data, USDC_IN, 10 ether);
         Order memory composite = _order(83, address(takeFor), data);
 
         Order memory plain = _order(84, address(takeFor), data);

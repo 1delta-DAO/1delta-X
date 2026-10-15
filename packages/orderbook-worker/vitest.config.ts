@@ -40,6 +40,8 @@ export default defineConfig({
                 LENS: "0x3333333333333333333333333333333333333333",
                 RPC_URL: "http://rpc.invalid",
                 ALLOWED_TOKENS: "",
+                // A stand-in NativeBalance view (task 30): only orders naming it are affected.
+                NATIVE_BALANCE: "0x00000000000000000000000000000000000a7b01",
                 MAX_ORDERS: "4",
                 MAX_ORDERS_PER_MAKER: "3",
                 RATE_LIMIT_IP_CAPACITY: "100",

@@ -340,15 +340,19 @@ contract PreFundMakeItemTest is CoreSettlementBase {
         settlement.fill(o, sig, USDC_IN);
     }
 
-    // ──────────────── the scheduled path refuses it ────────────────
+    // ──────────────── the scheduled path: admitted, kept behind its delivery ────────────────
 
-    /// `matchSettle` schedules deliveries and items INDEPENDENTLY, so "the delivery
-    /// landed before the item ran" would become a solver obligation — and it does not
-    /// fail closed, because a module holding residue would silently fund from it.
-    /// A pre-funded MAKE is op 0, so the `op >= SETTLE` range test sails past it; the
-    /// descriptor is what refuses it.
-    function test_matchSettle_refusesPreFundMake() public {
-        _fundSolver(WETH_OUT);
+    /// `matchSettle` used to REFUSE a pre-funded MAKE: deliveries and items are
+    /// independently scheduled, so "the delivery landed before the item ran" was a
+    /// solver obligation, and a module holding residue would have funded the item
+    /// from it. Since task 31 the core enforces it instead: `_stepDeliver` writes the
+    /// order's delivery ledger, and until it runs `_forSlice` finds the ledger empty
+    /// and fails closed. Pinned here with RESIDUE sitting in the module — exactly the
+    /// balance the old refusal was protecting — so the revert is the ledger's, not a
+    /// floor underflow on an empty module. The zero-capital fills themselves are in
+    /// `swaps/MatchSettleDeliveryFunded.t.sol`.
+    function test_matchSettle_preFundMake_beforeDelivery_failsClosed_evenOverResidue() public {
+        deal(WETH, address(preFundMake), WETH_OUT * 3); // residue the item must not reach
         Order memory o = _order(10, address(preFundMake), _data(_preFundLeg(0)), address(preFundMake), 0);
 
         Order[] memory orders = new Order[](1);
@@ -359,10 +363,10 @@ contract PreFundMakeItemTest is CoreSettlementBase {
         fills[0] = USDC_IN;
         uint256[] memory schedule = new uint256[](2);
         schedule[0] = MatchStep.PULL;
-        schedule[1] = MatchStep.DELIVER | (uint256(0) << 8);
+        schedule[1] = MatchStep.pack(MatchStep.ITEM, 0, 0); // the item, with no DELIVER before it
 
         vm.prank(solver);
-        vm.expectRevert(Base.MatchSettleItemUnsupported.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.matchSettle(
             MatchPlan({
                 orders: orders,
@@ -375,6 +379,7 @@ contract PreFundMakeItemTest is CoreSettlementBase {
                 profitRecipient: address(0)
             })
         );
+        assertEq(preFundMake.totalFunded(), 0, "the residue funded nothing");
     }
 
     // ──────────────── lens preflight ────────────────

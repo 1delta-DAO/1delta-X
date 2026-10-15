@@ -40,6 +40,20 @@ import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 ///  validator (which would let it fill a retired leg) nor drop the item (which
 ///  would let it fill leg A and leave leg B live).
 ///
+///  On the NETTED path the gate cannot see a sibling's claim
+///  ─────────────────────────────────────────────────────────
+///  `matchSettle` admits SETTLE items since task 31 (2026-10-14; before that a
+///  bracket leg was forward-fill-only, audit PRICE-12). It runs EVERY order's
+///  validators at open, before ANY item of the plan, so two legs of one group in one
+///  plan both read "unclaimed" and both pass {validate}. The diagram above therefore
+///  describes only the forward path. What holds on both is {settle} itself: it
+///  re-reads the claim slot at execution and reverts the second claimant
+///  ({GroupAlreadyClaimed}) — check and write in ONE call — and the settler's
+///  completeness check refuses a plan that skips any signed item. So the validator is
+///  the cheap early exit, and the ITEM is the binding check. Never relax {settle}'s
+///  `current != 0` revert on the theory that {validate} already covers it.
+///  Pinned by `test/NettedOco.t.sol`.
+///
 ///  Why SETTLE and why `amount` must be the anchor
 ///  ──────────────────────────────────────────────
 ///  Item amounts are sliced pro-rata, and {Base._runItem} SKIPS a MAKE/TAKE item

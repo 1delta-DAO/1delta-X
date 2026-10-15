@@ -3,7 +3,8 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 import {MatchRaceGuard} from "@solvers/base/MatchRaceGuard.sol";
 import {GuardedMatchSolver} from "@solvers/match/GuardedMatchSolver.sol";
 
@@ -36,6 +37,25 @@ contract MatchSolverAudit20260930Test is MatchRaceGuardTest {
 
         assertEq(IERC20(USDC).balanceOf(address(guarded)), 0, "nothing locked in the wrapper");
         assertEq(IERC20(WETH).balanceOf(address(guarded)), 0, "nothing locked in the wrapper");
+    }
+
+    /// Task 31: the core's `matchSettle` now admits SETTLE items, which pay their
+    /// asset to `msg.sender` of `matchSettle` — the wrapper, which can never move it.
+    /// A plan whose orders carry one is refused before anything moves, even a claim
+    /// that would move nothing (the wrapper cannot tell the two apart).
+    function test_task31_settleItemPlansAreRefused() public {
+        (Order memory a, Order memory b) = _orders();
+        Item[] memory items = new Item[](2);
+        items[0] = Item({op: ItemOp.MAKE, module: address(0xD0D0), amount: 1, recipient: address(0), data: ""});
+        items[1] = Item({op: ItemOp.SETTLE, module: address(0x5E77), amount: 1, recipient: address(0), data: ""});
+        b.items = PackedEncode.items(items);
+        MatchPlan memory plan = _plan(a, b, rival);
+        bytes32[] memory hashes = new bytes32[](0);
+
+        vm.prank(rival);
+        vm.expectRevert(abi.encodeWithSelector(GuardedMatchSolver.SettleUnsupported.selector, uint256(1), uint256(1)));
+        guarded.settleMatch(hashes, new uint256[](0), plan);
+        assertEq(IERC20(WETH).balanceOf(address(guarded)), 0, "nothing moved");
     }
 
     /// CORE-MATCH-1: the stranding guard covered 1 of 3 routes. Settlement (a

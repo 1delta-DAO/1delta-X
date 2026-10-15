@@ -69,9 +69,10 @@ export interface QuoteRequest {
    */
   funding?: "permit" | "approval";
   /**
-   * The maker receives raw RBTC (task 28): the order's WRBTC leg goes to the
-   * NativeUnwrapModule, whose MAKE item unwraps it in the fill. Always PULL delivery
-   * (an `auto` request resolves to pull); route only, at + NATIVE_OUT_GAS.
+   * The maker receives raw RBTC (task 30): `tokenOut` is WRBTC (what the route ends in) and
+   * the order signs the `NativeBalance` view as its output token, DIRECT to the solver,
+   * which unwraps and sends the coin. Always DIRECT (an `auto` request resolves to it, a
+   * `pull` one is refused); route only, at + NATIVE_DIRECT_GAS until learned.
    */
   nativeOut?: boolean;
 }
@@ -125,7 +126,7 @@ export interface QuoteResult {
   /** Unix seconds. */
   validUntil: number;
   strategy: "route" | "inventory";
-  /** Priced for a native-out order (echo of the request): sign the NativeUnwrapModule shape. */
+  /** Priced for a native order (echo of the request): sign the NativeBalance shape, DIRECT. */
   nativeOut?: boolean;
   route: { source: string; hops?: number; path?: { tokens: Address[]; fees: number[]; venues: string[] } };
 }
@@ -213,7 +214,7 @@ export function parseQuoteRequest(raw: unknown, cfg: Pick<Config, "chainId" | "r
   if (eq(tokenIn, tokenOut)) return { ok: false, reason: "tokenIn equals tokenOut" };
   if (o.funding !== undefined && o.funding !== "permit" && o.funding !== "approval") return { ok: false, reason: 'funding must be "permit" or "approval"' };
   if (o.nativeOut !== undefined && typeof o.nativeOut !== "boolean") return { ok: false, reason: "nativeOut must be a boolean" };
-  if (o.nativeOut === true && o.delivery === "direct") return { ok: false, reason: "nativeOut orders are pull delivery" };
+  if (o.nativeOut === true && o.delivery === "pull") return { ok: false, reason: "nativeOut orders are direct delivery (the NativeBalance view cannot be pulled)" };
   return {
     ok: true,
     req: {
@@ -222,8 +223,8 @@ export function parseQuoteRequest(raw: unknown, cfg: Pick<Config, "chainId" | "r
       tokenOut,
       amountIn,
       side: o.side,
-      // Native-out is pull delivery: an `auto` request resolves to it.
-      delivery: o.nativeOut === true ? "pull" : o.delivery,
+      // Native delivery is DIRECT: an `auto` request resolves to it.
+      delivery: o.nativeOut === true ? "direct" : o.delivery,
       ...(marketId ? { marketId } : {}),
       ...(maker ? { maker } : {}),
       ...(o.funding === "permit" ? { funding: "permit" as const } : {}),
@@ -245,7 +246,10 @@ export interface IssuedQuote {
   delivery: Delivery;
   issuedAt: number;
   validUntil: number;
-  /** Quoted for a native-out order (the WRBTC leg to the NativeUnwrapModule + its item). */
+  /**
+   * Quoted for a native order (task 30): `tokenOut` is then the `NativeBalance` view the
+   * order signs (not the WRBTC the request named), so only such an order matches.
+   */
   nativeOut?: boolean;
   /** The order this quote was matched to (one quote → one order). */
   order?: string;
@@ -272,8 +276,9 @@ export function quoteMatches(q: IssuedQuote, order: Order, nowS: number, graceS:
   if (!eq(legIn.token, q.tokenIn) || !eq(legOut.token, q.tokenOut)) return false;
   if (q.maker && !eq(order.maker, q.maker)) return false;
   if ((q.delivery === "direct") !== isDeltaVerify(order)) return false;
-  // A native-out order costs the item's gas: only a native-out quote prices it.
-  if (!!q.nativeOut !== order.items.length > 0) return false;
+  // No quote prices an item (an item fill's gas is its own); a native quote binds by its
+  // `tokenOut` (the NativeBalance view), which a WRBTC order never carries.
+  if (order.items.length > 0) return false;
   if (nowS > q.validUntil + graceS) return false;
   const qIn = BigInt(q.amountIn);
   const qOut = BigInt(q.amountOut);
@@ -498,7 +503,8 @@ export class Quoter {
       {
         id: quote.quoteId,
         tokenIn: req.tokenIn.toLowerCase(),
-        tokenOut: req.tokenOut.toLowerCase(),
+        // A native quote binds the order's NativeBalance leg, not the WRBTC it was routed as.
+        tokenOut: (req.nativeOut && this.cfg.route?.nativeBalance ? this.cfg.route.nativeBalance : req.tokenOut).toLowerCase(),
         amountIn: req.amountIn.toString(),
         amountOut: quote.amountOut.toString(),
         ...(req.maker ? { maker: req.maker.toLowerCase() } : {}),

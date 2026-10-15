@@ -129,6 +129,8 @@ export const TOKENS: Record<number, Record<string, PinnedToken>> = {
  * `withdraw(uint)`, `Deposit`/`Withdrawal` events), checked on-chain 2026-10-11.
  */
 export const WRAPPED_NATIVE: Record<number, string> = { 30: "WRBTC" };
+/** The chain's native coin symbol, where a wrapped one is configured. */
+export const NATIVE_SYMBOL: Record<number, string> = { 30: "RBTC" };
 
 /** The auto-wrapped symbol on a chain, or undefined. */
 export function wrappedNativeSymbol(chainId: number): string | undefined {
@@ -378,4 +380,17 @@ export function pairsWith(chainId: number, symbol: string): string[] {
 /** The market for `a` against `b`: the configured pool market, else a derived synthetic one. */
 export function marketFor(chainId: number, a: string, b: string): Market | undefined {
   return directFor(chainId, a, b) ?? derivedMarket(chainId, a, b);
+}
+
+/**
+ * The market's symbols as a row shows them: a NATIVE order (its output leg the
+ * NativeBalance view, task 30) received the raw coin, so the wrapped side reads as the
+ * native coin (WRBTC → RBTC).
+ */
+export function rowSymbols(marketId: string, native: boolean | undefined): { base: string; quote: string } {
+  const m = marketById(marketId);
+  const wrapped = wrappedNativeSymbol(m.chainId);
+  const coin = NATIVE_SYMBOL[m.chainId];
+  const show = (s: string) => (native && wrapped && coin && s === wrapped ? coin : s);
+  return { base: show(m.base), quote: show(m.quote) };
 }

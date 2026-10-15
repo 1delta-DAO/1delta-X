@@ -1,4 +1,17 @@
-import { BLOCK_CLOCK_BIT, DELTA_VERIFY_OUTPUTS_BIT, forLegPreFund, isFillOnce, isProportional, ItemOp, OrderSide, overrideHasCarrier, unpackTiming, type Order } from "@1delta-x/sdk";
+import {
+  BLOCK_CLOCK_BIT,
+  classifyItemFill,
+  DELTA_VERIFY_OUTPUTS_BIT,
+  forLegPreFund,
+  isFillOnce,
+  isProportional,
+  ItemOp,
+  OrderSide,
+  overrideHasCarrier,
+  unpackTiming,
+  type ItemFillCaps,
+  type Order,
+} from "@1delta-x/sdk";
 import { decodeAbiParameters, zeroAddress, type Address } from "viem";
 
 import { MOC_FEE_BPS, type Config, type Policy } from "./config";
@@ -36,39 +49,102 @@ const ONE = 10n ** 18n;
 /** USDT0 (6 dec) → 18-dec scale factor. */
 const USDT0_TO_18 = 10n ** 12n;
 
+/** What {@link plainShape} may admit beyond the plain shape — each off unless given. */
+export interface ShapeExtras {
+  hasPermitBatch?: boolean;
+  sigless?: boolean;
+  /** The NativeUnwrapModule item shape (task 28) — recognised; routable only through an item fill. */
+  nativeUnwrap?: { module: Address; wrapped: Address };
+  /**
+   * NATIVE delivery through the `NativeBalance` view (task 30): a DIRECT order whose only
+   * output leg is `view`, routed as `wrapped` and unwrapped by the solver. Unset = off.
+   */
+  nativeBalance?: { view: Address; wrapped: Address };
+  /**
+   * Item fills through `executeItemFill` (task 31), with the target Settlement's
+   * capabilities (SDK `classifyItemFill`). Unset = every item refused.
+   */
+  itemFills?: ItemFillCaps;
+}
+
+/** What {@link plainShape} found beyond the plain shape. */
+export interface ShapeInfo {
+  /** The NativeUnwrapModule item shape (task 28). */
+  nativeOut?: boolean;
+  /** …and why it is not an item fill (it is then not routable). */
+  itemSkip?: string;
+  /** NATIVE delivery through the NativeBalance view (task 30). */
+  nativeBalance?: boolean;
+  /** An item fill: `executeItemFill`'s `lateItems` (SDK `classifyItemFill`). */
+  itemFill?: { lateItems: bigint };
+}
+
 /**
  * The plain one-in/one-out shape the beta app signs, minus the delivery-mode and
  * exclusivity checks (which differ per strategy). Every extra feature (items,
  * validators, modules, fee legs, proportional legs, single-signature permits) is a
  * way for the price we preview to differ from what we pay, so in the beta we
- * simply do not take it. Shared by the inventory and route strategies.
+ * simply do not take it — except, each behind its own switch in `extras`:
+ *   • NATIVE delivery (`nativeBalance`): the output leg is the `NativeBalance` view,
+ *     DIRECT only, to the maker, no items — returned as `nativeBalance: true`;
+ *   • ITEM fills (`itemFills`): an item-bearing PULL order the SDK classifier schedules
+ *     for `executeItemFill` — returned as `itemFill.lateItems`. Validators and
+ *     invariants are admitted on that path (they can only revert, and the fill is
+ *     simulated first), and the output leg may go to the module of an item that
+ *     consumes it (a pre-funded MAKE, a leg-reference TAKE_FOR);
+ *   • the NativeUnwrapModule shape (`nativeUnwrap`) — `nativeOut: true`, routable only
+ *     when it is also an item fill (route.ts `classifyRoute`).
+ * Shared by the inventory and route strategies (the inventory passes no switches).
  */
 export function plainShape(
   order: Order,
-  extras: { hasPermitBatch?: boolean; sigless?: boolean; nativeUnwrap?: { module: Address; wrapped: Address } } = {},
-): Verdict<{ nativeOut?: boolean }> {
+  extras: ShapeExtras = {},
+): Verdict<ShapeInfo> {
   if (extras.hasPermitBatch) return { ok: false, reason: "single-signature permit orders not supported" };
   if (extras.sigless) return { ok: false, reason: "on-chain-approved (sigless) orders not supported" };
   if (order.legsIn.length !== 1 || order.legsOut.length !== 1) return { ok: false, reason: "not one-in/one-out" };
-  if (order.validators.length || order.invariants.length) return { ok: false, reason: "validators/invariants not supported" };
-  // The ONE item shape we take: native-out (the maker receives raw RBTC, task 28).
-  if (order.items.length) {
-    if (!extras.nativeUnwrap) return { ok: false, reason: "items not supported" };
-    const n = nativeOutShape(order, extras.nativeUnwrap.module, extras.nativeUnwrap.wrapped);
-    if (!n.ok) return n;
-  }
   if (order.fillModule !== zeroAddress || order.pricingModule !== zeroAddress) {
     return { ok: false, reason: "fill/pricing modules not supported" };
   }
   const legIn = order.legsIn[0]!;
   const legOut = order.legsOut[0]!;
   if (isProportional(legIn.start)) return { ok: false, reason: "proportional (balance-relative) leg" };
-  if (order.items.length) return { ok: true, nativeOut: true }; // the leg goes to the module, checked above
-  if (legOut.recipient !== zeroAddress && legOut.recipient.toLowerCase() !== order.maker.toLowerCase()) {
-    return { ok: false, reason: "output goes to a third party" };
+  const toMaker = legOut.recipient === zeroAddress || eqAddr(legOut.recipient, order.maker);
+
+  // NATIVE DELIVERY through the NativeBalance view (task 30) — exactly the app's shape.
+  const nb = extras.nativeBalance;
+  if (nb && eqAddr(legIn.token, nb.view)) return { ok: false, reason: "NativeBalance as an input leg (a balance view cannot be pulled)" };
+  if (nb && eqAddr(legOut.token, nb.view)) {
+    if (order.items.length) return { ok: false, reason: "native (NativeBalance) order with items" };
+    if (order.validators.length || order.invariants.length) return { ok: false, reason: "validators/invariants not supported" };
+    if (!isDeltaVerify(order)) return { ok: false, reason: "a NativeBalance output needs DIRECT delivery (it cannot be pulled)" };
+    if (eqAddr(legIn.token, nb.wrapped)) return { ok: false, reason: "native-out from the wrapped native coin (an unwrap, not a swap)" };
+    if (!toMaker) return { ok: false, reason: "native output goes to a third party" };
+    return { ok: true, nativeBalance: true };
   }
+
+  if (order.items.length) {
+    // The NativeUnwrapModule shape (task 28) is recognised; it routes only as an item fill.
+    const module = extras.nativeUnwrap ? nativeOutShape(order, extras.nativeUnwrap.module, extras.nativeUnwrap.wrapped).ok : false;
+    if (!extras.itemFills) return module ? { ok: true, nativeOut: true, itemSkip: "item fills are off (ITEM_FILLS)" } : { ok: false, reason: "items not supported" };
+    const c = classifyItemFill(order, extras.itemFills);
+    if (c.path !== "executeItemFill") {
+      const why = c.path === "skip" ? c.reason : "no item path";
+      return module ? { ok: true, nativeOut: true, itemSkip: why } : { ok: false, reason: `item fill: ${why}` };
+    }
+    // The leg may go to the maker, or to the module of an item that consumes it.
+    if (!toMaker) {
+      const sink = order.items.some((it, k) => eqAddr(it.module, legOut.recipient) && (c.roles[k]!.kind === "make-prefund" || c.roles[k]!.kind === "take-for-leg"));
+      if (!sink) return { ok: false, reason: "output goes to a third party" };
+    }
+    return { ok: true, itemFill: { lateItems: c.lateItems }, ...(module ? { nativeOut: true } : {}) };
+  }
+  if (order.validators.length || order.invariants.length) return { ok: false, reason: "validators/invariants not supported" };
+  if (!toMaker) return { ok: false, reason: "output goes to a third party" };
   return { ok: true };
 }
+
+const eqAddr = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /**
  * NATIVE-OUT (task 28): the maker receives raw RBTC. Exactly the shape the app signs:

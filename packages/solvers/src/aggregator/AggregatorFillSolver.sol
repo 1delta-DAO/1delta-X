@@ -3,8 +3,9 @@ pragma solidity ^0.8.28;
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {PackedArrays} from "@core/settlement/PackedArrays.sol";
-import {Settlement, Order, CallbackMode, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
+import {Settlement, Order, CallbackMode, MatchStep} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
+import {Batch} from "@core/settlement/Batch.sol";
 import {RouteSandbox} from "./RouteSandbox.sol";
 
 /// @title AggregatorFillSolver
@@ -65,12 +66,33 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///  caller — the maker signed the delivery mode, the core enforces it, and a
 ///  route that pays the wrong recipient simply fails the core's delta check.
 ///  `minOut` and `maxPay` are ignored on this path (nothing is measured or
-///  pulled here); the route's own `amountInMaximum` is the solver's protection.
+///  pulled here) — except on a NATIVE order (below), where the WNATIVE does land
+///  here; the route's own `amountInMaximum` is the solver's protection.
 ///  Set `RoutePlan.amountOutOffset` on such a route: the exact-output word is then
 ///  rewritten with the LIVE `legsOut[0]` price the core is about to verify, so a
 ///  SELL included after its auction has decayed pays the maker the tick at
 ///  inclusion — not the quote — and the difference stays here as input residue
 ///  (2026-10; before it, that decay reached the maker as price improvement).
+///
+///  NATIVE DELIVERY (2026-10-14, solver v3, task 30) — raw native coin, zero capital
+///  ────────────────────────────────────────────────────────────────────────────────
+///  A DIRECT order whose `legsOut[0].token` is this instance's {NATIVE_BALANCE} (the
+///  `NativeBalance` view: `balanceOf(a) == a.balance`, packages/periphery) asks for raw
+///  native coin. The core only READS that view around the callback, so no Settlement
+///  change is needed. For such an order the route must end in {WNATIVE} and pay THIS
+///  contract — quote an opaque route with `recipient = this solver`; a pool route's last
+///  hop pays here by itself — and the TYPED callback then `withdraw`s exactly the core's
+///  `pricedOut[0]` and sends it with a full-gas `call` to the leg's recipient (from the
+///  order; `address(0)` = the maker). The spread over the priced amount stays here in
+///  WNATIVE and is split by the {SurplusPolicy} like any output surplus; `minOut` and
+///  `maxPay` keep their PULL meaning, measured in WNATIVE (see {_payNative}). Shape rules
+///  ({NativeLegShape}): direct only; no other leg may name WNATIVE or NATIVE_BALANCE; a
+///  NativeBalance leg other than leg 0 is not delivered (the core's delta check fails it).
+///  Measured on the live Rootstock Settlement (`test/NativeDeliveryRootstock.fork.t.sol`,
+///  deployed bytecode, solver floors seeded): +27.0k execution gas against the same
+///  order taking WRBTC, ~2.8k of it refunded at the end of the transaction. An EMPTY
+///  recipient account (no balance, nonce or code) adds the EVM's +25k new-account charge.
+///  Off by default: both constructor addresses zero.
 ///
 ///  ⚠ THE PRICED AMOUNT IS RESOLVED AT FILL TIME, AND AGGREGATOR CALLDATA IS NOT.
 ///  An aggregator bakes `amountIn` into the bytes it returns, but what the maker
@@ -242,15 +264,40 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///    • ITEM-BEARING orders — {executeItemFill}. The core's `PostInputs` mode is
 ///      item-free (`ReverseModeRequiresNoItems`), so this entry drives a ONE-ORDER
 ///      `matchSettle` plan instead: items that produce the input (a TAKE —
-///      withdraw, borrow) run first, the maker's remaining input is pulled, the
-///      input is pre-sent here, the route runs as the plan's `CALL` step and pays
-///      Settlement, the outputs are delivered, and items that consume the delivery
-///      (a wallet-funded MAKE — deposit, repay) run last. Zero inventory, zero
-///      flash, zero Settlement bytes. The core still refuses on that path what it
-///      refuses for every netted plan: SETTLE and TAKE_FOR items, PUSH-funded
-///      (pre-funded) MAKE items, and delta-verify orders — those stay with the
-///      flash family (`BaseFlashSolver`, which fills through `fill`) or an
-///      inventory filler.
+///      withdraw, borrow — or a SETTLE claim) run first, the maker's remaining input
+///      is pulled, the input is pre-sent here, the route runs as the plan's `CALL`
+///      step and pays Settlement, the outputs are delivered, and items that consume
+///      the delivery run last — a wallet-funded MAKE (deposit, repay) and, since the
+///      core change of 2026-10-14 (task 31), a PRE-FUNDED MAKE (the 15 pre-fund
+///      lending sinks, `NativeUnwrapModule`) and a leg-reference TAKE_FOR. The core
+///      hands an order its delivery ledger only at its DELIVER step, so such an item
+///      flagged EARLY fails closed (`ForLegInvalid`) instead of spending residue.
+///      Zero inventory, zero flash, zero Settlement bytes. Still refused on that path:
+///      delta-verify orders ({DirectNotMatchable} — the netted path cannot verify a
+///      recipient delta; use {executeFill}, which also carries NATIVE delivery), the
+///      core's BALANCE-relative TAKE_FOR form, and a CYCLE (a leverage TAKE_FOR whose
+///      borrow needs this fill's own delivery deposited first — `BatchNotWhole` /
+///      `LegUnfunded`): those stay with the flash family (`BaseFlashSolver`) or an
+///      inventory filler. `minBumpBps` / `amountOutOffset` cannot take effect there and
+///      are refused ({ItemFillUnsupported}).
+///    • MULTI-OUTPUT routes: an opaque route may produce several output tokens; every
+///      output token's proceeds of the fill are approved (pull) / pushed (netted)
+///      at their own delta, so one route can fund an order with two output legs in
+///      two tokens (an LP-mint shape). A POOL route is single-output: its path ends
+///      in the anchor output token, so a second output token gets no proceeds and
+///      the fill fails closed.
+///    • SETTLE RECEIPTS on {executeItemFill}: a SETTLE item pays its asset to THIS
+///      contract (`matchSettle`'s caller). Only `legsIn[0]`'s token is routed, so a
+///      receipt is SOLD by the route only if it is that token AND the item is flagged
+///      early (it lands before the route; the routed amount is the measured delta, so
+///      the delta-only rule covers it). A receipt in any OTHER token — a
+///      `ProportionalSweepModule` sweep of a second token, an NFT from a sale module —
+///      is neither routed nor split: it stays here as retained value, unreachable by
+///      later fills (every amount is a delta) and moved out by the operators with
+///      {sweep}. The legs must therefore be fundable from `legsIn[0]` alone; selling a
+///      foreign receipt in the same fill needs a multi-input route (the sandbox pushes
+///      and approves one token) and is not supported. An `OcoGroupModule` claim moves
+///      nothing and fills early or late.
 ///    • Single-signature PermitBatchWitness orders: their FIRST fill has no
 ///      callback entry (`fillWithPermit` passes no callback, and `fillWithCallback`
 ///      / `matchSettle` verify only an Order signature), so it needs capital up
@@ -314,7 +361,8 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///       after the fill.
 ///  The path must run from `legsIn[0]`'s token to the anchor output token, and on a
 ///  direct order the last hop pays `legsOut[0]`'s recipient (from the ORDER — never a
-///  plan field), on a pull order this contract. The full rule list and the PoCs that
+///  plan field), on a pull order — and on a NATIVE order, whose path ends in WNATIVE —
+///  this contract. The full rule list and the PoCs that
 ///  pin it: `test/AggregatorPoolRoute.t.sol`.
 ///
 ///  ERC-2612 PERMITS (2026-10-12) — gasless makers, one transaction
@@ -345,7 +393,8 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///        pays (`legsOut[0]`'s on every plain order), as what the route produced in
 ///        it — any inflow of that token the fill paid here BEFORE the route (an
 ///        input leg in the same token) is netted out first (review 2026-10-05).
-///        Ignored on a direct-delivery order (see the contract note)
+///        Ignored on a direct-delivery order (see the contract note), except a NATIVE
+///        one, where it floors the route's WNATIVE proceeds
 /// @param maxPay ceiling on what Settlement may pull from this contract in the
 ///        anchor output token — PER TOKEN, so two legs in it (maker + fee) must fit
 ///        under it together. `0` = no cap, meaning "up to THIS FILL's proceeds" —
@@ -362,22 +411,26 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///        exactly as the aggregator returned it.
 ///        See the ⚠ note on {AggregatorFillSolver} about resolved amounts.
 /// @param amountOutOffset byte offset within `data` of the 32-byte OUTPUT amount to
-///        rewrite with `legsOut[0]`'s live price at inclusion (the core's typed
-///        `pricedOut[0]`), or {NO_PATCH}. Meant for a DIRECT (delta-verify) order quoted
-///        as exact-output: the route then pays exactly what the core verifies, and the
-///        auction's decay since the quote stays here as input residue instead of
-///        reaching the maker as price improvement (task 05). Setting it switches the
-///        fill to the TYPED callback (~+5.9k gas; see `_typed`). Ignored by
-///        {AggregatorFillSolver.executeItemFill} (no priced amounts reach a `CALL`
-///        step, and direct orders are refused there). BREAKING (2026-10): new field.
+///        rewrite with the ANCHOR legs' live price at inclusion (the core's typed
+///        `pricedOut`), or {NO_PATCH}: on a DIRECT order `pricedOut[0]` (the leg the route
+///        pays); on a PULL order the sum over every leg in the anchor output token (the
+///        core pulls each from here — task 16, 2026-10-14; it used to write `pricedOut[0]`
+///        whatever the anchor, so a fee leg listed first made the word the fee). Meant
+///        for an exact-output quote: the route then produces exactly what the core
+///        demands, and the auction's decay since the quote stays here as input residue
+///        instead of reaching the maker as price improvement (task 05). Setting it
+///        switches the fill to the TYPED callback (~+5.9k gas; see `_typed`). REFUSED by
+///        {AggregatorFillSolver.executeItemFill} ({AggregatorFillSolver.ItemFillUnsupported},
+///        task 17 — no priced amount reaches a `CALL` step). BREAKING (2026-10): new field.
 /// @param minBumpBps the filler's PRICE FLOOR on the order's resolved bump, in bps of
 ///        the band — passed to `fillWithCallback` exactly as {Settlement.fillUpTo}
 ///        takes it (`0` = none; a miss reverts `BumpTooLow` before anything moves).
 ///        Set it to the bump the route was quoted at, so an order whose tick can move
 ///        maker-ward between quote and inclusion (a priority auction included at a
 ///        lower bid, a `gasBumpBps` order, a custom curve) reverts instead of eroding
-///        the spread. Ignored by {AggregatorFillSolver.executeItemFill} (`matchSettle`
-///        carries no floor). BREAKING (2026-10): new field.
+///        the spread. REFUSED by {AggregatorFillSolver.executeItemFill} when non-zero
+///        ({AggregatorFillSolver.ItemFillUnsupported}, task 17 — `matchSettle` carries
+///        no floor). BREAKING (2026-10): new field.
 /// @param profitRecipient where the FILLER'S share of the spread goes once the
 ///        maker is paid and the {SurplusPolicy} has taken the maker's and the
 ///        protocol's shares — less one wei of a token the solver held none of
@@ -478,8 +531,8 @@ uint256 constant NO_PATCH = 1 << 255;
 ///                             rewrites it with the routed delta, as on any route.
 ///        [32:64)  amountOut — `0` = EXACT-INPUT; otherwise the exact output paid to
 ///                             the payee. `amountOutOffset = 32` rewrites it with the
-///                             core's live `pricedOut[0]` (typed callback), as on any
-///                             route.
+///                             core's live price of the anchor legs (typed callback;
+///                             see {RoutePlan.amountOutOffset}), as on any route.
 ///        [64:)    path, in SWAP order: token0 ‖ fee(3) ‖ venue(1) ‖ token1 ‖ fee ‖
 ///                 venue ‖ token2 … — one 24-byte (fee, venue) pair per hop, 1 to
 ///                 {AggregatorFillSolver.MAX_POOL_HOPS} hops. `token0` must be the
@@ -547,10 +600,33 @@ struct FillRoute {
     uint256 maxPay;
     uint256 amountInOffset;
     uint256 amountOutOffset;
-    /// @dev Bit `j` set = output leg `j` is paid in `tokens[0]`, the anchor INPUT
-    ///      token (an in-kind fee leg). {onSettlementFill} keeps those legs' priced
-    ///      amounts here instead of routing them (review 2026-10-05 S1).
-    uint256 sameOut;
+    /// @dev THREE leg facts packed in one word (2026-10-14, solver v3; was `sameOut`,
+    ///      whose low bits keep their meaning):
+    ///        • bits [0, 127) — {LEGS_SAME}: bit `j` set = output leg `j` is paid in
+    ///          `tokens[0]`, the anchor INPUT token (an in-kind fee leg).
+    ///          {onSettlementFill} keeps those legs' priced amounts here instead of
+    ///          routing them (review 2026-10-05 S1);
+    ///        • bit 127 — {LEGS_NATIVE}: NATIVE delivery (task 30). `legsOut[0]` is in
+    ///          {AggregatorFillSolver.NATIVE_BALANCE}; the route ends in WNATIVE paid
+    ///          to THIS contract (`tokens[outAnchor]` is WNATIVE), and the typed
+    ///          callback unwraps `pricedOut[0]` and sends it to `payee`;
+    ///        • bits [128, 256) — the OUT-LEG MASK (task 16): bit `128 + j` = output
+    ///          leg `j`'s priced amount is part of the route's exact-output word
+    ///          (`amountOutOffset`). PULL: every leg paid in the anchor output token
+    ///          (the core pulls each of them from here); DIRECT: leg 0 alone (the leg
+    ///          the route — a pool route's last hop — pays). Empty when
+    ///          `amountOutOffset` is {NO_PATCH}.
+    ///      Any bit set ⇒ the fill needs the TYPED callback, so {_typed} still tests
+    ///      this one word. Legs past index 126 / 127 cannot be flagged: an order with
+    ///      that many output legs AND an in-kind leg or a patched exact-output word
+    ///      there under-keeps / under-produces, and the core's pull fails (closed).
+    ///      PACKED, NOT NEW FIELDS, BY MEASUREMENT (deployed via-IR bytecode, the
+    ///      `AggregatorFillGasTest` cold pull fill): two added words cost +589 gas — every
+    ///      word travels solver → Settlement → EXECUTOR → solver — and turning `direct`
+    ///      into a flags word cost +124 more (it changes {onFill}'s selector and the
+    ///      dispatch order). This layout keeps the struct's ABI type, and so {onFill}'s
+    ///      selector, exactly as before.
+    uint256 legs;
     /// @dev The order's distinct leg tokens; `tokens[0]` = `legsIn[0]`'s token.
     address[] tokens;
     /// @dev Each token's balance, taken in `executeFill` BEFORE Settlement moved
@@ -558,7 +634,10 @@ struct FillRoute {
     ///      callback can only ever reach this fill's own proceeds. `0` (unread) for
     ///      an output-only token on the direct path, which never lands here.
     uint256[] before;
-    /// @dev Bit `k` set = `tokens[k]` is paid to this contract by an input leg.
+    /// @dev Bit `k` set = `tokens[k]` is paid to this contract during the fill: by an
+    ///      input leg, or — a NATIVE order's WNATIVE anchor — by the route (set by
+    ///      {AggregatorFillSolver._nativeLeg}, so it is snapshotted, overspend-checked and
+    ///      split with no extra test on the hot path).
     uint256 inMask;
     /// @dev Bit `k` set = `tokens[k]` is owed by an output leg.
     uint256 outMask;
@@ -567,13 +646,25 @@ struct FillRoute {
     ///      `legsOut[0]`'s (see {_plan}).
     uint256 outAnchor;
     /// @dev The order carries {DutchAuction.deltaVerifyOutputs}: the route pays
-    ///      the maker itself and this contract never approves Settlement.
+    ///      the recipients itself and this contract never approves Settlement.
     bool direct;
     /// @dev Where a POOL route's last hop pays: `legsOut[0]`'s resolved recipient
-    ///      on a direct order, this contract otherwise. Set by {_plan} from the ORDER,
-    ///      never from the plan; unused (zero) on an opaque route.
+    ///      on a direct order, this contract otherwise — and on a NATIVE order (any
+    ///      route) the native leg's resolved recipient, while the route itself pays
+    ///      this contract. Set by {_plan} from the ORDER, never from the plan; zero on
+    ///      an opaque non-native route.
     address payee;
     bytes data;
+}
+
+/// @dev {FillRoute.legs} fields — see there.
+uint256 constant LEGS_SAME = (1 << 127) - 1;
+uint256 constant LEGS_NATIVE = 1 << 127;
+uint256 constant LEGS_OUT_SHIFT = 128;
+
+/// @dev The wrapped-native token's unwrap (WETH9 / WRBTC).
+interface IWNative {
+    function withdraw(uint256 amount) external;
 }
 
 contract AggregatorFillSolver {
@@ -664,6 +755,25 @@ contract AggregatorFillSolver {
     uint160 private constant MIN_SQRT_RATIO_PLUS_1 = 4295128740;
     uint160 private constant MAX_SQRT_RATIO_MINUS_1 = 1461446703485210103287273052203988822378723970341;
 
+    /// @notice The `NativeBalance` view token (packages/periphery/src/NativeBalance.sol)
+    ///         a DIRECT order names as `legsOut[0].token` to receive raw native coin;
+    ///         `address(0)` = native delivery OFF on this instance (task 30).
+    address private immutable NATIVE_BALANCE;
+    /// @notice The wrapped native token a native order's route must end in — WRBTC on
+    ///         Rootstock. Unwrapped here and sent to the leg's recipient. `address(0)`
+    ///         exactly when {NATIVE_BALANCE} is.
+    address private immutable WNATIVE;
+
+    /// @notice This instance's native-delivery pair (task 30): the `NativeBalance` view
+    ///         token a DIRECT order names as `legsOut[0].token`, and the wrapped native
+    ///         its route must end in. Both zero = native delivery off.
+    /// @dev    ONE getter for the two private immutables rather than two public ones:
+    ///         every external function lengthens the selector dispatch every fill pays,
+    ///         and two getters measured +44 gas on the pull hot path.
+    function nativeDelivery() external view returns (address nativeBalance, address wnative) {
+        return (NATIVE_BALANCE, WNATIVE);
+    }
+
     /// @notice An operator took retained value out — see {sweep}.
     event Swept(address indexed token, address indexed to, uint256 amount);
 
@@ -731,6 +841,25 @@ contract AggregatorFillSolver {
     /// @dev `token.permit` failed AND Settlement's allowance from the maker is still
     ///      below the permit's value (it was neither relayed nor approved otherwise).
     error PermitFailed(address token);
+    /// @dev {executeItemFill} was given a `minBumpBps` or an `amountOutOffset`: the
+    ///      netted path can honour neither (`matchSettle` carries no bump floor, and no
+    ///      priced amount reaches a `CALL` step), so an operator's floor would silently
+    ///      do nothing (task 17). Refused before anything moves.
+    error ItemFillUnsupported();
+    /// @dev The constructor's native pair is half-set (one of `nativeBalance` /
+    ///      `wnative` zero, or both the same address).
+    error BadNative();
+    /// @dev A native order (`legsOut[0].token == NATIVE_BALANCE`) of a shape this
+    ///      contract does not deliver: not DIRECT (a pull leg in a view token can never
+    ///      be paid — the core's `transferFrom` on it reverts anyway, this fails before
+    ///      the route), or WNATIVE / NATIVE_BALANCE named by any OTHER leg (input or
+    ///      output) — the WNATIVE delta here would then not be this leg's alone.
+    error NativeLegShape();
+    /// @dev The native send to the leg's recipient failed (its `receive()` reverted).
+    ///      Same posture as `NativeUnwrapModule`: the whole fill reverts.
+    error NativeSendFailed(address to);
+    /// @dev Native coin from anything but {WNATIVE}'s `withdraw`.
+    error NotWNative();
 
     /// @param operators who may call `executeFill`: 1..{MAX_SET} non-zero addresses.
     ///        EMPTY REVERTS ({NoOperators}) — see the trust-model note.
@@ -742,12 +871,25 @@ contract AggregatorFillSolver {
     ///        constructor deploys, which may call any target. BREAKING (2026-10
     ///        quick audit): an empty operator set no longer means "permissionless";
     ///        it reverts. BREAKING (2026-10-12): the `venues` argument.
+    /// @param nativeBalance the `NativeBalance` view token direct native orders name
+    ///        (task 30) — `address(0)` turns native delivery off ({NATIVE_BALANCE})
+    /// @param wnative the wrapped native the route ends in for such an order (WRBTC on
+    ///        Rootstock) — `address(0)` exactly when `nativeBalance` is ({BadNative}).
+    ///        BREAKING (2026-10-14, solver v3): both arguments are new.
     constructor(
         address settlement,
         address[] memory operators,
         SurplusPolicy memory policy,
-        PoolVenue[] memory venues
+        PoolVenue[] memory venues,
+        address nativeBalance,
+        address wnative
     ) {
+        if ((nativeBalance == address(0)) != (wnative == address(0)) || (wnative != address(0) && nativeBalance == wnative))
+        {
+            revert BadNative();
+        }
+        NATIVE_BALANCE = nativeBalance;
+        WNATIVE = wnative;
         if (venues.length > MAX_SET) revert BadSetSize();
         for (uint256 i; i < venues.length; i++) {
             if (venues[i].factory == address(0) || venues[i].initCodeHash == bytes32(0)) revert BadVenue();
@@ -778,6 +920,18 @@ contract AggregatorFillSolver {
             if (operators[i] == address(0)) revert BadOperator();
         }
         (OPERATOR0, OPERATOR1, OPERATOR2, OPERATOR3) = _four(operators);
+    }
+
+    /// @notice Accepts native coin from {WNATIVE}'s `withdraw` ONLY — the unwrap step of
+    ///         a native delivery, which is sent on within the same callback. Anything
+    ///         else reverts {NotWNative}, so no route, maker or stranger can park native
+    ///         here by a plain send (SELFDESTRUCT / coinbase cannot be refused; such coin
+    ///         is never spent: every send is exactly what that callback unwrapped).
+    /// @dev    WETH9 / WRBTC `withdraw` pays with `transfer` (2,300 gas stipend): this
+    ///         body is one immutable compare and must stay that small. On an instance
+    ///         with native delivery off `WNATIVE` is zero and nothing is accepted.
+    receive() external payable {
+        if (msg.sender != WNATIVE) revert NotWNative();
     }
 
     /// @dev Spread a set of 1..{MAX_SET} entries over four slots, repeating entry
@@ -950,7 +1104,6 @@ contract AggregatorFillSolver {
             unchecked {
                 --k;
             }
-            // On the direct path an output-only token never lands here.
             if (route.direct && route.inMask & (1 << k) == 0) continue;
             _splitSurplus(route.tokens[k], route.before[k], order.maker, plan, to);
         }
@@ -977,7 +1130,10 @@ contract AggregatorFillSolver {
     ///       `minOut` — per token, see {RoutePlan});
     ///    5. DELIVER the outputs from the pool;
     ///    6. ITEM k for every item flagged in `lateItems` — the ones that CONSUME the
-    ///       delivery (a wallet-funded MAKE: deposit, repay).
+    ///       delivery: a wallet-funded MAKE (deposit, repay), a PRE-FUNDED MAKE (swap →
+    ///       supply / repay into a pre-fund module, `NativeUnwrapModule`), a
+    ///       leg-reference TAKE_FOR. Such an item flagged early reverts in the core
+    ///       (`ForLegInvalid`: its order's delivery ledger is empty until DELIVER).
     ///
     ///  Settlement then sweeps the pool's surplus — the spread — back HERE (the
     ///  plan's `profitRecipient`), and it is split by the same {SurplusPolicy} and
@@ -989,8 +1145,11 @@ contract AggregatorFillSolver {
     ///  `lateItems` violates reverts `ItemPolicyViolated`), reconciles every input
     ///  leg, checks completeness and the invariants at the end, and floors every
     ///  touched token at its pre-plan balance. The plan's shape limits are the
-    ///  core's: no SETTLE / TAKE_FOR / PUSH-funded MAKE item, no delta-verify order,
-    ///  no repeated input token.
+    ///  core's: no delta-verify order, no repeated input token, no BALANCE-relative
+    ///  TAKE_FOR — pre-funded MAKE, leg-reference TAKE_FOR and SETTLE items are admitted
+    ///  since 2026-10-14 (task 31; flag the delivery-consuming ones LATE, an early one
+    ///  reverts `ForLegInvalid`). A SETTLE receipt lands HERE: see the contract note
+    ///  ("SETTLE RECEIPTS") for when the route sells it and when it is only retained.
     ///
     ///  Trust and gating are {executeFill}'s, unchanged: the sandboxed route, the
     ///  delta-only amounts, the arming flag and the operator gate all apply as
@@ -1027,21 +1186,23 @@ contract AggregatorFillSolver {
     ) external returns (uint256[] memory fillAmountsOut) {
         if (!isOperator(msg.sender)) revert NotOperator(msg.sender);
         if (_active != 1) revert Reentrancy();
+        // Task 17: neither field can take effect on the netted path, so a set one is
+        // an operator expecting protection it would not get — refuse, never ignore.
+        if (plan.minBumpBps != 0 || plan.amountOutOffset < NO_PATCH) revert ItemFillUnsupported();
         // The netted path's PULL step draws through the same `Base._pullViaPermit3`
         // fallback as {executeFill}'s, so a maker permit funds it identically.
         if (permits.length != 0) _permits(permits, order.maker);
         FillRoute memory route = _plan(order, plan);
         if (route.direct) revert DirectNotMatchable();
-        MatchPlan memory mp = _matchPlan(order, sig, fillAmount, takerData, route, lateItems);
+        bytes memory cd = _matchCalldata(order, sig, fillAmount, takerData, route, lateItems);
         _active = 4;
-        (uint256[][] memory outs,,) = SETTLEMENT.matchSettle(mp);
+        fillAmountsOut = _callMatch(cd);
         // Same reasoning as {executeFill}: a plan whose CALL never reached
         // {onMatchRoute} delivered out of something other than this fill's route.
         if (_active != 5) {
             _active = 1;
             revert CallbackDidNotRun();
         }
-        fillAmountsOut = outs[0];
 
         // Every token's increase over the pre-fill snapshot is this fill's spread —
         // the pool's sweep landed it here — split exactly as {executeFill} splits.
@@ -1061,39 +1222,216 @@ contract AggregatorFillSolver {
         }
     }
 
-    /// @dev The one-order plan {executeItemFill} runs — see the step list there.
-    ///      Token indices are Settlement's universe indices: `matchSettle` derives
-    ///      its universe as the order's input tokens then its output tokens, first
-    ///      occurrence kept — the SAME rule {_plan} builds `route.tokens` by, so a
-    ///      `PRESEND` index here names the same token there.
-    function _matchPlan(
+    /// @dev The one-order plan {executeItemFill} runs — see the step list there —
+    ///      as the finished `matchSettle(MatchPlan)` CALLDATA. Token indices are
+    ///      Settlement's universe indices: `matchSettle` derives its universe as the
+    ///      order's input tokens then its output tokens, first occurrence kept — the
+    ///      SAME rule {_plan} builds `route.tokens` by, so a `PRESEND` index here names
+    ///      the same token there.
+    ///
+    ///      HAND-ENCODED (2026-10-15, size pass). NOT done for `fillWithCallback` on
+    ///      purpose: the same treatment there measured −842 B but +1,261 gas on EVERY
+    ///      `executeFill` (the compiler's calldata re-encoder is cheaper than a sized,
+    ///      separately allocated buffer plus a copy of the callback blob) — the hot
+    ///      path pays for size it does not need. Building a `MatchPlan memory` meant
+    ///      copying the calldata `Order` into memory field by field (six `bytes`
+    ///      decodes) and then ABI-encoding the nested `Order[]`/`bytes[]` struct back
+    ///      out — two general coders for one fixed shape. Measured on the deployed
+    ///      profile: −789 B runtime (23,566 → 22,777), −7.0k gas per item fill, −42 gas
+    ///      on every `executeFill` (the shared code got smaller). The encoding below is
+    ///      the canonical ABI encoding of the same plan, written once into memory
+    ///      allocated up front:
+    ///
+    ///        selector ‖ 0x20 ‖ T: [8-word head: offsets of orders, sigs, fillAmounts,
+    ///        takerDatas, schedule, callTargets, callDatas; profitRecipient = this]
+    ///        ‖ orders = [1, 0x20, Order tuple] ‖ sigs = [1, 0x20, sig]
+    ///        ‖ fillAmounts = [1, fillAmount] ‖ takerDatas = [1, 0x20, takerData]
+    ///        ‖ schedule ‖ callTargets = [1, this] ‖ callDatas = [1, 0x20, onMatchRoute]
+    ///
+    ///      The Order tuple is re-encoded CANONICALLY by {_putOrder}: its 15 head words
+    ///      are copied and its six `bytes` tails rewritten in field order through the
+    ///      compiler's own bounds-checked calldata accessors, so a non-canonical input
+    ///      encoding cannot change what Settlement decodes. Static head words are copied
+    ///      raw: a dirty address word is not cleaned here, and Settlement's decoder
+    ///      rejects it (fails closed) exactly as the copy into memory used to.
+    function _matchCalldata(
         Order calldata order,
         bytes calldata sig,
         uint256 fillAmount,
         bytes calldata takerData,
         FillRoute memory route,
         uint256 lateItems
-    ) private view returns (MatchPlan memory p) {
-        uint256 nItems = PackedArrays.countUnchecked(order.items);
-        if (lateItems >> nItems != 0) revert BadItemSchedule();
-        p.schedule = _schedule(nItems, PackedArrays.countUnchecked(order.legsIn), route, lateItems);
-        p.orders = new Order[](1);
-        p.orders[0] = order;
-        p.sigs = new bytes[](1);
-        p.sigs[0] = sig;
-        p.fillAmounts = new uint256[](1);
-        p.fillAmounts[0] = fillAmount;
-        p.takerDatas = new bytes[](1);
-        p.takerDatas[0] = takerData;
-        p.callTargets = new address[](1);
-        p.callTargets[0] = address(this);
-        p.callDatas = new bytes[](1);
-        p.callDatas[0] = abi.encodeCall(this.onMatchRoute, (route));
-        // The sweep lands HERE so the spread is split by policy, never paid around it.
-        p.profitRecipient = address(this);
+    ) private view returns (bytes memory cd) {
+        uint256[] memory schedule;
+        {
+            uint256 nItems = PackedArrays.countUnchecked(order.items);
+            if (lateItems >> nItems != 0) revert BadItemSchedule();
+            schedule = _schedule(nItems, PackedArrays.countUnchecked(order.legsIn), route, lateItems);
+        }
+        cd = _writeMatch(order, sig, fillAmount, takerData, schedule, abi.encodeCall(this.onMatchRoute, (route)));
     }
 
-    /// @dev The step list of {_matchPlan}, in its own frame (legacy-profile stack).
+    /// @dev {_matchCalldata}'s writer, in its own frame (legacy-profile stack).
+    function _writeMatch(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        bytes calldata takerData,
+        uint256[] memory schedule,
+        bytes memory cb
+    ) private view returns (bytes memory cd) {
+        // Size first, allocate once, then write: no allocation can land inside the
+        // buffer while it is being filled.
+        cd = _alloc(
+            0x24 + 0x100 // selector + tuple offset + tuple head
+                + 0x40 + _orderSize(order) // orders
+                + 0x60 + _ceil32(sig.length) // sigs
+                + 0x40 // fillAmounts
+                + 0x60 + _ceil32(takerData.length) // takerDatas
+                + ((schedule.length + 1) << 5) // schedule
+                + 0x40 // callTargets
+                + 0x60 + _ceil32(cb.length) // callDatas
+        );
+        uint256 T;
+        uint256 t;
+        bytes4 sel = Batch.matchSettle.selector; // declared on Batch; not reachable via the derived name
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(add(cd, 0x20), sel)
+            mstore(add(cd, 0x24), 0x20)
+            T := add(cd, 0x44)
+            t := add(T, 0x100)
+            mstore(T, 0x100) //                     orders
+            mstore(t, 1)
+            mstore(add(t, 0x20), 0x20)
+            t := add(t, 0x40)
+        }
+        t = _putOrder(order, t);
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(add(T, 0x20), sub(t, T)) //      sigs
+        }
+        t = _putBytes1(t, sig);
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(add(T, 0x40), sub(t, T)) //      fillAmounts
+            mstore(t, 1)
+            mstore(add(t, 0x20), fillAmount)
+            t := add(t, 0x40)
+            mstore(add(T, 0x60), sub(t, T)) //      takerDatas
+        }
+        t = _putBytes1(t, takerData);
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(add(T, 0x80), sub(t, T)) //      schedule (length word + steps)
+            let w := shl(5, add(mload(schedule), 1))
+            mcopy(t, schedule, w)
+            t := add(t, w)
+            mstore(add(T, 0xa0), sub(t, T)) //      callTargets = [this]
+            mstore(t, 1)
+            mstore(add(t, 0x20), address())
+            t := add(t, 0x40)
+            mstore(add(T, 0xc0), sub(t, T)) //      callDatas = [onMatchRoute(route)]
+            mstore(t, 1)
+            mstore(add(t, 0x20), 0x20)
+            let l := mload(cb)
+            mstore(add(t, 0x40), l)
+            mcopy(add(t, 0x60), add(cb, 0x20), l)
+            mstore(add(add(t, 0x60), l), 0)
+            mstore(add(T, 0xe0), address()) //     profitRecipient: the sweep lands HERE, so
+            //                                       the spread is split by policy
+        }
+    }
+
+    /// @dev A `bytes` of `size` with +0x20 slack past its padded end: a tail is
+    ///      zero-padded with one whole-word store that may reach one word beyond it.
+    function _alloc(uint256 size) private pure returns (bytes memory b) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            b := mload(0x40)
+            mstore(b, size)
+            mstore(0x40, add(add(b, 0x40), and(add(size, 31), not(31))))
+        }
+    }
+
+    function _ceil32(uint256 n) private pure returns (uint256) {
+        return (n + 31) & ~uint256(31);
+    }
+
+    /// @dev Canonical encoded size of an `Order` tuple: 15 head words + six `bytes` tails.
+    function _orderSize(Order calldata o) private pure returns (uint256) {
+        return 0x1e0 + 0xc0 + _ceil32(o.legsIn.length) + _ceil32(o.legsOut.length) + _ceil32(o.curve.length)
+            + _ceil32(o.items.length) + _ceil32(o.validators.length) + _ceil32(o.invariants.length);
+    }
+
+    /// @dev Write `o` canonically at `dst`; returns the end. Head copied (15 words), then
+    ///      each `bytes` field's offset word rewritten and its tail appended — fields 2,
+    ///      3, 8, 9, 10, 11 of {Order} (legsIn, legsOut, curve, items, validators,
+    ///      invariants), each read through the compiler's bounds-checked accessor.
+    function _putOrder(Order calldata o, uint256 dst) private pure returns (uint256 t) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            calldatacopy(dst, o, 0x1e0)
+        }
+        t = _putTail(dst, 2, dst + 0x1e0, o.legsIn);
+        t = _putTail(dst, 3, t, o.legsOut);
+        t = _putTail(dst, 8, t, o.curve);
+        t = _putTail(dst, 9, t, o.items);
+        t = _putTail(dst, 10, t, o.validators);
+        t = _putTail(dst, 11, t, o.invariants);
+    }
+
+    /// @dev Field `field` of the tuple at `base` := offset of a new `bytes` tail at `t`.
+    function _putTail(uint256 base, uint256 field, uint256 t, bytes calldata b) private pure returns (uint256) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(add(base, shl(5, field)), sub(t, base))
+            mstore(t, b.length)
+            calldatacopy(add(t, 0x20), b.offset, b.length)
+            mstore(add(add(t, 0x20), b.length), 0)
+            t := add(add(t, 0x20), and(add(b.length, 31), not(31)))
+        }
+        return t;
+    }
+
+    /// @dev A one-element `bytes[]` at `t`: `[1, 0x20, b]`; returns the end.
+    function _putBytes1(uint256 t, bytes calldata b) private pure returns (uint256) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(t, 1)
+        }
+        return _putTail(t + 0x20, 0, t + 0x40, b); // element offset 0x20, then the tail
+    }
+
+    /// @dev Call `matchSettle` with the hand-encoded plan; bubble a revert verbatim (the
+    ///      core's plan errors must reach the operator unchanged), and return `outs[0]`
+    ///      — the delivered amounts of the one order — out of the `(uint256[][],
+    ///      address[], uint256[])` return. Every read is a `returndatacopy`, which
+    ///      reverts past the return buffer, and the inner length is bounded by it first.
+    function _callMatch(bytes memory cd) private returns (uint256[] memory outs0) {
+        address s = address(SETTLEMENT);
+        /// @solidity memory-safe-assembly
+        assembly {
+            if iszero(call(gas(), s, 0, add(cd, 0x20), mload(cd), 0, 0)) {
+                let p := mload(0x40)
+                returndatacopy(p, 0, returndatasize())
+                revert(p, returndatasize())
+            }
+            returndatacopy(0, 0, 0x20)
+            let o := add(mload(0), 0x20) //            outs: first element-offset word
+            returndatacopy(0, o, 0x20)
+            let a := add(o, mload(0)) //               outs[0]: its length word
+            returndatacopy(0, a, 0x20)
+            let m := mload(0)
+            if gt(m, shr(5, returndatasize())) { revert(0, 0) }
+            outs0 := mload(0x40)
+            let w := shl(5, add(m, 1))
+            returndatacopy(outs0, a, w)
+            mstore(0x40, add(outs0, w))
+        }
+    }
+
+    /// @dev The step list of {_matchCalldata}, in its own frame (legacy-profile stack).
     function _schedule(uint256 nItems, uint256 nIn, FillRoute memory route, uint256 lateItems)
         private
         pure
@@ -1135,6 +1473,38 @@ contract AggregatorFillSolver {
         if (_active != 1) revert Reentrancy();
         SafeTransferLib.safeTransfer(token, to, amount);
         emit Swept(token, to, amount);
+    }
+
+    /// @notice {sweep} for many tokens in ONE transaction: every token's balance above
+    ///         `keep` goes to `to`. `keep = 1` leaves the self-seeded 1-wei floors (the
+    ///         routine payout — the next fill's balance write stays a warm non-zero →
+    ///         non-zero SSTORE); `keep = 0` empties the contract (retiring an instance).
+    ///         A token at or below `keep` is skipped, not refused, so a fixed token list
+    ///         can be swept whatever has accrued.
+    /// @dev    Same authority and the same safety argument as {sweep}: operators only,
+    ///         never mid-fill, and nothing held here between fills belongs to anyone
+    ///         else. The amount is read on-chain at execution, so a fill landing between
+    ///         the operator's read and inclusion only changes what is swept — never makes
+    ///         the batch revert. One `Swept` per token moved, as {sweep} emits.
+    ///
+    ///         WHY IT EXISTS (2026-10-15): retain mode parks the spread in up to one
+    ///         balance per token the solver has been paid in. Paying it out token by
+    ///         token cost a 21k-gas transaction base each, plus a calldata amount the
+    ///         operator had to read first; here the base is paid once.
+    function sweepAll(address[] calldata tokens, address to, uint256 keep) external {
+        if (!isOperator(msg.sender)) revert NotOperator(msg.sender);
+        if (_active != 1) revert Reentrancy();
+        for (uint256 i; i < tokens.length; ++i) {
+            address token = tokens[i];
+            uint256 bal = SafeTransferLib.balanceOf(token, address(this));
+            if (bal > keep) {
+                unchecked {
+                    bal -= keep;
+                }
+                SafeTransferLib.safeTransfer(token, to, bal);
+                emit Swept(token, to, bal);
+            }
+        }
     }
 
     /// @dev Run the maker's ERC-2612 permits before the fill (2026-10-12) — the
@@ -1321,10 +1691,23 @@ contract AggregatorFillSolver {
         bool anchored;
         for (uint256 j; j < nOut; ++j) {
             uint256 k;
-            (k, n) = _slot(toks, n, PackedArrays.legOutToken(legsOut, j));
+            address t = PackedArrays.legOutToken(legsOut, j);
+            // NATIVE DELIVERY (task 30): a `NativeBalance` leg 0 is measured, routed and
+            // split as WNATIVE — the token the route actually produces here. One
+            // compare on the hot path; the shape checks ({_nativeLeg}) run after the
+            // loop, only on a hit. (Calling {_nativeLeg} from inside the loop, or
+            // testing `toks[outAnchor]` after it, measured 50–70 gas worse on the
+            // deployed pull fill — via-IR stack pressure, not the compare.)
+            if (t == NATIVE_BALANCE && j == 0) {
+                t = WNATIVE;
+                r.legs = LEGS_NATIVE;
+            }
+            (k, n) = _slot(toks, n, t);
             uint256 bit = 1 << k;
             r.outMask |= bit;
-            if (k == 0) r.sameOut |= 1 << j; // an output leg in the anchor input token
+            // An output leg in the anchor input token ({LEGS_SAME}; see {FillRoute.legs} —
+            // a leg past index 126 is masked off rather than tested for: −17 gas).
+            if (k == 0) r.legs |= (1 << j) & LEGS_SAME;
             if (!anchored) {
                 anchored = r.inMask & bit == 0;
                 if (j == 0 || anchored) r.outAnchor = k;
@@ -1334,15 +1717,22 @@ contract AggregatorFillSolver {
         assembly {
             mstore(toks, n) // shrink to the n slots actually used
         }
+        if (r.legs & LEGS_NATIVE != 0) _nativeLeg(order, r);
         r.tokens = toks;
         r.before = new uint256[](n);
         for (uint256 k; k < n; ++k) {
-            // Nothing lands here for an output-only token on the direct path, so
-            // nothing to measure against.
             if (r.direct && r.inMask & (1 << k) == 0) continue;
             r.before[k] = SafeTransferLib.balanceOf(toks[k], address(this));
         }
-        if (plan.router == POOL_ROUTE) r.payee = _payee(order, legsOut, toks[r.outAnchor], r.direct);
+        // A native order's `payee` is the native recipient, set by {_nativeLeg}; its
+        // pool route pays HERE ({_poolRoute}). Every other pool route's last hop pays
+        // `legsOut[0]`'s recipient (direct) or this contract (pull).
+        if (plan.router == POOL_ROUTE && r.legs & LEGS_NATIVE == 0) {
+            r.payee = _payee(order, legsOut, toks[r.outAnchor], r.direct);
+        }
+        if (plan.amountOutOffset < NO_PATCH) {
+            r.legs |= r.direct ? 1 << LEGS_OUT_SHIFT : _outLegs(legsOut, nOut, toks[r.outAnchor]);
+        }
         r.router = plan.router;
         r.minOut = plan.minOut;
         r.maxPay = plan.maxPay;
@@ -1359,6 +1749,72 @@ contract AggregatorFillSolver {
         if (n == MAX_TOKENS) revert TooManyTokens();
         toks[n] = t;
         return (n, n + 1);
+    }
+
+    /// @dev A native order's leg 0 (`legsOut[0].token == NATIVE_BALANCE`, already
+    ///      slotted as WNATIVE by {_plan}, so the route's anchor output, `minOut` /
+    ///      `maxPay`, the sandbox sweep and the surplus split all see the token that
+    ///      actually lands here): check the shape, record the recipient in `payee`, and
+    ///      flag the WNATIVE slot in `inMask` — "paid to this contract during the
+    ///      fill" — which is exactly what makes the snapshot, the {RouteOverspent}
+    ///      check and the split include it with no extra test on the hot path (a
+    ///      direct order skips only tokens outside `inMask`). Its pre-route inflow is
+    ///      zero, so {_floor} stays `minOut`. {NativeLegShape} unless:
+    ///        • the order is DIRECT — on the pull path the core would `transferFrom`
+    ///          the view token and revert after the route ran; refuse before it;
+    ///        • no other leg, input or output, names WNATIVE or NATIVE_BALANCE — the
+    ///          WNATIVE delta here must be the route's output for THIS leg alone
+    ///          (another WNATIVE leg would share the slot; another NATIVE_BALANCE leg
+    ///          is a native delivery this contract does not make);
+    ///        • no other OUTPUT leg pays the same recipient — one native send must not
+    ///          satisfy a second native view's delta check (review L-1).
+    ///      The recipient comes from the ORDER (`address(0)` = the maker), never a
+    ///      plan field: a route cannot redirect the coin. Runs only on native orders.
+    function _nativeLeg(Order calldata order, FillRoute memory r) private view {
+        bytes calldata legsIn = order.legsIn;
+        bytes calldata legsOut = order.legsOut;
+        address w = WNATIVE;
+        address nb = NATIVE_BALANCE;
+        // `nb == 0` (native delivery off) reaches here only for a leg naming token
+        // `address(0)`, which no path can settle: refuse it the same way.
+        if (!r.direct || nb == address(0)) revert NativeLegShape();
+        uint256 nIn = PackedArrays.countUnchecked(legsIn); // validated by the caller
+        for (uint256 i; i < nIn; ++i) {
+            address t = PackedArrays.legInToken(legsIn, i);
+            if (t == w || t == nb) revert NativeLegShape();
+        }
+        (,,, address to) = PackedArrays.legOut(legsOut, 0);
+        address payee = to == address(0) ? order.maker : to;
+        uint256 nOut = PackedArrays.countUnchecked(legsOut);
+        for (uint256 j = 1; j < nOut; ++j) {
+            (address t,,, address rj) = PackedArrays.legOut(legsOut, j);
+            // No other leg to the SAME recipient (review 2026-10-14 L-1): a second
+            // native view — another `NativeBalance` deployment, or any token whose
+            // `balanceOf` reads `a.balance` — would be satisfied by this one send,
+            // because the core's duplicate-leg guard compares token ADDRESSES. A
+            // fee leg to someone else is unaffected.
+            if (t == w || t == nb || (rj == address(0) ? order.maker : rj) == payee) revert NativeLegShape();
+        }
+        r.payee = payee;
+        r.inMask |= 1 << r.outAnchor;
+    }
+
+    /// @dev {FillRoute.legs}' out-leg mask on a PULL order — which output legs' priced
+    ///      amounts the exact-output word carries (task 16; before it the word took
+    ///      `pricedOut[0]` whatever the anchor): every leg in the anchor output token,
+    ///      because the core pulls each of them from here — a fee leg listed before
+    ///      the maker's (`[tokenIn fee, tokenOut]`, `[tokenOut fee, tokenOut]`) used to
+    ///      make the word the FEE, and the pull then failed. A DIRECT order's mask is
+    ///      leg 0 alone and is set inline by {_plan} (the leg the route — a pool route's
+    ///      last hop — pays; a second leg in the same token goes to a different
+    ///      recipient, `DeltaVerifyDuplicateLeg`, and the route must pay it itself).
+    ///      Only computed when `amountOutOffset` is set. Returned already shifted into
+    ///      {FillRoute.legs}' out-leg bits.
+    function _outLegs(bytes calldata legsOut, uint256 nOut, address anchorOut) private pure returns (uint256 m) {
+        if (nOut > 256 - LEGS_OUT_SHIFT) nOut = 256 - LEGS_OUT_SHIFT;
+        for (uint256 j; j < nOut; ++j) {
+            if (PackedArrays.legOutToken(legsOut, j) == anchorOut) m |= 1 << (LEGS_OUT_SHIFT + j);
+        }
     }
 
     /// @dev A pool route's final recipient, from the ORDER: on a direct order the
@@ -1388,8 +1844,15 @@ contract AggregatorFillSolver {
     ///      larger blob — measured +5.9k execution gas on the direct two-token
     ///      benchmark (`test_gas_direct_seeded_liveAmountOut` vs `test_gas_direct_seeded`
     ///      in `test/AggregatorFillGas.t.sol`).
+    ///
+    ///      A NATIVE order is always typed: the amount to unwrap and send is the core's
+    ///      `pricedOut[0]`, and the typed payload is the only place this contract learns
+    ///      it without re-pricing the order itself (FillRecovery: carrying the order in
+    ///      the callback plus a second {Pricing} pass — more gas than the ~+5.9k typed
+    ///      premium, and more code). Sending the whole WNATIVE delta instead would hand
+    ///      the spread to the maker and starve the {SurplusPolicy}.
     function _typed(FillRoute memory route) private pure returns (bool) {
-        return route.sameOut != 0 || route.amountOutOffset < NO_PATCH;
+        return route.legs != 0 || route.amountOutOffset < NO_PATCH;
     }
 
     /// @dev The callback mode: `PostInputsDirect`, plus the TYPED bit when {_typed}.
@@ -1421,7 +1884,8 @@ contract AggregatorFillSolver {
 
     /// @dev The route's calldata with the input amount rewritten to what the fill
     ///      actually routes and, if asked, the output amount to the live price of
-    ///      `legsOut[0]` — see the ⚠ note on resolved amounts.
+    ///      the anchor legs ({RoutePlan.amountOutOffset}) — see the ⚠ note on resolved
+    ///      amounts.
     ///
     ///      Rewriting a caller-supplied blob is only safe because BOTH halves are
     ///      the solver's own: it supplies the calldata and it owns the funds at
@@ -1481,9 +1945,11 @@ contract AggregatorFillSolver {
     ///             rather than routed — the same `input − leg` the netted path's
     ///             PRESEND hands over — so a patched exact-input route no longer
     ///             swaps the fee too and fails its pull;
-    ///           • with `amountOutOffset` set, the route's output word is `pricedOut[0]`,
-    ///             the live tick — a direct SELL then pays the maker exactly what the
-    ///             core verifies and the decay since the quote stays here as residue.
+    ///           • with `amountOutOffset` set, the route's output word is the live price
+    ///             of the anchor legs (task 16) — a direct SELL then pays the maker
+    ///             exactly what the core verifies and the decay since the quote stays
+    ///             here as residue;
+    ///           • a NATIVE order unwraps and sends `pricedOut[0]` ({_payNative}).
     ///         `pricedIn` is not read: the routed amount stays a measured DELTA (FoT /
     ///         rebasing anchors), never a figure the core priced.
     function onSettlementFill(
@@ -1499,7 +1965,56 @@ contract AggregatorFillSolver {
         if (_active != 2) revert NotArmed();
         _active = 3;
         FillRoute calldata r = _routeOf(userData);
-        _onFill(r, _kept(r.sameOut, pricedOut), r.amountOutOffset, pricedOut[0]);
+        uint256 legs = r.legs;
+        uint256 outLegs = legs >> LEGS_OUT_SHIFT;
+        // Leg 0 alone (every direct order, every single-output pull order) is read
+        // straight: the loop's one iteration measured ~320 gas more on the deployed
+        // typed direct fill.
+        _onFill(
+            r,
+            _sumLegs(legs & LEGS_SAME, pricedOut),
+            r.amountOutOffset,
+            outLegs == 1 ? pricedOut[0] : _sumLegs(outLegs, pricedOut)
+        );
+        // NATIVE DELIVERY: the route left WNATIVE here; unwrap exactly the priced leg
+        // and send it on. The core measures the recipient's native balance next.
+        if (legs & LEGS_NATIVE != 0) _payNative(r, pricedOut[0]);
+    }
+
+    /// @dev Pay a native order's leg 0 (task 30): `amount` = the core's `pricedOut[0]`,
+    ///      exactly what its delta check will demand — never the WNATIVE delta, so the
+    ///      spread over the priced amount STAYS here in WNATIVE and is split by the
+    ///      {SurplusPolicy} after the fill, like any output surplus.
+    ///
+    ///      `minOut` and `maxPay` keep their pull-path meaning, measured in WNATIVE
+    ///      (the anchor output token for such an order): the route's WNATIVE delta must
+    ///      reach `minOut` ({InsufficientOutput}), and the amount sent may not exceed
+    ///      `maxPay` (non-zero) nor the delta itself — never the contract's balance, so
+    ///      a retained WNATIVE floor or another fill's residue cannot fund a send.
+    ///
+    ///      The send is a full-gas `call` to a recipient taken from the ORDER (smart
+    ///      accounts work; a reverting `receive()` kills the fill — {NativeSendFailed},
+    ///      `NativeUnwrapModule`'s posture). Re-entry from that `receive()` finds every
+    ///      entry closed: `_active` is 3 here (executeFill / sweep revert {Reentrancy},
+    ///      both callbacks {NotArmed}, the pool callback is not `SWAPPING`), and
+    ///      Settlement is `nonReentrant`. A recipient that spends native in its
+    ///      `receive()` lowers its own measured delta, and the core reverts.
+    ///
+    ///      GAS (unit bench, `AggregatorNativeTest`): the withdraw plus the value call.
+    ///      A recipient account that is EMPTY (no balance, nonce or code — a fresh
+    ///      gasless maker) costs the EVM's +25k new-account charge on top.
+    function _payNative(FillRoute calldata r, uint256 amount) private {
+        uint256 k = r.outAnchor;
+        uint256 out = SafeTransferLib.balanceOf(WNATIVE, address(this)) - r.before[k];
+        uint256 minOut = r.minOut;
+        if (out < minOut) revert InsufficientOutput(out, minOut);
+        uint256 maxPay = r.maxPay;
+        uint256 cap = maxPay != 0 && maxPay < out ? maxPay : out;
+        if (amount > cap) revert InsufficientOutput(cap, amount);
+        IWNative(WNATIVE).withdraw(amount);
+        address to = r.payee;
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert NativeSendFailed(to);
     }
 
     /// @dev The body of both {executeFill} callbacks — see {_route} for `kept`,
@@ -1528,13 +2043,13 @@ contract AggregatorFillSolver {
         _approveOutputs(r.tokens, r.before, r.outMask, r.outAnchor, floor, r.maxPay);
     }
 
-    /// @dev Σ `pricedOut[j]` over the output legs flagged in `sameOut` — what the
-    ///      core will pull back in `tokens[0]`, so it is not routed. Zero (one test)
-    ///      on every plain order.
-    function _kept(uint256 sameOut, uint256[] calldata pricedOut) private pure returns (uint256 kept) {
-        for (uint256 j; sameOut != 0; ++j) {
-            if (sameOut & 1 != 0) kept += pricedOut[j];
-            sameOut >>= 1;
+    /// @dev Σ `pricedOut[j]` over the output legs flagged in `mask`. With `sameOut`:
+    ///      what the core will pull back in `tokens[0]`, so it is not routed. With
+    ///      the out-leg mask: the exact-output word (task 16). Zero (one test) on an empty mask.
+    function _sumLegs(uint256 mask, uint256[] calldata pricedOut) private pure returns (uint256 sum) {
+        for (uint256 j; mask != 0; ++j) {
+            if (mask & 1 != 0) sum += pricedOut[j];
+            mask >>= 1;
         }
     }
 
@@ -1603,7 +2118,7 @@ contract AggregatorFillSolver {
     ///      nobody may pull from this contract — and {RouteOverspent} keeps it as a
     ///      measurement: no input token may end below its snapshot.
     ///
-    ///      `kept` — the output legs owed in `tokens[0]` ({_kept}) — is subtracted from
+    ///      `kept` — the output legs owed in `tokens[0]` ({_sumLegs} over {LEGS_SAME}) — is subtracted from
     ///      that delta and never leaves this contract, saturating at zero: a
     ///      REDUCTION of the pushed amount is always safe (the route gets less of
     ///      this fill's own input), and a `kept` above the delta means the core's
@@ -1645,21 +2160,24 @@ contract AggregatorFillSolver {
     ///
     ///      Offsets keep their opaque-route meaning: `amountInOffset == 0` rewrites the
     ///      amountIn word with `routed`, `outOffset == 32` the amountOut word with the
-    ///      live `pricedOut[0]`; any other value but {NO_PATCH} is refused.
+    ///      live anchor-leg price; any other value but {NO_PATCH} is refused.
     function _poolRoute(FillRoute calldata r, uint256 routed, uint256 outOffset, uint256 liveOut) private {
         (uint256 o, uint256 hops) = _poolShape(r);
         (uint256 amountIn, uint256 amountOut) = _poolAmounts(o, r.amountInOffset, outOffset, routed, liveOut);
 
         // Armed for the callback only while the swap is in flight; restored to the
         // fill's own state (3, or 5 on the netted path) the moment it returns.
+        // A NATIVE order's route pays HERE — the unwrap needs the WNATIVE; `payee` is
+        // then the native recipient, paid in coin by {_payNative}.
+        address payee = r.legs & LEGS_NATIVE != 0 ? address(this) : r.payee;
         uint256 state = _active;
         _active = SWAPPING;
         if (amountOut == 0) {
             if (amountIn > routed) revert PoolOverBudget(amountIn, routed);
-            _exactIn(o + 64, hops, amountIn, r.payee);
+            _exactIn(o + 64, hops, amountIn, payee);
         } else {
             // The input ceiling: the plan's `amountInMaximum`, never above the delta.
-            _exactOut(o + 64, hops, amountOut, amountIn < routed ? amountIn : routed, r.payee);
+            _exactOut(o + 64, hops, amountOut, amountIn < routed ? amountIn : routed, payee);
         }
         _active = state;
     }
@@ -1692,7 +2210,7 @@ contract AggregatorFillSolver {
 
     /// @dev A pool route's two amount words (at calldata offset `o`, in bounds — see
     ///      {_poolShape}), patched as on an opaque route: offset 0 takes the routed
-    ///      delta, offset 32 the live `pricedOut[0]`, {NO_PATCH} leaves the quoted word;
+    ///      delta, offset 32 the live anchor-leg price, {NO_PATCH} leaves the quoted word;
     ///      anything else is refused. EQUIVALENT SOLIDITY for the quoted words:
     ///      `uint256(bytes32(d[0:32]))`, `uint256(bytes32(d[32:64]))`.
     function _poolAmounts(uint256 o, uint256 inOffset, uint256 outOffset, uint256 routed, uint256 liveOut)
@@ -1997,7 +2515,6 @@ contract AggregatorFillSolver {
             if (cap != 0) SafeTransferLib.safeTransfer(t, address(SETTLEMENT), cap);
         }
     }
-
 
     /// @dev The output pass of {onSettlementFill}, over the route's calldata arrays resolved
     ///      ONCE (re-resolving `r.tokens[k]` through the struct on every access is

@@ -1,6 +1,7 @@
 import { OrderSide, type Deployment, type Order } from "@1delta-x/sdk";
+import type { Address } from "viem";
 
-import { MARKETS, pinnedToken } from "../config/markets";
+import { MARKETS, pinnedToken, WRAPPED_NATIVE } from "../config/markets";
 import type { Side } from "../lib/types";
 
 /** Where a signed order from the book belongs in this app's UI. */
@@ -13,6 +14,12 @@ export interface RestoredRow {
   price: number;
   /** The domain the order's signature is bound to. */
   deployment: Deployment;
+  /**
+   * The order receives the RAW native coin: its output leg is the deployment's
+   * `NativeBalance` view (task 30), restored onto the wrapped coin's market and shown as
+   * the native coin.
+   */
+  native?: boolean;
 }
 
 export type RowResolver = (order: Order) => RestoredRow | null;
@@ -31,7 +38,7 @@ function human(wei: bigint, decimals: number): number {
  * fixed) per base. BUY receives BASE: size = output; price = input ceiling
  * (`end` when rising, else `start`) per base.
  */
-export function rowResolver(deploymentFor: (chainId: number) => Deployment | null): RowResolver {
+export function rowResolver(deploymentFor: (chainId: number) => (Deployment & { nativeBalance?: Address }) | null): RowResolver {
   return (order) => {
     if (order.legsIn.length !== 1 || order.legsOut.length !== 1) return null;
     const tin = order.legsIn[0]!;
@@ -41,7 +48,11 @@ export function rowResolver(deploymentFor: (chainId: number) => Deployment | nul
       const quote = pinnedToken(m.chainId, m.quote);
       if (!base || !quote) continue;
       const i = tin.token.toLowerCase();
-      const o = tout.token.toLowerCase();
+      // A NativeBalance output leg is the wrapped native coin's market, received raw.
+      const view = deploymentFor(m.chainId)?.nativeBalance?.toLowerCase();
+      const wrapped = WRAPPED_NATIVE[m.chainId];
+      const native = !!view && tout.token.toLowerCase() === view && !!wrapped;
+      const o = native ? (pinnedToken(m.chainId, wrapped!)?.address ?? "") : tout.token.toLowerCase();
       let side: Side;
       if (i === base.address && o === quote.address && order.side === OrderSide.SELL) side = "sell";
       else if (i === quote.address && o === base.address && order.side === OrderSide.BUY) side = "buy";
@@ -52,12 +63,12 @@ export function rowResolver(deploymentFor: (chainId: number) => Deployment | nul
         const size = human(tin.start, base.decimals);
         const floor = tout.end !== 0n ? tout.end : tout.start;
         if (size <= 0) return null;
-        return { marketId: m.id, side, size, price: human(floor, quote.decimals) / size, deployment };
+        return { marketId: m.id, side, size, price: human(floor, quote.decimals) / size, deployment, ...(native ? { native } : {}) };
       }
       const size = human(tout.start, base.decimals);
       const ceiling = tin.end !== 0n ? tin.end : tin.start;
       if (size <= 0) return null;
-      return { marketId: m.id, side, size, price: human(ceiling, quote.decimals) / size, deployment };
+      return { marketId: m.id, side, size, price: human(ceiling, quote.decimals) / size, deployment, ...(native ? { native } : {}) };
     }
     return null;
   };

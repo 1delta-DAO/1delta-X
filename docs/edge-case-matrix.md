@@ -223,6 +223,7 @@ always findings.
 | H5 | Policy `ANY` / `ORDERED` / `ATOMIC` / `CANONICAL` | ◐ |
 | H5a | `CANONICAL`: item hoisted ahead of its own `DELIVER` | ✕ `ItemPolicyViolated` |
 | H5b | `CANONICAL`: `PULL` ahead of the item that funds the leg | ✕ `ItemPolicyViolated` |
+| H5c | `ORDERED` / `ATOMIC`: `PULL` ahead of a non-MAKE item of the order (task 31) | ✕ `ItemPolicyViolated` |
 | H5c | Two live orders of one maker whose items size from the SAME live state | ● degrades — the second caps to what is left while its value-out leg runs in full; use an OCO group or fill-once |
 | H6 | Op byte > `SETTLE` | ✕ |
 | H7 | Codeless module target | ✕ `ItemTargetHasNoCode` |

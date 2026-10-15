@@ -53,6 +53,7 @@ No contract change; none waits on a deploy.
 | 28 | [App: receive native RBTC from a fill (in-fill unwrap)](28-native-rbtc-receipts.md) | contracts + app + filler | feature (deferred) |
 | 29 | [Filler: buy BTC from users through Money on Chain's DOC (native RBTC in)](29-doc-btc-sell-rail.md) | filler (+ app copy) | feature (planned; no deployment) |
 | 30 | [Native RBTC delivery without filler capital (NativeBalance view + solver v3)](30-native-delivery-no-capital.md) | contracts + filler + app | design flaw (planned) |
+| 31 | [Zero-capital fills for orders that carry items (matchSettle delivery ledger)](31-zero-capital-item-fills.md) | contracts (core + solver) + filler | design flaw (planned; next Settlement version) |
 
 Sources: `../REVIEW-2026-10-05-amount-mismatch.md` (03–15),
 `../SIGNATURE-VALIDATION-REVIEW.md` (01–02), the 2026-10-06 pre-merge audit (16–27,

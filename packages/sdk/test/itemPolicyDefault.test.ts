@@ -18,10 +18,12 @@ import {
 } from "../src";
 import { CANONICAL_ORDER } from "./canonicalOrder";
 
-/// ACCEPTED-PATTERNS-REVIEW B8: a TAKE whose proceeds fund an INPUT leg, signed
-/// below CANONICAL, lets any matchSettle caller PULL the leg first — the Permit3
-/// allowance is spent twice for one fill. The SDK defaults such orders to CANONICAL
-/// (the only level `Batch._stepPull` enforces against) unless the caller says otherwise.
+/// ACCEPTED-PATTERNS-REVIEW B8: a TAKE (or TAKE_FOR) whose proceeds fund an INPUT leg,
+/// signed at ANY, lets any matchSettle caller PULL the leg first — the Permit3
+/// allowance is spent twice for one fill. Since task 31 every policy above ANY refuses
+/// that PULL (ORDERED / ATOMIC: it waits for the non-MAKE items), so the SDK defaults
+/// such orders to ORDERED — CANONICAL would force the forward shape, which needs filler
+/// capital — unless the caller says otherwise.
 const account = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
 const d: Deployment = {
   chainId: 1,
@@ -58,9 +60,15 @@ describe("takeFundsInputLeg", () => {
     expect(takeFundsInputLeg(withItems([take()]), { proceedsAsset: () => undefined })).toBe(true);
   });
 
-  it("ignores a TAKE routed to the maker (borrow after deposit), TAKE_FOR, MAKE, and no input legs", () => {
+  it("counts a settler-routed TAKE_FOR (matchSettle admits it since task 31), as the lens does", () => {
+    expect(takeFundsInputLeg(withItems([take(zeroAddress, ItemOp.TAKE_FOR)]))).toBe(true);
+    expect(takeFundsInputLeg(withItems([take(zeroAddress, ItemOp.TAKE_FOR)]), { proceedsAsset: () => WETH })).toBe(false);
+    expect(takeFundsInputLeg(withItems([take(account.address, ItemOp.TAKE_FOR)]))).toBe(false);
+  });
+
+  it("ignores a TAKE routed to the maker (borrow after deposit), MAKE, SETTLE, and no input legs", () => {
     expect(takeFundsInputLeg(withItems([take(account.address)]))).toBe(false);
-    expect(takeFundsInputLeg(withItems([take(zeroAddress, ItemOp.TAKE_FOR)]))).toBe(false);
+    expect(takeFundsInputLeg(withItems([take(zeroAddress, ItemOp.SETTLE)]))).toBe(false);
     expect(takeFundsInputLeg(withItems([take(zeroAddress, ItemOp.MAKE)]))).toBe(false);
     expect(takeFundsInputLeg({ ...withItems([take()]), legsIn: [] })).toBe(false);
     // The golden fixture's TAKE pays the maker — the pinned hash is untouched.
@@ -69,10 +77,11 @@ describe("takeFundsInputLeg", () => {
 });
 
 describe("withDefaultItemPolicy", () => {
-  it("defaults an input-funding TAKE at ANY to CANONICAL, touching nothing else", () => {
+  it("defaults an input-funding TAKE at ANY to ORDERED (zero-capital fillable), touching nothing else", () => {
     const o = withItems([take()]);
     const out = withDefaultItemPolicy(o);
-    expect(itemPolicyOf(out.timing)).toBe(ItemPolicy.CANONICAL);
+    expect(itemPolicyOf(out.timing)).toBe(ItemPolicy.ORDERED);
+    expect(itemPolicyOf(withDefaultItemPolicy(withItems([take(zeroAddress, ItemOp.TAKE_FOR)])).timing)).toBe(ItemPolicy.ORDERED);
     expect(out.timing & ~(0xfn << 96n)).toBe(o.timing & ~(0xfn << 96n));
   });
 
@@ -83,7 +92,7 @@ describe("withDefaultItemPolicy", () => {
   });
 
   it("keeps a policy already set in timing", () => {
-    const o = withItems([take()], withItemPolicy(CANONICAL_ORDER.timing, ItemPolicy.ORDERED));
+    const o = withItems([take()], withItemPolicy(CANONICAL_ORDER.timing, ItemPolicy.CANONICAL));
     expect(withDefaultItemPolicy(o)).toBe(o);
   });
 
@@ -107,11 +116,11 @@ describe("signing and amending", () => {
 
   it("patchOrder / amendOrder apply the default, and honour an explicit override", async () => {
     const prev = withItems([take()]);
-    expect(itemPolicyOf(patchOrder(prev, 99n).timing)).toBe(ItemPolicy.CANONICAL);
+    expect(itemPolicyOf(patchOrder(prev, 99n).timing)).toBe(ItemPolicy.ORDERED);
     expect(itemPolicyOf(patchOrder(prev, 99n, {}, { itemPolicy: ItemPolicy.ANY }).timing)).toBe(ItemPolicy.ANY);
 
     const res = await amendOrder(account, prev, 99n, { minFillAnchor: 5n }, d);
-    expect(itemPolicyOf(res.order.timing)).toBe(ItemPolicy.CANONICAL);
+    expect(itemPolicyOf(res.order.timing)).toBe(ItemPolicy.ORDERED);
     const anyRes = await amendOrder(account, prev, 100n, { minFillAnchor: 5n }, d, { itemPolicy: ItemPolicy.ANY });
     expect(itemPolicyOf(anyRes.order.timing)).toBe(ItemPolicy.ANY);
   });

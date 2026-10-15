@@ -50,7 +50,7 @@ Not an external audit. No code changed. The only file written is this one.
 | A6a | ECDSA before EIP-1271, also for signers with code | R/D | Practice is split. Permit2, OZ ≥ 5.1 and Solady check code first. Seaport, OZ ≤ 5.0 and 1inch try ECDSA first. Our NatSpec cites OZ, which changed sides in 5.1. |
 | A6b | High-s signatures accepted (no low-s check) | R/C | Same as Permit2, Solady, Seaport and CoW. OZ and 1inch reject high-s. Safe because no state is keyed on signature bytes. |
 | B7 | `maxPay` is per token | R/C | Operator-side parameter. Documented and tested. |
-| B8 | Late TAKE on an input-leg token under `ItemPolicy.ANY` spends allowance twice | **Q** | Permissionless griefing of finite allowances under the **default** policy. The same harm was fixed as a bug for duplicate PULL. **Resolved 2026-10-06** off-chain: SDK defaults to CANONICAL, lens flags it. |
+| B8 | Late TAKE on an input-leg token under `ItemPolicy.ANY` spends allowance twice | **Q** | Permissionless griefing of finite allowances under the **default** policy. The same harm was fixed as a bug for duplicate PULL. **Resolved 2026-10-06** off-chain (SDK CANONICAL default, lens flag); **superseded 2026-10-14 (task 31)**: ORDERED/ATOMIC now refuse the PULL in the core, the SDK defaults to ORDERED, the lens flags only ANY. |
 | B9 | Netted path pushes input residue, then sweeps it back | R/C | Two extra transfers, no accounting effect. |
 | B10 | FoT anchor + patch always reverts | R/C | CoW calls FoT tokens unsuitable. UniswapX transfers the nominal amount. Our core is general, and one solver fails closed. |
 | B11 | SELL output ceil vs input floor, so a tight partial is 1 wei short | R/C | Maker-favourable rounding, same direction as 1inch `AmountCalculator`. |
@@ -272,6 +272,17 @@ by default whenever an item produces a token that is also an input leg; (2) the 
 `validateOrder` flags ANY + an input-token-producing TAKE; (3) at the next core
 redeploy, revert an ITEM that credits a leg whose credit already reached `owed` (no
 new storage: `st.credit` is in memory). (1) and (2) cost no bytecode.
+
+**Update 2026-10-14 (task 31, core).** The CANONICAL default below made every
+"sell out of a position" order unfillable without filler capital, because CANONICAL
+is the forward shape (items after the delivery). The core now gives ORDERED and ATOMIC
+the PULL half alone: a PULL waits for every non-MAKE item of its order
+(`Batch._stepPull`, mask resolved at open), not for the delivery. The SDK defaults to
+ORDERED, the lens flags only ANY ("input-funding TAKE needs ItemPolicy.ORDERED or
+stricter …"), and TAKE_FOR counts too now that `matchSettle` admits it. Pinned by
+`test_S2_lateTakeOnInputToken_orderedRefusesTheSchedule` and
+`MatchSettle.t.sol::test_itemPolicy_ordered_{refusesPullAheadOfItem,sourceOrderFillsWithZeroCapital}`.
+See docs/fill-ordering-capital-plan.md. The 2026-10-06 text below is kept as history.
 
 **Resolved 2026-10-06 (off-chain + lens; no core/Settlement change).** One correction
 to the recommendation first: **ORDERED does not close this.** ORDERED and ATOMIC only

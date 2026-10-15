@@ -316,7 +316,7 @@ interface Tracked {
   /** What the chain read was last done for. */
   chainChecked?: "gone" | "expired";
   /** Row snapshot, so fills can still be placed once the row is gone. */
-  snap: { marketId: string; side: RestingOrder["side"]; price: number; perOrder: number; type: RestingOrder["type"]; size: number };
+  snap: { marketId: string; side: RestingOrder["side"]; price: number; perOrder: number; type: RestingOrder["type"]; size: number; native?: boolean };
   /** Finished orders: keep polling fills (for a hash upgrade) until then. */
   keepUntil?: number;
 }
@@ -433,6 +433,8 @@ export class RemoteOrderbook implements OrderbookApi {
       signed: req.signed,
       signedOrders: [req.signed],
       sliceSpec: req.sliceSpec,
+      // A NativeBalance output leg: received as the raw native coin (shown as RBTC).
+      ...(this.resolveRow?.(req.signed.order)?.native ? { native: true } : {}),
       slices: req.slices ? { done: 0, total: req.slices.total, everyMin: req.slices.everyMin, signed: 1 } : undefined,
       book: "remote",
     };
@@ -572,6 +574,7 @@ export class RemoteOrderbook implements OrderbookApi {
       signed,
       signedOrders: [signed],
       book: "remote",
+      ...(placed.native ? { native: true } : {}),
       ...(pending ? { pendingFill: pending } : {}),
     };
     this.rows.push(row);
@@ -624,6 +627,7 @@ export class RemoteOrderbook implements OrderbookApi {
         perOrder: row.size / (row.slices?.total ?? 1),
         type: row.type,
         size: row.size,
+        ...(row.native ? { native: true } : {}),
       },
     });
   }
@@ -900,6 +904,7 @@ export class RemoteOrderbook implements OrderbookApi {
       mine: true,
       maker: order.maker,
       simulated: false,
+      ...(placed.native ? { native: true } : {}),
       status: cumulative !== null && anchor > 0n && cumulative >= anchor ? "filled" : "partial",
     });
     this.trimFills();
@@ -942,6 +947,7 @@ export class RemoteOrderbook implements OrderbookApi {
       mine: true,
       maker: t.maker,
       simulated: false,
+      ...(t.snap.native ? { native: true } : {}),
       status,
     });
     this.trimFills();

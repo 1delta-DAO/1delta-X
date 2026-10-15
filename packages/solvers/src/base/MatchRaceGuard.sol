@@ -65,6 +65,14 @@ import {Settlement} from "@core/settlement/Settlement.sol";
 ///  requirements and should write its own predicate — this guard is for plans
 ///  whose amounts are jointly balanced.
 ///
+///  ⚠ AN INHERITING SOLVER RECEIVES WHAT `matchSettle` PAYS ITS CALLER (2026-10-14).
+///  `PRESEND` pays `msg.sender` of `matchSettle`, and since task 31 so does every
+///  SETTLE item the core now admits on the netted path (an asset sale, a proportional
+///  sweep). A contract that inherits this guard and calls `matchSettle` itself must be
+///  able to MOVE those tokens (spend them in its CALL step, or an operator sweep), or
+///  refuse such plans — {GuardedMatchSolver} cannot move anything, so it refuses both
+///  ({GuardedMatchSolver.PresendUnsupported}, {GuardedMatchSolver.SettleUnsupported}).
+///
 ///  ⚠ WHAT `filled` CANNOT SEE (audit 2026-09-30 FLASH-5 / CORE-MATCH-5)
 ///  ──────────────────────────────────────────────────────────────────
 ///  Two ways an order leaves the market never touch its `filled` slot:

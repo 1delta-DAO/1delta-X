@@ -70,6 +70,12 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   schedule, so `nonReentrant` stays intact and the whole deferred context lives in
   **memory** (no storage, no transient storage). Covers the credit ledger, the
   exactly-once guards, and the EVC relationship.
+- **[fill-ordering-capital-plan.md](fill-ordering-capital-plan.md)** — why every
+  order with an item that consumes a delivery (native-out, the pre-funded lending
+  sinks, OCO / SETTLE, an LP mint) needs filler capital today, and the plan to fix
+  it: `matchSettle` already has the zero-capital schedule; it needs the delivery
+  ledger written at DELIVER and the guard on pre-funded / TAKE_FOR items relaxed.
+  Only true cycles (leverage at the LTV edge) still need one flash.
 - **[filler-strategy.md](filler-strategy.md)** — **the recommended shape for a
   `matchSettle` filler.** Guard on the `filled` counters before touching the plan,
   so losing a contested match costs 3.9k gas instead of 34k (−88%, and the gap

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
+import {MatchPlan, MatchStep, ItemOp} from "@core/settlement/Settlement.sol";
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 import {MatchRaceGuard} from "@solvers/base/MatchRaceGuard.sol";
 
 /// @title GuardedMatchSolver
@@ -38,6 +39,18 @@ import {MatchRaceGuard} from "@solvers/base/MatchRaceGuard.sol";
 ///  point that step at a contract of the solver's choosing — authenticate it
 ///  against more than `msg.sender == EXECUTOR` (see {SolverCallbackExecutor}).
 ///
+///  ⚠ NO SETTLE ITEM THROUGH THIS WRAPPER (2026-10-14, task 31). The core's
+///  `matchSettle` now admits SETTLE items, and a SETTLE item pays its module's asset
+///  to `ctx.filler` — `msg.sender` of `matchSettle`, i.e. THIS contract — for the
+///  same reason a PRESEND does, and it would be locked here forever for the same
+///  reason. Some SETTLE modules move nothing (an `OcoGroupModule` claim only writes
+///  state), but this wrapper cannot tell a claim from a sweep or an NFT sale without
+///  trusting module code, so every plan whose orders carry a SETTLE item is refused
+///  ({SettleUnsupported}), checked before anything moves. A solver that needs SETTLE
+///  calls `matchSettle` from its OWN contract, which can then move what it receives
+///  (as {AggregatorFillSolver.executeItemFill} does: a receipt lands there as
+///  retained value its operators can {AggregatorFillSolver.sweep}).
+///
 ///  ⚠ THIS CONTRACT'S ADDRESS IS NOT A FILLER IDENTITY on an open instance (audit
 ///  2026-09-30 CORE-MATCH-3). `matchSettle` keys every filler-conditional gate —
 ///  `exclusiveFiller`, a {OrderGates.FILLER_SET}, a filler-aware validator or price
@@ -56,6 +69,9 @@ contract GuardedMatchSolver is MatchRaceGuard {
     error ProfitStranded();
     /// @dev The plan contains a `PRESEND` step — see the contract note.
     error PresendUnsupported();
+    /// @dev An order of the plan carries a SETTLE item, which would pay its asset to
+    ///      this contract where nothing can move it — see the contract note.
+    error SettleUnsupported(uint256 order, uint256 item);
     /// @dev A gated instance was called by someone outside its operator set.
     error NotOperator(address caller);
     /// @dev The operator set holds `address(0)` or more than {MAX_OPERATORS} entries.
@@ -183,6 +199,25 @@ contract GuardedMatchSolver is MatchRaceGuard {
                 ++i;
             }
         }
+        _refuseSettle(plan);
         return SETTLEMENT.matchSettle(plan);
+    }
+
+    /// @dev {SettleUnsupported} for any SETTLE record in any order's `items`. Walks
+    ///      the packed blobs exactly as the core does (`validateRecords`, then
+    ///      sequential `itemAt`), so a malformed blob reverts here as it would there.
+    ///      Runs after the race guard: a loser still pays only its `SLOAD`s.
+    function _refuseSettle(MatchPlan calldata plan) private pure {
+        uint256 nOrders = plan.orders.length;
+        for (uint256 i; i < nOrders; ++i) {
+            bytes calldata items = plan.orders[i].items;
+            uint256 n = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
+            uint256 cursor = PackedArrays.recordsStart();
+            for (uint256 k; k < n; ++k) {
+                uint256 op;
+                (op,,,,, cursor) = PackedArrays.itemAt(items, cursor);
+                if (op == uint256(ItemOp.SETTLE)) revert SettleUnsupported(i, k);
+            }
+        }
     }
 }

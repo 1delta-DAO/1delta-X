@@ -32,6 +32,12 @@ export interface Env {
   DEFAULT_FILLER?: string;
   OCO_MODULES?: string;
   ALLOWED_TOKENS?: string;
+  /**
+   * The `NativeBalance` view (task 30), or unset/"" = none: an order receiving the RAW
+   * native coin names it as its DIRECT output token. Added to ALLOWED_TOKENS (when that
+   * list is set) and policed at admission: never an input leg, never a pull output.
+   */
+  NATIVE_BALANCE?: string;
   MAX_ORDERS?: string;
   MAX_ORDERS_PER_MAKER?: string;
   MAX_CURVE_POINTS?: string;
@@ -71,6 +77,8 @@ export interface WorkerConfig {
   /** False while SETTLEMENT / PERMIT3 / LENS are still placeholders: writes 503, the alarm skips chain work. */
   configured: boolean;
   ocoModules: Address[];
+  /** NATIVE_BALANCE (lower-case), when configured — see {@link Env.NATIVE_BALANCE}. */
+  nativeBalance?: Address;
   admission: AdmissionPolicy;
   /** Raw JSON body cap for POST /orders and /cancels. */
   maxBodyBytes: number;
@@ -182,7 +190,11 @@ export function loadConfig(env: Env): WorkerConfig {
   const permit3 = addr(env.PERMIT3, "PERMIT3");
   const lens = addr(env.LENS, "LENS");
   const defaultFiller = env.DEFAULT_FILLER ? addr(env.DEFAULT_FILLER, "DEFAULT_FILLER") : undefined;
-  const allowed = addrList(env.ALLOWED_TOKENS, "ALLOWED_TOKENS");
+  const nativeBalance = addr(env.NATIVE_BALANCE, "NATIVE_BALANCE");
+  // The view is a listed token wherever the book names its tokens: it is how a native
+  // receipt is signed. (Unlisted, an allowlisted book would refuse every such order.)
+  const allowed = [...addrList(env.ALLOWED_TOKENS, "ALLOWED_TOKENS")];
+  if (allowed.length && nativeBalance !== zeroAddress && !allowed.includes(nativeBalance)) allowed.push(nativeBalance);
   const rpc = rpcUrlOf(env);
   const configured = settlement !== zeroAddress && permit3 !== zeroAddress && lens !== zeroAddress && !!rpc.url;
 
@@ -214,6 +226,7 @@ export function loadConfig(env: Env): WorkerConfig {
     rpcSource: rpc.source,
     configured,
     ocoModules: addrList(env.OCO_MODULES, "OCO_MODULES"),
+    ...(nativeBalance !== zeroAddress ? { nativeBalance } : {}),
     admission,
     maxBodyBytes: num(env.MAX_BODY_BYTES, 256 * 1024, "MAX_BODY_BYTES"),
     rate: {

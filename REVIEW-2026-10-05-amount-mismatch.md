@@ -168,7 +168,7 @@ Pinned: `test_S2_nettedPath_overProducingTakeRefundsMaker` (was `…TakeReverts`
   wallet).
   **Update 2026-10-06 (ACCEPTED-PATTERNS-REVIEW B8, resolved):** only CANONICAL
   forbids it — ORDERED still admits the late TAKE
-  (`test_S2_lateTakeOnInputToken_canonicalRefusesTheSchedule`). The SDK now signs
+  (`test_S2_lateTakeOnInputToken_canonicalRefusesTheSchedule`, renamed `…_orderedRefusesTheSchedule` in task 31, when ORDERED gained the PULL rule). The SDK now signs
   CANONICAL for such orders by default (`withDefaultItemPolicy`; `signOrder` refuses
   ANY unless explicit) and the lens `validateOrder` flags an input-funding TAKE below
   CANONICAL. Core unchanged.

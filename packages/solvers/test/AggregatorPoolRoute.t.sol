@@ -355,14 +355,14 @@ contract AggregatorPoolRouteTest is AggregatorFillSolverTest {
         PoolVenue[] memory v = new PoolVenue[](1);
         v[0] = PoolVenue({factory: address(0), initCodeHash: bytes32(uint256(1))});
         vm.expectRevert(AggregatorFillSolver.BadVenue.selector);
-        new AggregatorFillSolver(address(settlement), _ops(), _noSplit(), v);
+        new AggregatorFillSolver(address(settlement), _ops(), _noSplit(), v, address(0), address(0));
         v[0] = PoolVenue({factory: address(fac0), initCodeHash: bytes32(0)});
         vm.expectRevert(AggregatorFillSolver.BadVenue.selector);
-        new AggregatorFillSolver(address(settlement), _ops(), _noSplit(), v);
+        new AggregatorFillSolver(address(settlement), _ops(), _noSplit(), v, address(0), address(0));
         PoolVenue[] memory five = new PoolVenue[](5);
         for (uint256 i; i < 5; i++) five[i] = PoolVenue({factory: address(fac0), initCodeHash: bytes32(uint256(1))});
         vm.expectRevert(AggregatorFillSolver.BadSetSize.selector);
-        new AggregatorFillSolver(address(settlement), _ops(), _noSplit(), five);
+        new AggregatorFillSolver(address(settlement), _ops(), _noSplit(), five, address(0), address(0));
     }
 
     function test_noVenues_poolRouteRefused() public {

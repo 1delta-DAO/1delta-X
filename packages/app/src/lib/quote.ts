@@ -107,7 +107,11 @@ export interface QuoteRequest {
   delivery: "direct" | "pull" | "auto";
   /** `permit`: the order will be funded by a gasless ERC-2612 permit the fill executes (more gas). */
   funding?: "permit";
-  /** The maker receives the raw native coin (lib/order.ts `nativeOut`): pull delivery + the unwrap's gas. */
+  /**
+   * The maker receives the raw native coin (lib/order.ts `nativeOut`): `tokenOut` stays the
+   * wrapped coin the route ends in. With a NativeBalance view the request is DIRECT (the
+   * filler answers direct, + its unwrap-and-send gas); the module shape asked pull.
+   */
   nativeOut?: boolean;
 }
 

@@ -10,7 +10,8 @@ export enum ItemOp {
   /// value-in side of the same operation (deposit+borrow, repay+withdraw). The
   /// funding amount is computed by the settler from a descriptor the maker signs
   /// as the FIRST WORD of `data` — build it with `forLeg()` / `forTotal()`.
-  /// Single-order path only: `matchSettle` refuses it.
+  /// `matchSettle` admits it since task 31 (2026-10-14) — except the BALANCE funding
+  /// form ({@link forBalance}), which stays single-order only.
   ///
   /// ⚠ ONE-SIDED ops do NOT belong here. "Supply/retire whatever the conversion
   /// delivered" moves nothing out of the position, so it is a `MAKE` carrying a
@@ -441,16 +442,20 @@ export function withFillOnce(timing: bigint): bigint {
  *  - `ANY` — any order, any interleaving. The default, and what every order that
  *    does not set the field means. Required to participate in a CYCLE (an order's
  *    borrow deliberately hoisted ahead of its own delivery).
- *  - `ORDERED` — items in signed index order; other steps may interleave.
- *  - `ATOMIC` — signed order AND back-to-back, no foreign step between them. What a
- *    lender that checks health inside each call needs.
+ *  - `ORDERED` — items in signed index order; other steps may interleave. Since
+ *    task 31 (2026-10-14) a `matchSettle` PULL of this order's inputs also waits for
+ *    every NON-MAKE item (TAKE, TAKE_FOR, SETTLE) — the items that can credit an
+ *    input leg — but NOT for the delivery. So the order's inputs can still fund its
+ *    own outputs (`PULL → route → DELIVER → MAKE`): a zero-capital solver fills it.
+ *    The level to sign for an input-funding TAKE ({@link withDefaultItemPolicy}).
+ *  - `ATOMIC` — `ORDERED`, and back-to-back, no foreign step between them. What a
+ *    lender that checks health inside each call needs. Same PULL rule as ORDERED.
  *  - `CANONICAL` — `ATOMIC`, and the item group must run AFTER this order's
  *    delivery and BEFORE any pull of its input legs. That is exactly the
- *    single-order path's fixed shape. Sign this for a swap-and-deposit or a
- *    leverage loop: it is what stops a solver hoisting the deposit ahead of the
- *    delivery that funds it (so the item draws the maker's own wallet instead), or
- *    pulling an input leg ahead of the item that was going to fund it (which
- *    refunds the tokens but not the Permit3 allowance they moved with).
+ *    single-order path's fixed shape — FORWARD ONLY: the filler must deliver before
+ *    it is paid, so it can never be filled with zero capital (needs inventory or a
+ *    flash). It stops a solver hoisting a deposit ahead of the delivery that funds it,
+ *    which the delivery ledger now also enforces for leg-referencing items (task 31).
  */
 export enum ItemPolicy {
   ANY = 0,
@@ -496,9 +501,10 @@ export function itemPolicyOf(timing: bigint): ItemPolicy {
  * item-bearing orders at `ANY` on purpose, and rejecting them there would either
  * break the pinned hash or force a wire change to buy nothing. `ANY` is also
  * REQUIRED to participate in a cycle. Call this from your own order builder and
- * decide there — or use {@link withDefaultItemPolicy}, which signs `CANONICAL` for
- * the one shape that actually needs it (a TAKE funding an input leg) and which
- * {@link signOrder} now enforces (ACCEPTED-PATTERNS-REVIEW B8, 2026-10-06).
+ * decide there — or use {@link withDefaultItemPolicy}, which signs `ORDERED` for
+ * the one shape that actually needs it (a TAKE / TAKE_FOR funding an input leg) and
+ * which {@link signOrder} enforces (ACCEPTED-PATTERNS-REVIEW B8, 2026-10-06; ORDERED
+ * since task 31, 2026-10-14).
  *
  * @see `docs/audit-2026-09-leads.md` A-4
  */
@@ -508,8 +514,8 @@ export function itemPolicyWarning(order: Order): string | null {
   return (
     "order has items with ItemPolicy.ANY (the value an unset field holds): a matchSettle " +
     "solver may pull an input leg ahead of the item meant to fund it, which refunds the " +
-    "tokens but not the Permit3 allowance. Sign ItemPolicy.CANONICAL unless this order " +
-    "participates in a cycle — withItemPolicy(timing, ItemPolicy.CANONICAL)."
+    "tokens but not the Permit3 allowance. Sign ItemPolicy.ORDERED unless this order " +
+    "participates in a cycle — withItemPolicy(timing, ItemPolicy.ORDERED)."
   );
 }
 
@@ -530,28 +536,34 @@ export interface ItemPolicyDefaultOptions {
    * `undefined`) a settler-routed TAKE is assumed to fund an input leg: that is
    * the only shape that does not strand its proceeds on the single-order path
    * (the lens rejects the other one as "item delivers a token no input leg can
-   * consume"), and CANONICAL costs such an order nothing there.
+   * consume"), and ORDERED costs such an order nothing — on either path.
    */
   proceedsAsset?: (item: Item) => Address | undefined;
 }
 
 /**
- * Does any plain `TAKE` item deliver its proceeds to the settler in a token one of
- * the order's INPUT legs consumes? That is the shape `ACCEPTED-PATTERNS-REVIEW.md`
- * B8 is about: under any policy below `CANONICAL` a `matchSettle` caller may PULL
- * that leg before the TAKE, so the maker's Permit3 allowance is spent twice for one
- * fill. Mirrors the lens rule in `SettlementLensChecks._proceedsItemAt`.
+ * Does any `TAKE` or `TAKE_FOR` item deliver its proceeds to the settler in a token
+ * one of the order's INPUT legs consumes? That is the shape
+ * `ACCEPTED-PATTERNS-REVIEW.md` B8 is about: at `ItemPolicy.ANY` a `matchSettle`
+ * caller may PULL that leg before the item, so the maker's Permit3 allowance is spent
+ * twice for one fill. Every policy above ANY refuses that PULL since task 31
+ * (2026-10-14: ORDERED / ATOMIC make it wait for the order's non-MAKE items). Mirrors
+ * the lens rule in `SettlementLensChecks._proceedsItemAt` ("input-funding TAKE needs
+ * ItemPolicy.ORDERED or stricter (late TAKE spends the allowance twice)").
  *
- * Not counted: a TAKE routed elsewhere (`recipient` = the maker — a borrow after the
- * deposit), a TAKE whose proceeds are an output-only token, `TAKE_FOR` (`matchSettle`
- * refuses any order carrying one), and an order with no input legs.
+ * `TAKE_FOR` counts since task 31: `matchSettle` admits it (all but its BALANCE
+ * funding form, which stays single-order only — counted anyway, as the lens does).
+ *
+ * Not counted: an item routed elsewhere (`recipient` = the maker — a borrow after the
+ * deposit), one whose proceeds are an output-only token, a MAKE / SETTLE, and an
+ * order with no input legs.
  */
 export function takeFundsInputLeg(order: Order, opts: ItemPolicyDefaultOptions = {}): boolean {
   if (order.legsIn.length === 0) return false;
   const ins = new Set(order.legsIn.map((l) => l.token.toLowerCase()));
   const settlement = opts.settlement?.toLowerCase();
   return order.items.some((it) => {
-    if (it.op !== ItemOp.TAKE) return false;
+    if (it.op !== ItemOp.TAKE && it.op !== ItemOp.TAKE_FOR) return false;
     const to = it.recipient.toLowerCase();
     if (to !== ZERO_ADDRESS && to !== settlement) return false;
     const asset = opts.proceedsAsset?.(it);
@@ -565,21 +577,23 @@ export function takeFundsInputLeg(order: Order, opts: ItemPolicyDefaultOptions =
  *  - `opts.itemPolicy` set → signed exactly as given (an explicit `ANY` included).
  *  - the order's `timing` already carries a non-`ANY` policy → kept (it was set on
  *    purpose with {@link withItemPolicy}).
- *  - otherwise, when {@link takeFundsInputLeg} → `ItemPolicy.CANONICAL`.
+ *  - otherwise, when {@link takeFundsInputLeg} → `ItemPolicy.ORDERED`.
  *
- * Why CANONICAL and not ORDERED: ORDERED (and ATOMIC) only order the maker's items
- * among THEMSELVES; a `PULL` of an input leg may still be scheduled ahead of them.
- * CANONICAL is the one level `Batch._stepPull` enforces against — it reverts a PULL
- * of an order whose items have not all run. It is also exactly the single-order
- * path's fixed shape (deliver → items → pull), so `fill`/`fillUpTo` behave the same.
- * The cost is on the netted path only: the order can no longer join a CYCLE, and a
- * solver cannot use the TAKE's proceeds to fund this order's own delivery.
+ * Why ORDERED (task 31, 2026-10-14; was CANONICAL): `Batch._stepPull` now refuses,
+ * under ORDERED and ATOMIC, a PULL of an order whose non-MAKE items (TAKE, TAKE_FOR,
+ * SETTLE) have not all run — exactly the guarantee B8 needs (the TAKE credits the leg
+ * before the leg is drawn, so the allowance is spent once). Unlike CANONICAL it does
+ * NOT wait for the delivery, so the netted zero-capital schedule (TAKE → PULL → route
+ * → DELIVER → MAKE) still fills it; CANONICAL forces the forward shape, which needs
+ * filler capital. The single-order path runs items in signed order anyway, so
+ * `fill`/`fillUpTo` behave the same. The remaining cost: the order cannot join a
+ * CYCLE (that needs `ANY`).
  */
 export function withDefaultItemPolicy(order: Order, opts: ItemPolicyDefaultOptions = {}): Order {
   if (opts.itemPolicy !== undefined) return { ...order, timing: withItemPolicy(order.timing, opts.itemPolicy) };
   if (itemPolicyOf(order.timing) !== ItemPolicy.ANY) return order;
   if (!takeFundsInputLeg(order, opts)) return order;
-  return { ...order, timing: withItemPolicy(order.timing, ItemPolicy.CANONICAL) };
+  return { ...order, timing: withItemPolicy(order.timing, ItemPolicy.ORDERED) };
 }
 
 /// Read the four `timing` mode flags an author may set. The clocks come from

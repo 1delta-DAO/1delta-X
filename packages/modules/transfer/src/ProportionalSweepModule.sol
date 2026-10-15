@@ -73,6 +73,21 @@ import {FullFillGuard} from "@lib/FullFillGuard.sol";
 ///  rejects a zero cap, and the settler's own {Base.SettleSliceZero} rejects a
 ///  zero slice before this contract is ever reached.
 ///
+///  ON THE NETTED PATH (`matchSettle`, SETTLE admitted since task 31)
+///  ─────────────────────────────────────────────────────────────────
+///  "After every output leg has been delivered" above is the FORWARD path's order.
+///  Under `matchSettle` the solver writes the schedule, so the sweep may run before
+///  or after any DELIVER in the plan — including one of the SAME maker's other orders
+///  delivering the swept token. That widens nothing, which is why there is no
+///  module-side guard here: "DELIVER X → sweep Y" leaves exactly the state of
+///  `fill(X); fill(Y)`, and "sweep Y → DELIVER X" that of `fill(Y); fill(X)` — both
+///  orderings a forward filler already chooses (two fills, or one `batchFill`) — and
+///  the signed item `amount` caps the sweep on every path. The orderings the forward
+///  path CANNOT produce (the sweep ahead of THIS order's own delivery or after its own
+///  input pull) only ever sweep LESS. The filler is `matchSettle`'s caller, so the
+///  swept tokens land outside the pool and are credited to no order. Pinned by
+///  `test/NettedProportionalSweep.t.sol`.
+///
 ///  ⚠ WHY A STANDING PERMIT3 ALLOWANCE TO THIS SHARED MODULE IS SAFE
 ///  ────────────────────────────────────────────────────────────────
 ///  This is the question that sank `GenericCallModule` (2026-08 audit, CRITICAL-1),

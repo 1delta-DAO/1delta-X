@@ -1,11 +1,9 @@
 import { useMemo } from "react";
 
-import { TOKENS, WRAPPED_NATIVE } from "../config/markets";
+import { NATIVE_SYMBOL, TOKENS, WRAPPED_NATIVE } from "../config/markets";
 import type { TokenMeta } from "../lib/tokens";
 import { useTokenMeta } from "./useTokens";
 
-/** The chain's native coin symbol, where a wrapped one is configured. */
-const NATIVE_SYMBOL: Record<number, string> = { 30: "RBTC" };
 
 export interface TokenView {
   /** The symbol the market config uses — what the UI labels things with. */

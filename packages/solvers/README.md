@@ -104,7 +104,11 @@ entrypoint is owner/operator-gated.
     `ProfitStranded`). See [Losing races cheaply](#losing-races-cheaply). Plans
     with a `PRESEND` step are refused (`PresendUnsupported`): PRESEND pays the
     wrapper, which can never move a token again — call `matchSettle` from your own
-    contract (inheriting `MatchRaceGuard`) if you need one. Optional immutable
+    contract (inheriting `MatchRaceGuard`) if you need one. Plans whose orders carry
+    a `SETTLE` item are refused too (`SettleUnsupported(order, item)`, 2026-10-14):
+    the core's `matchSettle` admits SETTLE since task 31, and a SETTLE item pays its
+    asset to the same caller (an OCO claim moves nothing, but the wrapper cannot tell
+    the two apart). Optional immutable
     operator set (`constructor(settlement, operators)`, empty = open): only a
     GATED instance is a filler identity an order may name.
 - **`aggregator/`** — zero-inventory fills against an off-chain DEX-aggregator
@@ -184,18 +188,33 @@ entrypoint is owner/operator-gated.
     that transfer exactly (`NO_PATCH` with a quote sized for the twice-taxed
     amount still works, as does a solver written for the token).
     **Item orders** go through `executeItemFill(order, sig, fillAmount, plan,
-    takerData, lateItems)` (audit 2026-09-30 AGG-6): the core's `PostInputs` mode
+    takerData, lateItems, permits)` (audit 2026-09-30 AGG-6): the core's `PostInputs` mode
     is item-free, so it drives a one-order `matchSettle` plan it writes itself —
-    items not flagged in `lateItems` (TAKE: withdraw / borrow) → PULL the
+    items not flagged in `lateItems` (TAKE: withdraw / borrow; a SETTLE claim) → PULL the
     shortfall → PRESEND the input here → CALL `onMatchRoute` (same sandboxed route
-    as `onFill`; the proceeds are PUSHED to the pool, nothing is approved;
-    `amountOutOffset` and `minBumpBps` are ignored here) →
-    DELIVER → items flagged in `lateItems` (wallet-funded MAKE: deposit / repay).
-    The pool's surplus is swept back here and split by the same policy. The core
+    as `onFill`; EVERY output token's proceeds are PUSHED to the pool, nothing is
+    approved — so an opaque route may fund two output tokens) →
+    DELIVER → items flagged in `lateItems` (wallet-funded MAKE: deposit / repay; and,
+    since the core change of 2026-10-14 (task 31), the PRE-FUNDED MAKE — the 15
+    pre-fund lending sinks, `NativeUnwrapModule` — and the leg-reference TAKE_FOR).
+    The core hands an order its delivery ledger only at its DELIVER step, so a
+    delivery-consuming item flagged EARLY reverts `ForLegInvalid` instead of spending
+    residue. Zero inventory for all of them (`test/AggregatorZeroCapitalItems.t.sol`:
+    native-out through the module, swap → supply, an OCO bracket leg with the claim
+    early or late, a two-token route). `minBumpBps` / `amountOutOffset` cannot take
+    effect on this path and are REFUSED (`ItemFillUnsupported`, task 17; they used to
+    be silently ignored). The pool's surplus is swept back here and split by the same policy. The core
     still enforces the maker's `ItemPolicy` against the chosen placement, and
-    refuses what every netted plan refuses (SETTLE / TAKE_FOR / PUSH-funded MAKE
-    items, delta-verify orders, repeated input tokens) — those stay with the
-    flash family or an inventory filler. A TAKE item that produces **more than
+    refuses delta-verify orders (`DirectNotMatchable` here, first), repeated input
+    tokens and the BALANCE-relative TAKE_FOR; a leverage CYCLE (a borrow that needs
+    this fill's own delivery deposited first) reverts `BatchNotWhole` / `LegUnfunded`
+    — those stay with the flash family or an inventory filler. **SETTLE receipts**
+    land on this contract (the `matchSettle` caller): the route sells one only if it
+    is `legsIn[0]`'s token and the item is flagged early; a receipt in any other
+    token (a second-token `ProportionalSweepModule` sweep, an NFT) is neither routed
+    nor split — it stays as retained value (out of later fills' reach, delta rule)
+    for the operators to `sweep`, and the legs must be fundable from `legsIn[0]`
+    alone. A POOL route is single-output (its path ends in the anchor). A TAKE item that produces **more than
     its leg owes** is refunded to the maker on this path too since core B-1
     (2026-10-06: the crossing part of a credit joins `outstanding`, so PRESEND hands
     the route exactly `owed`); before B-1 the excess reached the route and the
@@ -245,7 +264,26 @@ entrypoint is owner/operator-gated.
     the maker exactly what the core verifies, and the decay since the quote stays
     here as input residue instead of reaching the maker
     (`test_live_directSellAfterDecay_paysTheLiveTickAndKeepsTheDecay`). Left
-    `NO_PATCH`, the route pays the quoted figure as before.
+    `NO_PATCH`, the route pays the quoted figure as before. The patched word is the
+    live price of the ANCHOR legs (task 16, 2026-10-14): `pricedOut[0]` on a direct
+    order; on a pull order the sum over every leg in the anchor output token — a fee
+    leg listed first used to make the word the fee (`test/AggregatorPatchAndItemGuards.t.sol`).
+    **Native delivery (solver v3, task 30, 2026-10-14).** A DIRECT order whose
+    `legsOut[0].token` is the instance's `NATIVE_BALANCE` (the `NativeBalance` view,
+    `packages/periphery/src/NativeBalance.sol`: `balanceOf(a) = a.balance`) receives
+    raw native coin with zero capital and no Settlement change: quote the route to end
+    in `WNATIVE` paying THE SOLVER (a pool route's last hop does so by itself); the
+    typed callback `withdraw`s exactly the core's `pricedOut[0]` and sends it with a
+    full-gas `call` to the leg's recipient (`0` = maker); the core verifies the native
+    balance delta. The WNATIVE spread stays and is split by the policy; `minOut` /
+    `maxPay` apply in WNATIVE. Refused shapes (`NativeLegShape`): not direct, or
+    WNATIVE / NATIVE_BALANCE in any other leg. A reverting recipient kills the fill
+    (`NativeSendFailed`); `receive()` accepts only `WNATIVE` (`NotWNative`).
+    `nativeDelivery()` returns `(nativeBalance, wnative)`; both zero = off. Gas: +27.0k
+    execution vs the same order taking WRBTC on the live Rootstock Settlement
+    (~2.8k refunded at tx end; `test/NativeDeliveryRootstock.fork.t.sol`, opt-in
+    `RSK_FORK_URL`), +15.3k on the unit mocks; an EMPTY recipient account adds the
+    EVM's +25k new-account charge.
     **Custody: hold DUST, not value.** These are two separate decisions and only
     one of them pays.
     *Dust is worth having.* An inbound transfer to a zero balance costs the
@@ -328,6 +366,11 @@ entrypoint is owner/operator-gated.
     future mistake can be paired with. On the direct path it never touches
     `tokenOut` at all. The operators take retained value out with
     `sweep(token, to, amount)` (never mid-fill; audit 2026-09-30 AGG-1).
+    Since v3, `sweepAll(tokens, to, keep)` pays out every listed token's balance above
+    `keep` in one transaction: `keep = 1` leaves the 1-wei floors, and `keep = 0` empties
+    the instance. It saves a 21k transaction base per extra token, and the amounts are
+    read on chain. `packages/beta-filler/e2e/sweep-solver.sh` uses it when the solver has
+    it.
     *Gas:* the multi-token generalisation (AGG-2/AGG-6) and the reentrancy state
     cost ≈ +5k per fill on the two-token benchmark (historical: 1-wei floor pull
     path 168.2k → 173.3k, direct 135.5k → 139.8k). Today's unit benchmark
@@ -640,13 +683,33 @@ a contract or an EIP-7702 delegated EOA — is logged loudly and refused unless
 `ALLOW_CONTRACT_OPERATORS=true`. It takes the signer from the CLI flags, and
 reverts unless every immutable — including the deployed
 `RouteSandbox`'s owner / Settlement / Permit3 / EXECUTOR — reads back as requested.
-**BREAKING (2026-10-12):** the constructor is `(settlement, operators, policy,
-venues)`; executeFill / executeItemFill take a trailing `Permit2612[] permits`.
+**BREAKING (2026-10-14, solver v3):** the constructor is `(settlement, operators,
+policy, venues, nativeBalance, wnative)` — `NATIVE_BALANCE` (the deployed
+`NativeBalance` view) and `WNATIVE` from the environment; unset = native delivery off;
+on chain 30 `WNATIVE` defaults to WRBTC `0x542f…677d` when `NATIVE_BALANCE` is set; the
+script probes the view (`balanceOf(x) == x.balance`, 18 decimals) and reads both back
+through `nativeDelivery()`. `FillRoute`'s `sameOut` word is now `legs` (same ABI type,
+so `onFill`'s selector is unchanged). (2026-10-12: `(settlement, operators, policy,
+venues)`; executeFill / executeItemFill take a trailing `Permit2612[] permits`.)
 (2026-10: `(settlement, operators, policy)`, reverting `NoOperators` on an empty set;
 the script refuses the removed `ROUTERS`, `STANDING`, `PRIME_TOKENS` and
 `ALLOW_OPEN`.)
-`make size-check-solvers` reports the runtime size under that profile (**20,779** /
-24,576 bytes, initcode 25,430 — which embeds the sandbox — after the 2026-10-12 gas pass
+**Deploying native delivery (task 30).** `make deploy-native-delivery` runs
+`script/deploy-native-delivery.sh`, which creates `NativeBalance` and a v3 solver wired to
+it in one `forge script` run (`DEPLOY_NATIVE_BALANCE=true`). By default it only runs the
+preflight and a simulation against the live chain: chain id, deployer balance, the
+predicted addresses, and every read-back check. `BROADCAST=1` deploys after a typed
+`yes`, signing with the `deployer` keystore. It prices at `minimumGasPrice × 1.03` with a
+1.1× gas reserve; forge's defaults would ask the deployer to reserve ~0.000187 RBTC for a
+~0.000137 RBTC deploy. Afterwards it reads both contracts back, prints the record lines,
+and verifies both on Sourcify.
+
+`make size-check-solvers` reports the runtime size under that profile (**22,777** /
+24,576 bytes, initcode 27,623, after `sweepAll` (+357) and the hand-encoded `matchSettle`
+call (−789); 23,151 / 27,997 after solver v3 — native delivery, tasks 16/17 — from a
+wiped `out/solvers-deploy`. The big size lever is `optimizer_runs`, measured 2026-10-15
+on this tree (runtime / gas per fill): 1e6 22,777 / 0, 3e4 21,817 / +25, 2e4 21,367 / +110,
+1.5e4 20,133 / +700, 1e4 19,450 / +740; 20,779 / 25,430 — initcode embeds the sandbox — after the 2026-10-12 gas pass
 and the `SurplusSplit` event removal (−156 B; 20,935 / 25,586 before it), via-IR runs
 1e6; legacy runs 20,000 was 21,001 / 26,245 after pool routes
 and permits: ≈ +1.1k for the permit path, ≈ +1.8k for the route driver, the rest the

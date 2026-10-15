@@ -1,4 +1,4 @@
-import { MAX_POOL_HOPS } from "@1delta-x/sdk";
+import { MAX_POOL_HOPS, nativeBalanceOf } from "@1delta-x/sdk";
 import { getAddress, isAddress, type Address, type Hex } from "viem";
 
 import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK, type NordsternConfig } from "./nordstern";
@@ -152,6 +152,16 @@ export interface DiscoveryConfig {
 export interface RouteConfig {
   /** The deployed, operator-gated AggregatorFillSolver (msg.sender to Settlement). */
   solver: Address;
+  /**
+   * `AGGREGATOR_SOLVER_LEGACY` (comma list, default none): earlier solver instances this
+   * filler still operates. Each gets its own route strategy that takes ONLY orders naming
+   * it as `exclusiveFiller` — a DIRECT order signed for it, or a pull order inside its
+   * window — so orders signed before a solver migration keep filling until they expire,
+   * while everything else goes to `solver`. See {@link legacyRouteConfig}.
+   */
+  legacySolvers: Address[];
+  /** Set only on a {@link legacyRouteConfig}: take only orders whose `exclusiveFiller` is `solver`. */
+  onlyNamed?: boolean;
   pools: RoutePool[];
   paths: RoutePath[];
   /**
@@ -217,6 +227,38 @@ export interface RouteConfig {
    * shape with it (policy.ts `nativeOutShape`): the WRBTC leg to the module + one MAKE item.
    */
   nativeUnwrap?: Address;
+  /**
+   * NATIVE DELIVERY (task 30): the `NativeBalance` view a DIRECT order names as its output
+   * token to receive raw RBTC (`NATIVE_BALANCE`; unset = the SDK's per-chain constant, ""
+   * = off). The route treats such a leg as WRBTC — the pool plan's last hop pays the
+   * SOLVER, which unwraps and sends the coin (solver v3) — and start-up turns it off
+   * unless the solver's `nativeDelivery()` is (this address, WRBTC).
+   */
+  nativeBalance?: Address;
+  /**
+   * `NATIVE_DIRECT_GAS` (default 30 000): what a native fill costs over a plain direct one —
+   * the solver's `WRBTC.withdraw`, the native send and the typed callback. Measured on a
+   * Rootstock fork with the real filler (e2e/native-direct-fork.sh, 2026-10-15): receipt
+   * gas +29.7k over a WRBTC fill to a maker already holding WRBTC, +12.7k over one to a
+   * maker holding none. Charged to the pre-simulation estimate and to quotes until the
+   * `+native` shape has receipts of its own.
+   */
+  nativeDirectGas: bigint;
+  /**
+   * ITEM FILLS (task 31): item-bearing PULL orders routed through
+   * `AggregatorFillSolver.executeItemFill` (a one-order `matchSettle`), scheduled by the
+   * SDK's `classifyItemFill`. Unset = off (`ITEM_FILLS`, default off: items refused).
+   */
+  itemFills?: {
+    /**
+     * `NETTED_DELIVERY_FUNDED_ITEMS` (default false = the LIVE Rootstock Settlement, whose
+     * `matchSettle` admits only pull MAKE and TAKE): the target Settlement also runs
+     * pre-funded MAKE, leg-reference TAKE_FOR and SETTLE items on the netted path.
+     */
+    nettedDeliveryFundedItems: boolean;
+    /** `ITEM_FILL_GAS` (default 120 000): the `matchSettle` overhead + the items, over a pull route fill. */
+    gas: bigint;
+  };
 }
 
 export const USDRIF_DECIMALS = 18;
@@ -537,6 +579,18 @@ function nativeUnwrapOf(env: Env): Address | undefined {
   return getAddress(raw.trim());
 }
 
+/** `NATIVE_BALANCE`: unset = the SDK's constant for CHAIN_ID (undefined until deployed), "" = off. */
+function nativeBalanceEnv(env: Env): Address | undefined {
+  const raw = env.NATIVE_BALANCE;
+  if (raw === undefined) {
+    const sdk = nativeBalanceOf(posNum(env, "CHAIN_ID", ROOTSTOCK.chainId));
+    return sdk ? getAddress(sdk) : undefined;
+  }
+  if (raw.trim() === "") return undefined;
+  if (!isAddress(raw.trim(), { strict: false })) throw new Error("env NATIVE_BALANCE: not an address");
+  return getAddress(raw.trim());
+}
+
 function bps(env: Env, key: string, fallback: number): bigint {
   const v = uint(env, key, fallback);
   if (v > 10_000n) throw new Error(`env ${key} must be 0..10000 bps`);
@@ -640,6 +694,7 @@ function loadRoute(env: Env): RouteConfig | undefined {
   if (gasEstimate > maxGas) throw new Error(`ROUTE_GAS_ESTIMATE ${gasEstimate} exceeds MAX_ROUTE_GAS ${maxGas}`);
   return {
     solver: addr(env, "AGGREGATOR_SOLVER"),
+    legacySolvers: addrList(env, "AGGREGATOR_SOLVER_LEGACY", []),
     pools: env.ROUTE_POOLS !== undefined ? parsePools(env.ROUTE_POOLS) : [...ROOTSTOCK_POOLS],
     paths: parsePaths(env.ROUTE_PATHS ?? ROOTSTOCK_PATHS),
     // Venue 0's quoter is the same QUOTER_V2 the rebalancer uses; venue 1 (SushiSwap v3)
@@ -660,6 +715,11 @@ function loadRoute(env: Env): RouteConfig | undefined {
     hourlyFills: uint(env, "ROUTE_HOURLY_FILLS", 60),
     okuPull: flag(env, "ROUTE_OKU_PULL", true),
     ...(nativeUnwrapOf(env) ? { nativeUnwrap: nativeUnwrapOf(env)! } : {}),
+    ...(nativeBalanceEnv(env) ? { nativeBalance: nativeBalanceEnv(env)! } : {}),
+    nativeDirectGas: uint(env, "NATIVE_DIRECT_GAS", 30_000),
+    ...(flag(env, "ITEM_FILLS", false)
+      ? { itemFills: { nettedDeliveryFundedItems: flag(env, "NETTED_DELIVERY_FUNDED_ITEMS", false), gas: uint(env, "ITEM_FILL_GAS", 120_000) } }
+      : {}),
     sushi: {
       enabled: flag(env, "SUSHI_ENABLED", true),
       baseUrl: env.SUSHI_API_URL ?? "https://api.sushi.com",
@@ -759,6 +819,24 @@ function loadGas(env: Env): GasPolicy {
   };
 }
 
+/**
+ * The route config for a LEGACY solver instance (`AGGREGATOR_SOLVER_LEGACY`): the primary's,
+ * pointed at `legacy` and restricted to orders that name it. Retain mode follows the solver
+ * (a primary `ROUTE_PROFIT_RECIPIENT` equal to the primary solver becomes the legacy solver,
+ * so each instance keeps its own spread); any other recipient is kept. Native delivery and
+ * item fills stay with the primary: a legacy instance predates them.
+ */
+export function legacyRouteConfig(rc: RouteConfig, legacy: Address): RouteConfig {
+  const { nativeBalance: _nb, nativeUnwrap: _nu, itemFills: _if, ...rest } = rc;
+  return {
+    ...rest,
+    solver: legacy,
+    legacySolvers: [],
+    onlyNamed: true,
+    profitRecipient: rc.profitRecipient.toLowerCase() === rc.solver.toLowerCase() ? legacy : rc.profitRecipient,
+  };
+}
+
 export function loadConfig(env: Env): Config {
   const privateKey = req(env, "PRIVATE_KEY");
   if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) throw new Error("PRIVATE_KEY must be a 0x-prefixed 32-byte hex key");
@@ -806,6 +884,9 @@ export function loadConfig(env: Env): Config {
     route: flag(env, "ROUTE_ENABLED", route !== undefined),
   };
   if (strategies.route && !route) throw new Error("ROUTE_ENABLED=1 needs AGGREGATOR_SOLVER");
+  if (route?.legacySolvers.some((l) => l.toLowerCase() === route.solver.toLowerCase())) {
+    throw new Error("AGGREGATOR_SOLVER_LEGACY must not list AGGREGATOR_SOLVER itself");
+  }
   if (!strategies.inventory && !strategies.route) throw new Error("both strategies are disabled");
   // A keyed RPC goes in the RPC_URL_SECRET secret (the Worker: a var and a secret
   // cannot share a name, so the public-node RPC_URL var line can stay).

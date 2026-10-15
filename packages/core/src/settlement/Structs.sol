@@ -421,6 +421,24 @@ struct MatchPlan {
 ///                   plan must fund its deliveries from elsewhere (another order's
 ///                   pull, a PRESEND, a CALL). That is the same capital shape a
 ///                   single-order `fill` has always had.
+///
+///         THE PULL RULE OF ORDERED AND ATOMIC (task 31, 2026-10-14). Under ORDERED and
+///         ATOMIC a `PULL` of this order also waits for every NON-MAKE item of the
+///         order (TAKE, TAKE_FOR, SETTLE — the ops that can credit an input leg), so a
+///         pull is never drawn from the wallet ahead of the TAKE that was going to fund
+///         it (the allowance asymmetry above; ACCEPTED-PATTERNS-REVIEW B8). Unlike
+///         CANONICAL it does NOT wait for the delivery, so such an order still fills
+///         with zero capital: `sources → PULL → PRESEND → CALL → DELIVER → MAKEs`. That
+///         makes ORDERED the right default for an order whose TAKE funds an input leg;
+///         CANONICAL stays the "behave exactly like `fill`" opt-in, at the capital cost
+///         noted above. Consequence for authors: a TAKE that should run AFTER the
+///         delivery (a borrow to the wallet behind a swap-and-deposit) must be signed
+///         under ANY, because under ORDERED it now has to precede every PULL. The mask is
+///         keyed on the op, not on what an item produces: a MAKE whose module happens to
+///         return an input-leg token to Settlement (a fee transfer addressed here) is not
+///         in it, so a PULL ahead of that MAKE is still possible (review 2026-10-14 I-1;
+///         an odd maker-signed shape, allowance-only). And a non-MAKE item that cannot
+///         credit a leg (a TAKE paid to the wallet, a SETTLE) is in it anyway (I-2).
 library ItemPolicy {
     uint256 internal constant ANY = 0;
     uint256 internal constant ORDERED = 1;

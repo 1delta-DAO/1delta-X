@@ -129,12 +129,13 @@ export function retireReason(
 
 /** The row an order leaves in Recent fills when it finishes with nothing (more) to show as a fill. */
 export function outcomeEntry(
-  o: Pick<RestingOrder, "id" | "marketId" | "side" | "type" | "size" | "filled" | "price" | "signed">,
+  o: Pick<RestingOrder, "id" | "marketId" | "side" | "type" | "size" | "filled" | "price" | "signed" | "native">,
   outcome: Outcome,
   at: number,
 ): Fill {
   return {
     id: `${o.id}-${outcome}`,
+    ...(o.native ? { native: true } : {}),
     ...(o.signed ? { maker: o.signed.order.maker } : {}),
     orderHash: o.id,
     orderType: o.type,

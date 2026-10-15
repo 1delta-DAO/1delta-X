@@ -751,6 +751,30 @@ may pass its own `FillerData{payTo, minBumpBps, bounds}`. Filler-aware gates
 ADAPTER as the filler, not the solver behind it. `openFor` authorises only the inner
 order; the envelope nonce must equal the order nonce (2026-09-30 PERIPH-1/2/4).
 
+### `matchSettle` items: delivery-funded ops, SETTLE, and validators at open (task 31)
+
+Since 2026-10-14 `matchSettle` admits pre-funded `MAKE`, `TAKE_FOR` (literal and
+leg-reference forms) and `SETTLE` items, so a zero-capital solver can fill orders that
+consume their own delivery. What an integrator must know:
+
+- **A leg-reference item is kept behind its order's DELIVER by the ledger, not the
+  schedule.** `_stepDeliver` writes the order's `FillCtx.outs`; before that a leg
+  reference fails closed (`ForLegInvalid`). Another order's delivery to the same
+  singleton can sit in the module while an item runs, so a pre-fund module MUST spend
+  only its core-sized `forAmount` and floor at `balance − forAmount`
+  ([`PreFundGuard`](packages/lib/src/PreFundGuard.sol)); every shipped one does.
+- **The BALANCE-relative `TAKE_FOR` form stays refused** (`MatchSettleItemUnsupported`):
+  its wallet read would be the schedule's choice.
+- **SETTLE pays `msg.sender` of `matchSettle`.** A wrapper that calls `matchSettle` and
+  cannot move tokens it receives (`GuardedMatchSolver`) must refuse SETTLE items, as it
+  refuses `PRESEND`.
+- **Validators run at OPEN, for every order, before any item.** A module whose safety
+  needs a validator to see another order's item effect in the same plan must enforce
+  it inside the item. `OcoGroupModule` does: both sibling legs of a group pass the gate
+  at open, and the second claim reverts `GroupAlreadyClaimed`.
+
+See [docs/fill-ordering-capital-plan.md](docs/fill-ordering-capital-plan.md).
+
 ---
 
 ## Audit (2026-06-18): findings & fixes

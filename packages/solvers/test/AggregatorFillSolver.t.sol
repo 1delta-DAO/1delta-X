@@ -186,7 +186,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
             maxPay: 0,
             amountInOffset: NO_PATCH,
             amountOutOffset: NO_PATCH,
-            sameOut: 0,
+            legs: 0,
             tokens: toks,
             before: new uint256[](2),
             inMask: 1,
@@ -874,9 +874,9 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
     /// @dev Policy validation at construction.
     function test_split_constructorRejectsBadPolicy() public {
         vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
-        new AggregatorFillSolver(address(settlement), _ops(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_001, protocolRecipient: PROTOCOL}), new PoolVenue[](0));
+        new AggregatorFillSolver(address(settlement), _ops(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_001, protocolRecipient: PROTOCOL}), new PoolVenue[](0), address(0), address(0));
         vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
-        new AggregatorFillSolver(address(settlement), _ops(), SurplusPolicy({makerPpm: 0, protocolPpm: 1, protocolRecipient: address(0)}), new PoolVenue[](0));
+        new AggregatorFillSolver(address(settlement), _ops(), SurplusPolicy({makerPpm: 0, protocolPpm: 1, protocolRecipient: address(0)}), new PoolVenue[](0), address(0), address(0));
         // The boundary is allowed: 100% away from the filler.
         newAgg(address(settlement), _splitOps(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_000, protocolRecipient: PROTOCOL}), new PoolVenue[](0));
     }
@@ -930,11 +930,11 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
     ///      the policy. There is no open instance to plant a sandbox approval on.
     function test_gate_emptySetReverts() public {
         vm.expectRevert(AggregatorFillSolver.NoOperators.selector);
-        new AggregatorFillSolver(address(settlement), new address[](0), _noSplit(), new PoolVenue[](0));
+        new AggregatorFillSolver(address(settlement), new address[](0), _noSplit(), new PoolVenue[](0), address(0), address(0));
         vm.expectRevert(AggregatorFillSolver.NoOperators.selector);
         new AggregatorFillSolver(
             address(settlement), new address[](0), SurplusPolicy({makerPpm: 1, protocolPpm: 0, protocolRecipient: address(0)}),
-            new PoolVenue[](0)
+            new PoolVenue[](0), address(0), address(0)
         );
     }
 
@@ -1001,7 +1001,7 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         address[] memory five = new address[](5);
         for (uint256 i; i < 5; i++) five[i] = address(bytes20(keccak256(abi.encode("r", i))));
         vm.expectRevert(AggregatorFillSolver.BadSetSize.selector);
-        new AggregatorFillSolver(address(settlement), five, _noSplit(), new PoolVenue[](0));
+        new AggregatorFillSolver(address(settlement), five, _noSplit(), new PoolVenue[](0), address(0), address(0));
 
         address[] memory four = new address[](4);
         for (uint256 i; i < 4; i++) four[i] = address(bytes20(keccak256(abi.encode("o", i))));
@@ -1015,7 +1015,7 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         address[] memory ops = new address[](1);
         ops[0] = address(0);
         vm.expectRevert(AggregatorFillSolver.BadOperator.selector);
-        new AggregatorFillSolver(address(settlement), ops, _noSplit(), new PoolVenue[](0));
+        new AggregatorFillSolver(address(settlement), ops, _noSplit(), new PoolVenue[](0), address(0), address(0));
     }
 }
 

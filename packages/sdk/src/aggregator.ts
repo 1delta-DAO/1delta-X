@@ -240,6 +240,18 @@ export const AGGREGATOR_FILL_SOLVER_ABI = [
     outputs: [{ name: "", type: "address" }],
   },
   view("SETTLEMENT", "address"),
+  // Native delivery (task 30, solver v3): the instance's (NativeBalance view, wrapped
+  // native) pair — both zero = off. A pre-v3 solver has no such function (the call reverts).
+  {
+    type: "function",
+    name: "nativeDelivery",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "nativeBalance", type: "address" },
+      { name: "wnative", type: "address" },
+    ],
+  },
   view("EXECUTOR", "address"),
   view("SANDBOX", "address"),
   view("GATED", "bool"),
@@ -317,6 +329,13 @@ export const AGGREGATOR_FILL_SOLVER_ABI = [
   { type: "error", name: "PermitFailed", inputs: [{ name: "token", type: "address" }] },
   // PackedArraysMem.validateLegsIn/Out inside `_plan` (a malformed legs blob):
   { type: "error", name: "MalformedPackedArray", inputs: [] },
+  // executeItemFill with `minBumpBps` / `amountOutOffset` set (task 17):
+  { type: "error", name: "ItemFillUnsupported", inputs: [] },
+  // Native delivery (task 30, solver v3):
+  { type: "error", name: "BadNative", inputs: [] },
+  { type: "error", name: "NativeLegShape", inputs: [] },
+  { type: "error", name: "NativeSendFailed", inputs: [{ name: "to", type: "address" }] },
+  { type: "error", name: "NotWNative", inputs: [] },
   // RouteSandbox (bubbled through the solver):
   { type: "error", name: "OnlyOwner", inputs: [] },
   { type: "error", name: "ForbiddenTarget", inputs: [{ name: "target", type: "address" }] },
@@ -394,6 +413,38 @@ export function encodeAggregatorExecuteFill(args: {
     abi: AGGREGATOR_FILL_SOLVER_ABI,
     functionName: "executeFill",
     args: [packOrder(args.order) as never, args.sig, args.fillAmount, p as never, args.takerData ?? "0x", permits as never],
+  });
+}
+
+/**
+ * Encode `AggregatorFillSolver.executeItemFill` — the one-order `matchSettle` path for an
+ * ITEM-bearing order (see {@link classifyItemFill} for `lateItems`). Same checks as
+ * {@link encodeAggregatorExecuteFill}, plus the netted path's own refusal (task 17,
+ * `ItemFillUnsupported`): `plan.minBumpBps` must be 0 and `plan.amountOutOffset`
+ * {@link NO_PATCH} — `matchSettle` carries no bump floor and no priced amount reaches the
+ * route, so either would be a protection the operator does not get. A DIRECT order
+ * reverts `DirectNotMatchable` on-chain.
+ */
+export function encodeAggregatorExecuteItemFill(args: {
+  order: Order;
+  sig: Hex;
+  fillAmount: bigint;
+  plan: RoutePlan;
+  lateItems: bigint;
+  takerData?: Hex;
+  permits?: readonly Permit2612[];
+}): Hex {
+  const p = args.plan;
+  if (p.minBumpBps !== 0n) throw new Error("encodeAggregatorExecuteItemFill: minBumpBps must be 0 (ItemFillUnsupported)");
+  if (!isNoPatch(p.amountOutOffset)) throw new Error("encodeAggregatorExecuteItemFill: amountOutOffset must be NO_PATCH (ItemFillUnsupported)");
+  const n = BigInt(args.order.items.length);
+  if (args.lateItems < 0n || args.lateItems >> n !== 0n) throw new Error(`encodeAggregatorExecuteItemFill: lateItems names an item past ${n} (BadItemSchedule)`);
+  // Shape checks shared with executeFill (pool-route offsets, patch bounds, permit owners).
+  encodeAggregatorExecuteFill(args);
+  return encodeFunctionData({
+    abi: AGGREGATOR_FILL_SOLVER_ABI,
+    functionName: "executeItemFill",
+    args: [packOrder(args.order) as never, args.sig, args.fillAmount, p as never, args.takerData ?? "0x", args.lateItems, (args.permits ?? []) as never],
   });
 }
 

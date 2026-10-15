@@ -34,11 +34,13 @@ import {MatchShapes} from "../shared/MatchShapes.t.sol";
 ///      the floor they signed.
 ///
 ///  ── WHAT IS DELIBERATELY ABSENT FROM THE MATRIX ────────────────────────────
-///  Four shapes are not rows here because `matchSettle` REFUSES them outright, and
-///  the refusals are pinned in `MatchSettle.t.sol` / `MatchSettleGates.t.sol`
-///  rather than duplicated: a SETTLE item and a TAKE_FOR item (both
-///  {MatchSettleItemUnsupported}), a repeated input token ({MatchDuplicateInput}),
-///  and delta-verified outputs ({DeltaVerifyNotBatchable}). A proportional input
+///  Three shapes are not rows here because `matchSettle` REFUSES them outright, and
+///  the refusals are pinned in `MatchSettle.t.sol` / `MatchSettleGates.t.sol` /
+///  `TakeForItem.t.sol` rather than duplicated: a BALANCE-form TAKE_FOR item
+///  ({MatchSettleItemUnsupported}), a repeated input token ({MatchDuplicateInput}),
+///  and delta-verified outputs ({DeltaVerifyNotBatchable}). SETTLE, the other
+///  TAKE_FOR forms and the pre-funded MAKE are admitted since task 31 (2026-10-14)
+///  and pinned in `MatchSettleDeliveryFunded.t.sol`. A proportional input
 ///  leg is matchable but only at full fill
 ///  ({Proportional.ProportionalNeedsFullFill}), so it appears in the full-fill
 ///  sweep and is excluded from the sliced one.

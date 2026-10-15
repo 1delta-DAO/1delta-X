@@ -8,6 +8,7 @@ import {
   POOL_AMOUNT_OUT_OFFSET,
   POOL_ROUTE,
   unpackTiming,
+  type ItemFillCaps,
   type Order,
   type RoutePlan,
   type RouterCall,
@@ -262,13 +263,21 @@ export function routePaths(
 export const NO_ROUTE_REASON = "no configured pool/path for the pair";
 
 export interface RouteClass {
-  /** Delta-verify order naming our solver: the route pays the maker. */
+  /** Delta-verify order naming our solver: the route pays the maker (or, native, the solver). */
   direct: boolean;
   tokenIn: Address;
+  /** The token the ROUTE ends in: `legsOut[0]`'s, or the wrapped native coin for a native order. */
   tokenOut: Address;
   paths: RoutePath[];
-  /** The maker receives raw RBTC: the WRBTC leg goes to the NativeUnwrapModule (policy.ts `nativeOutShape`). */
+  /** The maker receives raw RBTC: the WRBTC leg goes to the NativeUnwrapModule (policy.ts `nativeOutShape`) — an item fill. */
   nativeOut?: boolean;
+  /**
+   * NATIVE delivery through the NativeBalance view (task 30): the route ends in WRBTC
+   * ({@link tokenOut}) and its last hop pays the SOLVER, which unwraps it and sends the coin.
+   */
+  native?: boolean;
+  /** An item fill (`executeItemFill`, task 31) with this schedule; PULL only. */
+  itemFill?: { lateItems: bigint };
 }
 
 /**
@@ -280,9 +289,15 @@ export interface RouteClass {
  */
 export const NATIVE_OUT_GAS = 40_000n;
 
-/** Why the route refuses a native-out order (see {@link classifyRoute}). */
+/**
+ * Why the route refuses the NativeUnwrapModule shape (see {@link classifyRoute}) unless the
+ * SDK item classifier schedules it for `executeItemFill` — which needs the task-31
+ * Settlement (pre-funded MAKE on the netted path) and an item policy below CANONICAL
+ * (CANONICAL is forward-only; the app signs ORDERED since task 31). Native receipts go
+ * through the NativeBalance view instead (task 30), which needs no Settlement change.
+ */
 export const NATIVE_OUT_NOT_ROUTABLE =
-  "native-out: the AggregatorFillSolver cannot fill a pre-funded MAKE item (executeFill is item-free, matchSettle refuses it) — inventory only";
+  "native-out via the NativeUnwrapModule: not an item fill the solver can schedule (executeFill is item-free) — sign the NativeBalance shape";
 
 /**
  * The inventory strategy's strictness (plain one-in/one-out, no items, validators,
@@ -323,17 +338,17 @@ export function classifyRoute(
     graph?: readonly GraphPool[];
     anyPath?: boolean;
     nativeUnwrap?: { module: Address; wrapped: Address };
+    nativeBalance?: { view: Address; wrapped: Address };
+    itemFills?: ItemFillCaps;
   } = {},
 ): Verdict<RouteClass> {
   const shape = plainShape(order, extras);
   if (!shape.ok) return shape;
-  // NATIVE-OUT orders are recognised but NOT the route's (2026-10-14, fork-proven): the
-  // deployed AggregatorFillSolver's `executeFill` drives `PostInputs`, which is item-free
-  // (`ReverseModeRequiresNoItems`), and its `executeItemFill` goes through `matchSettle`,
-  // which refuses a pre-funded MAKE item — the NativeUnwrapModule's shape. Such an order
-  // fills through a plain `fill` by a filler that HOLDS the WRBTC (inventory), or a
-  // future solver with a PreDelivery entry. Refused here rather than simulated and reverted.
-  if (shape.nativeOut) return { ok: false, reason: NATIVE_OUT_NOT_ROUTABLE };
+  // The NativeUnwrapModule shape is the route's only as an ITEM FILL (2026-10-14,
+  // fork-proven): `executeFill` drives `PostInputs`, which is item-free
+  // (`ReverseModeRequiresNoItems`), and the LIVE `matchSettle` refuses a pre-funded MAKE.
+  // Refused here rather than simulated and reverted unless the classifier scheduled it.
+  if (shape.nativeOut && !shape.itemFill) return { ok: false, reason: `${NATIVE_OUT_NOT_ROUTABLE}${shape.itemSkip ? ` (${shape.itemSkip})` : ""}` };
   const direct = isDeltaVerify(order);
   const ex = order.exclusiveFiller;
   if (direct) {
@@ -347,7 +362,8 @@ export function classifyRoute(
     if (w.kind === "hard") return { ok: false, reason: "names another exclusive filler (hard window)" };
   }
   const tokenIn = order.legsIn[0]!.token;
-  const tokenOut = order.legsOut[0]!.token;
+  // A native order routes into the wrapped coin (the solver unwraps it).
+  const tokenOut = shape.nativeBalance ? extras.nativeBalance!.wrapped : order.legsOut[0]!.token;
   if (eq(tokenIn, tokenOut)) return { ok: false, reason: "same-token order" };
   if (!rc.routeTokens.some((t) => eq(t, tokenIn)) || !rc.routeTokens.some((t) => eq(t, tokenOut))) {
     return { ok: false, reason: "pair outside ROUTE_TOKENS" };
@@ -355,7 +371,16 @@ export function classifyRoute(
   const paths = routePaths(tokenIn, tokenOut, rc, extras.graph);
   // `anyPath`: the pool graph is not loaded yet, so "no path" would be a guess.
   if (paths.length === 0 && !extras.anyPath && (direct || !(rc.sushi?.enabled || rc.nordstern?.enabled))) return { ok: false, reason: NO_ROUTE_REASON };
-  return { ok: true, direct, tokenIn, tokenOut, paths, ...(shape.nativeOut ? { nativeOut: true } : {}) };
+  return {
+    ok: true,
+    direct,
+    tokenIn,
+    tokenOut,
+    paths,
+    ...(shape.nativeOut ? { nativeOut: true } : {}),
+    ...(shape.nativeBalance ? { native: true } : {}),
+    ...(shape.itemFill ? { itemFill: shape.itemFill } : {}),
+  };
 }
 
 /** `ceil(a * b / c)`. */
@@ -527,7 +552,14 @@ export function buildPoolPlan(a: {
 export function validatePoolPlan(
   plan: RoutePlan,
   order: Order,
-  a: { direct: boolean; path: RoutePath; received: bigint; owed: bigint },
+  a: {
+    direct: boolean;
+    path: RoutePath;
+    received: bigint;
+    owed: bigint;
+    /** The token the route must end in when it is not `legsOut[0]`'s — WRBTC for a native (NativeBalance) order. */
+    routeOut?: Address;
+  },
 ): Verdict<{ plan: RoutePlan }> {
   const bad = (why: string): Verdict<{ plan: RoutePlan }> => ({ ok: false, reason: `pool plan: ${why}` });
   if (plan.router !== POOL_ROUTE) return bad(`router ${plan.router} is not POOL_ROUTE`);
@@ -538,7 +570,7 @@ export function validatePoolPlan(
     return bad((e as Error).message);
   }
   const tokenIn = order.legsIn[0]?.token;
-  const tokenOut = order.legsOut[0]?.token;
+  const tokenOut = a.routeOut ?? order.legsOut[0]?.token;
   if (!tokenIn || !eq(d.tokens[0]!, tokenIn)) return bad(`first token ${d.tokens[0]} is not the order's input ${tokenIn}`);
   if (!tokenOut || !eq(d.tokens[d.tokens.length - 1]!, tokenOut)) return bad(`last token ${d.tokens[d.tokens.length - 1]} is not the order's output ${tokenOut}`);
   const venues = pathVenues(a.path);

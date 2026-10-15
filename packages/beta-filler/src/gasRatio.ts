@@ -81,14 +81,20 @@ export function gasShape(
   tokenOut: string,
   via: string,
   funding?: "permit",
-  /** `+native`: a native-out fill (task 28) — the NativeUnwrapModule's item on top. */
-  native?: boolean,
+  /**
+   * `+native`: a native fill — the solver's unwrap-and-send (NativeBalance, task 30; also
+   * the retired NativeUnwrapModule shape when `true`). `+items`: an `executeItemFill`
+   * (task 31) — `matchSettle` and the items on top. Keyed on the ROUTED output token
+   * (WRBTC for a native fill), so the quote and the fill learn under one key.
+   */
+  variant?: boolean | "native" | "items",
 ): string {
+  const tag = variant === true || variant === "native" ? "+native" : variant === "items" ? "+items" : "";
   // `+permit` / `+plain`: a fill that runs the maker's ERC-2612 permit is its own shape.
   // Learning it under the plain key made a plain quote carry the permit, and a permit
   // quote add PERMIT_IN_FILL_GAS on top of it a second time (2026-10-12: 1.05 USDRIF on
   // a $12.75 ticket). The suffix also retired every pre-split key.
-  return `${strategy}:${delivery}:${tokenIn.toLowerCase()}:${tokenOut.toLowerCase()}@${via.toLowerCase()}+${funding ?? "plain"}${native ? "+native" : ""}`;
+  return `${strategy}:${delivery}:${tokenIn.toLowerCase()}:${tokenOut.toLowerCase()}@${via.toLowerCase()}+${funding ?? "plain"}${tag}`;
 }
 
 const clamp = (v: bigint) => (v < MIN_PPM ? MIN_PPM : v > MAX_PPM ? MAX_PPM : v);

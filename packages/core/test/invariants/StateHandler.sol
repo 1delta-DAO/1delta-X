@@ -5,6 +5,7 @@ import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol"
 import {PackedEncode} from "../shared/PackedEncode.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {Settlement, Order, Item, ItemOp, MatchPlan, MatchStep, CallbackMode} from "@core/settlement/Settlement.sol";
 
 /// @dev The "lender" behind the walk's one item-bearing order: a TAKE module that
@@ -27,10 +28,41 @@ contract FundingTakerMock is ITakerModule {
     }
 }
 
+/// @dev The walk's SHARED pre-fund singleton (task 31): orders 9 and 10 both deliver
+///      their tB leg here and carry one pre-funded MAKE item (`data` word 0 a
+///      pre-fund leg-reference descriptor, `>> 253 == 5`) that "supplies" it. The
+///      production floor shape ({PreFundGuard.floorOf}): spend EXACTLY the
+///      core-sized `amount` out of the module's own balance and end at
+///      `balance − amount`. Supplying is modelled as crediting `supplied[onBehalfOf]`
+///      and moving the tokens to {SINK}, so a wrong `amount`, a mis-attributed
+///      delivery or a spend out of residue shows up in the ledger. Whatever else sits
+///      here — another order's in-flight delivery, residue seeded at init, donations
+///      ({StateHandler.doDonate}) — must be left alone.
+contract PreFundSupplyMock is IMakerModule {
+    address public immutable settlement;
+    address public constant SINK = address(0x5171_5171);
+    mapping(address => uint256) public supplied;
+
+    constructor(address _settlement) {
+        settlement = _settlement;
+    }
+
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        require(msg.sender == settlement, "only settlement");
+        require(uint256(bytes32(data[0:32])) >> 253 == 5, "pre-fund descriptor required");
+        (, address token) = abi.decode(data, (uint256, address));
+        // Underflows unless at least `amount` sits here — and `amount` is the core's.
+        uint256 floor = MockERC20(token).balanceOf(address(this)) - amount;
+        MockERC20(token).transfer(SINK, amount);
+        require(MockERC20(token).balanceOf(address(this)) == floor, "spent past the floor");
+        supplied[onBehalfOf] += amount;
+    }
+}
+
 /// @title StateHandler
 /// @notice The action driver behind {CoreStateInvariants} — a closed, fully-funded
-///         world (3 makers, 2 fillers, 1 attacker, 9 orders, 4 candidate delegates,
-///         one lender) in which the invariant fuzzer may call ANY lifecycle entry
+///         world (3 makers, 2 fillers, 1 attacker, 11 orders, 4 candidate delegates,
+///         one lender, one shared pre-fund module) in which the invariant fuzzer may call ANY lifecycle entry
 ///         point as ANY actor, in any order, at any time — the single-order hot
 ///         path and the netted {Settlement.matchSettle} path alike.
 ///
@@ -68,8 +100,13 @@ contract StateHandler is MockSettlementBase {
     // ──────────────────── The universe ────────────────────
 
     /// @dev 6 SELL-tA orders (the original book), 2 mirror SELL-tB orders (the
-    ///      counter-side a netted match needs) and 1 item-funded order — see {_def}.
-    uint256 public constant N_ORDERS = 9;
+    ///      counter-side a netted match needs), 1 item-funded order and 2
+    ///      DELIVERY-funded (pre-funded MAKE) orders sharing one module — see {_def}.
+    ///
+    ///      ⚠ COUPLED TO THE CELL LAYOUT: `N_ORDERS` sizes the `filled` block and every
+    ///      maker's `orderApproved` row, so changing it moves every offset below
+    ///      (11 orders ⇒ 89 watched cells).
+    uint256 public constant N_ORDERS = 11;
     uint256 internal constant N_MAKERS = 3;
     uint256 internal constant N_SIGNERS = 4; // [0] is address(0) — see {signers}
     uint256 internal constant N_COORDS = 10;
@@ -104,11 +141,11 @@ contract StateHandler is MockSettlementBase {
     // One flat array so the diff is a single loop. The offsets are the only place the
     // layout is written down; every accessor below derives from them.
 
-    uint256 internal constant OFF_APPROVED = N_ORDERS; //                 6
-    uint256 internal constant OFF_SIGNER = OFF_APPROVED + N_MAKERS * N_ORDERS; // 24
-    uint256 internal constant OFF_MINVALID = OFF_SIGNER + N_MAKERS * N_SIGNERS; // 36
-    uint256 internal constant OFF_BIT = OFF_MINVALID + N_MAKERS; //      39
-    uint256 internal constant N_CELLS = OFF_BIT + N_MAKERS * N_COORDS; // 69
+    uint256 internal constant OFF_APPROVED = N_ORDERS; //                 11
+    uint256 internal constant OFF_SIGNER = OFF_APPROVED + N_MAKERS * N_ORDERS; // 44
+    uint256 internal constant OFF_MINVALID = OFF_SIGNER + N_MAKERS * N_SIGNERS; // 56
+    uint256 internal constant OFF_BIT = OFF_MINVALID + N_MAKERS; //      59
+    uint256 internal constant N_CELLS = OFF_BIT + N_MAKERS * N_COORDS; // 89
 
     // ──────────────────── Findings, one string per state family ────────────────────
 
@@ -126,6 +163,15 @@ contract StateHandler is MockSettlementBase {
     // {CoreStateInvariants} asserts these moved.
     uint256 public fillsSettled;
     uint256 public matchesSettled;
+    /// @dev Pre-fund liveness: hot-path fills and netted matches of orders 9/10 that
+    ///      SETTLED, and netted schedules SUBMITTED with a pre-funded item hoisted
+    ///      ahead of its own DELIVER while otherwise able to settle (complete in every
+    ///      other respect, nothing doubled, pool whole, no dead order) — the exact
+    ///      plans the core's delivery ledger must refuse. Counted on submission; a
+    ///      SETTLED one is a finding.
+    uint256 public preFundFillsSettled;
+    uint256 public preFundMatchesSettled;
+    uint256 public earlyItemProbes;
     uint256 public ordersCancelled;
     uint256 public approvalsRecorded;
     uint256 public delegationsWritten;
@@ -136,6 +182,20 @@ contract StateHandler is MockSettlementBase {
 
     /// @dev The lender behind order 8's TAKE item. Holds tA stock and nothing else.
     FundingTakerMock public taker;
+
+    /// @dev The ONE pre-fund singleton orders 9 and 10 both deliver into, so
+    ///      interleaved schedules put one order's in-flight delivery (and the residue
+    ///      below) in the module while the other's item runs.
+    PreFundSupplyMock public supply;
+
+    /// @dev Residue the module holds that belongs to NO order: seeded at init (so an
+    ///      item hoisted ahead of its delivery always has something to steal from,
+    ///      which is the case the old shape guard existed for) plus every
+    ///      {doDonate} into it. A correct pre-fund spend ends at its floor, so the
+    ///      module's balance must equal this EXACTLY at all times
+    ///      ({CoreStateInvariants.invariant_preFundModuleHoldsOnlyResidue}).
+    mapping(address => uint256) public moduleResidue;
+    uint256 internal constant MODULE_SEED_RESIDUE = 5_000_000;
 
     /// @dev Tokens DONATED straight to the settler by {doDonate}. Every balance-delta
     ///      window in the core is measured from a snapshot, so a donated balance is
@@ -188,6 +248,13 @@ contract StateHandler is MockSettlementBase {
         // `(spender, module, ref)` triple the production flow authorises.
         taker = new FundingTakerMock(address(permit3));
         tA.mint(address(taker), 1e30);
+
+        // The shared pre-fund module, with residue that covers any single item
+        // hoisted ahead of its own delivery — so the ONLY thing that can refuse such
+        // a schedule is the core's delivery ledger, not an empty module's underflow.
+        supply = new PreFundSupplyMock(address(settlement));
+        tB.mint(address(supply), MODULE_SEED_RESIDUE);
+        moduleResidue[address(tB)] = MODULE_SEED_RESIDUE;
         vm.prank(makers[0]);
         permit3.approveTaker(address(settlement), address(taker), keccak256(_itemData(8)), type(uint160).max, 0);
 
@@ -225,6 +292,15 @@ contract StateHandler is MockSettlementBase {
     ///      excess must come back to the maker. Same maker and same tokens as order
     ///      0, so it is also fillable on the hot path, where {_expectFill} applies
     ///      the identical arithmetic.
+    ///
+    ///      `i9`/`i10` are the DELIVERY-FUNDED orders (task 31): tA sellers by two
+    ///      different makers whose tB leg is delivered to the SHARED {supply}
+    ///      singleton, each with one pre-funded MAKE item (leg reference 0) that
+    ///      supplies exactly what was delivered. The maker's wallet never sees tB;
+    ///      `supplied[maker]` does. On the netted path the item must run AFTER the
+    ///      order's own DELIVER (the delivery ledger is written there); on the hot
+    ///      path the filler fronts tB to the module and items run after delivery by
+    ///      construction. `i10`'s odd rate exercises the ceil-rounded delivery.
     struct Def {
         uint256 makerIdx;
         uint256 nonce;
@@ -233,18 +309,21 @@ contract StateHandler is MockSettlementBase {
         bool fillOnce;
         bool sellB;
         uint256 produce;
+        bool preFund;
     }
 
     function _def(uint256 i) internal pure returns (Def memory) {
-        if (i == 0) return Def(0, 0, 1_000_000, 2_000_000, false, false, 0);
-        if (i == 1) return Def(0, 1, 900_001, 1_333_337, false, false, 0); // ceil-rounding pair
-        if (i == 2) return Def(1, 2, 500_000, 1_000_001, false, false, 0);
-        if (i == 3) return Def(1, 2, 600_000, 1_200_000, false, false, 0); // sibling on nonce 2
-        if (i == 4) return Def(2, 3, 700_000, 1_400_000, true, false, 0); //  fill-once
-        if (i == 5) return Def(2, 7, 800_000, 999_999, false, false, 0);
-        if (i == 6) return Def(1, 3, 20_000_000, 10_000_000, false, true, 0); // mirror, rate 2
-        if (i == 7) return Def(2, 1, 25_000_000, 10_000_000, false, true, 0); // mirror, rate 2.5
-        return Def(0, 7, 1_000_000, 2_000_000, false, false, 600_000); //  item-funded
+        if (i == 0) return Def(0, 0, 1_000_000, 2_000_000, false, false, 0, false);
+        if (i == 1) return Def(0, 1, 900_001, 1_333_337, false, false, 0, false); // ceil-rounding pair
+        if (i == 2) return Def(1, 2, 500_000, 1_000_001, false, false, 0, false);
+        if (i == 3) return Def(1, 2, 600_000, 1_200_000, false, false, 0, false); // sibling on nonce 2
+        if (i == 4) return Def(2, 3, 700_000, 1_400_000, true, false, 0, false); //  fill-once
+        if (i == 5) return Def(2, 7, 800_000, 999_999, false, false, 0, false);
+        if (i == 6) return Def(1, 3, 20_000_000, 10_000_000, false, true, 0, false); // mirror, rate 2
+        if (i == 7) return Def(2, 1, 25_000_000, 10_000_000, false, true, 0, false); // mirror, rate 2.5
+        if (i == 8) return Def(0, 7, 1_000_000, 2_000_000, false, false, 600_000, false); //  item-funded
+        if (i == 9) return Def(1, 7, 1_200_000, 2_400_000, false, false, 0, true); //  pre-funded, rate 2
+        return Def(2, 7, 700_001, 1_050_001, false, false, 0, true); //               pre-funded, odd rate
     }
 
     /// @dev Order 8's item `data` — the bytes the lender decodes AND the bytes the
@@ -253,15 +332,33 @@ contract StateHandler is MockSettlementBase {
         return abi.encode(address(tA), _def(i).produce);
     }
 
+    /// @dev Orders 9/10's item `data`: word 0 the pre-fund leg-reference descriptor
+    ///      (`5 << 253`, funding token in bits [16:176), `legsOut` index 0 in the low
+    ///      16 bits), word 1 the token the module spends.
+    function _preFundData() internal view returns (bytes memory) {
+        uint256 desc = (uint256(5) << 253) | (uint256(uint160(address(tB))) << 16);
+        return abi.encode(desc, address(tB));
+    }
+
     function _mkOrder(uint256 i) internal view returns (Order memory o) {
         Def memory d = _def(i);
         o = _blank(d.nonce);
         o.maker = makers[d.makerIdx];
         (address tIn, address tOut) = d.sellB ? (address(tB), address(tA)) : (address(tA), address(tB));
         o.legsIn = _legsIn1(tIn, d.amtIn);
-        o.legsOut = _legsOut1(tOut, d.amtOut);
+        o.legsOut = d.preFund
+            ? PackedEncode.oneLegOut(tOut, d.amtOut, 0, address(supply)) // delivered to the module
+            : _legsOut1(tOut, d.amtOut);
         _setExpiry(o, ORDER_EXPIRY);
         if (d.fillOnce) o.timing |= FILL_ONCE_BIT;
+        if (d.preFund) {
+            Item[] memory its = new Item[](1);
+            // `amount` 0: unread — the delivery ledger sizes a pre-funded MAKE.
+            its[0] = Item({
+                op: ItemOp.MAKE, module: address(supply), amount: 0, recipient: address(0), data: _preFundData()
+            });
+            o.items = PackedEncode.items(its);
+        }
         if (d.produce != 0) {
             Item[] memory its = new Item[](1);
             its[0] = Item({
@@ -307,6 +404,16 @@ contract StateHandler is MockSettlementBase {
 
     function orderProduce(uint256 i) public pure returns (uint256) {
         return _def(i).produce;
+    }
+
+    function isPreFund(uint256 i) public pure returns (bool) {
+        return _def(i).preFund;
+    }
+
+    /// @dev Whether order `i` carries an item at all (a TAKE or a pre-funded MAKE).
+    function _hasItem(uint256 i) internal pure returns (bool) {
+        Def memory d = _def(i);
+        return d.produce != 0 || d.preFund;
     }
 
     // ──────────────────── Nonce coordinates under observation ────────────────────
@@ -494,9 +601,13 @@ contract StateHandler is MockSettlementBase {
         int256[2][N_MAKERS] expMaker; // [maker][token]
         int256[2] expSolver;
         int256 expLender; //      tA only — the lender stocks nothing else
+        int256[N_MAKERS] expSupplied; // the pre-fund module's per-maker credit
         uint256[2][N_MAKERS] preMaker;
         uint256[2] preSolver;
         uint256 preLender;
+        uint256[N_MAKERS] preSupplied;
+        uint256[2] preModule; //   expected delta: ZERO, always — it ends at its floor
+        uint256 preSink;
     }
 
     function _ledgerOpen(Ledger memory L, address solver) internal view {
@@ -509,6 +620,12 @@ contract StateHandler is MockSettlementBase {
         L.preSolver[0] = tA.balanceOf(solver);
         L.preSolver[1] = tB.balanceOf(solver);
         L.preLender = tA.balanceOf(address(taker));
+        for (uint256 m; m < N_MAKERS; ++m) {
+            L.preSupplied[m] = supply.supplied(makers[m]);
+        }
+        L.preModule[0] = tA.balanceOf(address(supply));
+        L.preModule[1] = tB.balanceOf(address(supply));
+        L.preSink = tB.balanceOf(supply.SINK());
     }
 
     /// @dev What a settled fill of `f` anchor units of order `i` does to every
@@ -520,13 +637,20 @@ contract StateHandler is MockSettlementBase {
     ///      over. `produce` cancels between lender and maker, so the solver's side
     ///      never sees it — which is the "excess goes to the maker, never the
     ///      solver" rule in arithmetic form.
+    ///
+    ///      A PRE-FUNDED order's output never reaches the maker's wallet: it is
+    ///      delivered to the shared module and supplied on the maker's behalf, so the
+    ///      slice lands in `supplied[maker]` instead and the module's own balance must
+    ///      not move at all (residue, donations and other orders' deliveries are
+    ///      untouched).
     function _expectFill(Ledger memory L, uint256 i, uint256 f) internal pure {
         Def memory d = _def(i);
         uint256 tIn = d.sellB ? 1 : 0;
         uint256 tOut = 1 - tIn;
         int256 out = int256(_ceilDiv(f * d.amtOut, d.amtIn));
         L.expMaker[d.makerIdx][tIn] += int256(d.produce) - int256(f);
-        L.expMaker[d.makerIdx][tOut] += out;
+        if (d.preFund) L.expSupplied[d.makerIdx] += out;
+        else L.expMaker[d.makerIdx][tOut] += out;
         L.expSolver[tIn] += int256(f);
         L.expSolver[tOut] -= out;
         L.expLender -= int256(d.produce);
@@ -552,6 +676,23 @@ contract StateHandler is MockSettlementBase {
         }
         if (int256(tA.balanceOf(address(taker))) - int256(L.preLender) != L.expLender) {
             _rec(F_FILL, string.concat(who, ": the lender moved off what its module produced, cell"), cell);
+        }
+        // The pre-fund module: each maker's credit rose by exactly its delivered
+        // slices, the sink received exactly their sum, and the module itself ended
+        // where it started — a spend out of residue or out of another order's
+        // in-flight delivery that was not made good shows up here.
+        int256 sumSupplied;
+        for (uint256 m; m < N_MAKERS; ++m) {
+            sumSupplied += L.expSupplied[m];
+            if (int256(supply.supplied(makers[m])) - int256(L.preSupplied[m]) != L.expSupplied[m]) {
+                _rec(F_FILL, string.concat(who, ": a pre-fund credit moved off the delivered amount, cell"), cell);
+            }
+        }
+        if (int256(tB.balanceOf(supply.SINK())) - int256(L.preSink) != sumSupplied) {
+            _rec(F_FILL, string.concat(who, ": the pre-fund module spent off the delivered amount, cell"), cell);
+        }
+        if (tA.balanceOf(address(supply)) != L.preModule[0] || tB.balanceOf(address(supply)) != L.preModule[1]) {
+            _rec(F_FILL, string.concat(who, ": the pre-fund module did not end at its floor, cell"), cell);
         }
     }
 
@@ -684,6 +825,7 @@ contract StateHandler is MockSettlementBase {
     /// @dev What a SETTLED fill has to be true of, whoever submitted it.
     function _checkSettledFill(FillProbe memory p, uint256[] memory outs) internal {
         ++fillsSettled;
+        if (isPreFund(p.i)) ++preFundFillsSettled;
         // A fill that lands on a killed order is the whole theft class this suite
         // exists to exclude — neither kill switch may be survivable.
         if (p.dead) _rec(F_FILL, "a cancelled order settled a fill, order", p.i);
@@ -797,6 +939,7 @@ contract StateHandler is MockSettlementBase {
         bool deadNonce; //      some slot sits on a cancelled nonce
         bool complete; //       the schedule CAN legitimately settle — see {_matchSchedule}
         bool doubled; //        an exactly-once step (ITEM / DELIVER) appears twice
+        bool itemEarly; //      a pre-funded item is scheduled ahead of its own DELIVER
         bool poolShort; //      Σ owed − Σ out < 0 in some token: nobody covers it here
         Ledger ledger;
     }
@@ -806,7 +949,8 @@ contract StateHandler is MockSettlementBase {
     ///      Two or three orders, at least one tA seller and one tB seller, sized so
     ///      that a balanced coincidence of wants is reached often (the tB seller is
     ///      usually sized to exactly what the tA sellers demand) but not always. The
-    ///      canonical `[PULL…, ITEM…, DELIVER…]` schedule is then MUTATED: shuffled
+    ///      canonical `[PULL…, TAKE-ITEM…, DELIVER…, PREFUND-ITEM…]` schedule is
+    ///      then MUTATED: shuffled
     ///      into an arbitrary interleaving, a `PULL` duplicated, a step dropped, a
     ///      `PRESEND` inserted anywhere, or an ITEM/DELIVER duplicated.
     ///
@@ -822,6 +966,9 @@ contract StateHandler is MockSettlementBase {
     ///        • the schedule was complete — every DELIVER and ITEM present, every
     ///          input leg either pulled or covered by its item's proceeds;
     ///        • no exactly-once step ran twice;
+    ///        • no pre-funded item ran ahead of its own order's DELIVER — the core's
+    ///          delivery ledger must refuse it even though the shared module holds
+    ///          residue and possibly another order's delivery that could "fund" it;
     ///        • the pool was never short — if Σ owed < Σ out in a token the match
     ///          MUST revert, because no CALL step here fronts the difference;
     ///        • no dead order (sentinel or nonce) settled, and `filled` advanced by
@@ -835,11 +982,51 @@ contract StateHandler is MockSettlementBase {
         uint256 actorSeed,
         uint256 schedSeed
     ) external {
+        _doMatchSettle(aSeed, bSeed, cSeed, fillSeed, actorSeed, schedSeed, false);
+    }
+
+    /// @dev The same netted walk with slot 0 FORCED to a pre-funded order (9 or 10)
+    ///      and, half the time, a targeted mutation instead of the generic ones: the
+    ///      canonical schedule with ONE pre-funded item moved to a random earlier
+    ///      position — ahead of its own DELIVER (the plan the delivery ledger must
+    ///      refuse), or between the two orders' deliveries on the shared module
+    ///      (DELIVER A, ITEM A, DELIVER B — legal). {doMatchSettle} alone reaches
+    ///      these by a random shuffle, which almost always breaks something else
+    ///      first (a DELIVER before the PULL that funds it), so the ordering rule
+    ///      was put under load a handful of times per walk; this is the dedicated
+    ///      driver for it.
+    function doMatchSettlePreFund(
+        uint256 pairSeed,
+        uint256 bSeed,
+        uint256 cSeed,
+        uint256 fillSeed,
+        uint256 actorSeed,
+        uint256 schedSeed
+    ) external {
+        _doMatchSettle(7 + pairSeed % 2, bSeed, cSeed, fillSeed, actorSeed, schedSeed, (pairSeed >> 1) % 2 == 0);
+    }
+
+    function _doMatchSettle(
+        uint256 aSeed,
+        uint256 bSeed,
+        uint256 cSeed,
+        uint256 fillSeed,
+        uint256 actorSeed,
+        uint256 schedSeed,
+        bool hoist
+    ) internal {
         MatchProbe memory p;
         p.n = cSeed % 3 == 0 ? 3 : 2;
         p.idx[0] = _sideA(aSeed);
         p.idx[1] = 6 + (bSeed % 2);
-        if (p.n == 3) p.idx[2] = (cSeed / 3) % N_ORDERS; // anything — a repeat, a second mirror
+        if (p.n == 3) {
+            // Anything — a repeat, a second mirror. But when slot 0 is a pre-funded
+            // order, half the time slot 2 is the OTHER one, so both deliveries share
+            // the singleton within one plan (DELIVER A, DELIVER B, ITEM A, ITEM B and
+            // every shuffle of it).
+            uint256 c = cSeed / 3;
+            p.idx[2] = isPreFund(p.idx[0]) && c % 2 == 0 ? 19 - p.idx[0] : (c / 2) % N_ORDERS;
+        }
 
         uint256[] memory before = _snap();
         _ledgerOpen(p.ledger, _actor(actorSeed));
@@ -854,7 +1041,11 @@ contract StateHandler is MockSettlementBase {
         }
         p.poolShort = p.ledger.expSolver[0] < 0 || p.ledger.expSolver[1] < 0;
 
-        MatchPlan memory plan = _matchPlan(p, schedSeed);
+        MatchPlan memory plan = _matchPlan(p, schedSeed, hoist);
+        if (p.itemEarly) {
+            probeIdx = p.idx;
+            if (_repairedSettles(plan, p.ledger.solver)) ++earlyItemProbes;
+        }
         vm.prank(p.ledger.solver);
         try settlement.matchSettle(plan) returns (uint256[][] memory, address[] memory, uint256[] memory) {
             _checkSettledMatch(p);
@@ -862,10 +1053,11 @@ contract StateHandler is MockSettlementBase {
         _close(before);
     }
 
-    /// @dev A tA seller: the six original orders and the item-funded one.
+    /// @dev A tA seller: the six original orders, the item-funded one and the two
+    ///      pre-funded ones.
     function _sideA(uint256 seed) internal pure returns (uint256) {
-        uint256 c = seed % 7;
-        return c == 6 ? 8 : c;
+        uint256 c = seed % 9;
+        return c < 6 ? c : c + 2;
     }
 
     /// @dev Resolve slot `x`'s fill. Sellers of tA: half the time the whole
@@ -910,7 +1102,11 @@ contract StateHandler is MockSettlementBase {
         p.req[x] = (f == remaining && mode == 1) ? type(uint256).max : f;
     }
 
-    function _matchPlan(MatchProbe memory p, uint256 schedSeed) internal view returns (MatchPlan memory plan) {
+    function _matchPlan(MatchProbe memory p, uint256 schedSeed, bool hoist)
+        internal
+        view
+        returns (MatchPlan memory plan)
+    {
         plan.orders = new Order[](p.n);
         plan.sigs = new bytes[](p.n);
         plan.fillAmounts = new uint256[](p.n);
@@ -923,7 +1119,7 @@ contract StateHandler is MockSettlementBase {
         plan.takerDatas = new bytes[](0);
         plan.callTargets = new address[](0);
         plan.callDatas = new bytes[](0);
-        plan.schedule = _matchSchedule(p, schedSeed);
+        plan.schedule = _matchSchedule(p, schedSeed, hoist);
     }
 
     /// @dev Mirror of {MatchStep.pack}.
@@ -932,12 +1128,18 @@ contract StateHandler is MockSettlementBase {
     }
 
     /// @dev The canonical schedule, then one mutation (`seed % 6`), then — half the
-    ///      time — a shuffle on top. Sets `p.complete` / `p.doubled` from the FINAL
-    ///      step list, so the expectation tracks what was actually submitted.
-    function _matchSchedule(MatchProbe memory p, uint256 seed) internal pure returns (uint256[] memory s) {
+    ///      time — a shuffle on top. Sets `p.complete` / `p.doubled` / `p.itemEarly`
+    ///      from the FINAL step list, so the expectation tracks what was actually
+    ///      submitted.
+    ///
+    ///      Canonical places a TAKE item before the deliveries (it funds the input)
+    ///      and a PRE-FUNDED item after them (it consumes the delivery). The shuffle
+    ///      is what hoists a pre-funded item ahead of its DELIVER, interleaves two
+    ///      orders' deliveries and items on the shared module, and so on.
+    function _matchSchedule(MatchProbe memory p, uint256 seed, bool hoist) internal pure returns (uint256[] memory s) {
         uint256 nItems;
         for (uint256 x; x < p.n; ++x) {
-            if (orderProduce(p.idx[x]) != 0) ++nItems;
+            if (_hasItem(p.idx[x])) ++nItems;
         }
         s = new uint256[](2 * p.n + nItems);
         uint256 w;
@@ -949,6 +1151,21 @@ contract StateHandler is MockSettlementBase {
         }
         for (uint256 x; x < p.n; ++x) {
             s[w++] = _step(MatchStep.DELIVER, x, 0);
+        }
+        uint256 firstPf = w;
+        for (uint256 x; x < p.n; ++x) {
+            if (isPreFund(p.idx[x])) s[w++] = _step(MatchStep.ITEM, x, 0);
+        }
+        if (hoist && w > firstPf) {
+            // Targeted: move ONE pre-funded item (they sit at the tail) to a random
+            // position at or before where it is — nothing else changes.
+            uint256 from = firstPf + (seed >> 8) % (w - firstPf);
+            uint256 v = s[from];
+            s = _insert(_drop(s, from), (seed >> 16) % (from + 1), v);
+            (bool c_, bool e_) = _isComplete(p, s);
+            p.itemEarly = e_;
+            p.complete = c_ && !e_;
+            return s;
         }
         uint256 mode = seed % 6;
         if (mode == 2) {
@@ -965,36 +1182,131 @@ contract StateHandler is MockSettlementBase {
             p.doubled = true;
         }
         if (mode == 1 || (seed >> 24) % 2 == 1) _shuffle(s, seed >> 32);
-        p.complete = _isComplete(p, s);
+        bool c;
+        (c, p.itemEarly) = _isComplete(p, s);
+        p.complete = c && !p.itemEarly;
     }
 
     /// @dev A schedule can legitimately settle only if every slot's DELIVER is
     ///      present, its ITEM (if any) is present, and its input is covered — by a
-    ///      `PULL`, or by the item alone when that produces at least what is owed.
-    function _isComplete(MatchProbe memory p, uint256[] memory s) internal pure returns (bool) {
+    ///      `PULL`, or by the item alone when that produces at least what is owed —
+    ///      AND, for a pre-funded item, the item comes after its own DELIVER.
+    ///
+    ///      Returns that last condition separately: `completeIgnoringOrder` is the
+    ///      first three, `early` is "some slot's pre-funded item precedes its own
+    ///      DELIVER". A pre-funded item that runs before it fails closed in the core
+    ///      ({Base._forSlice}: the slot's delivery ledger is still empty), so `early`
+    ///      makes the schedule unsettleable whatever the module holds.
+    function _isComplete(MatchProbe memory p, uint256[] memory s)
+        internal
+        pure
+        returns (bool completeIgnoringOrder, bool early)
+    {
+        completeIgnoringOrder = true;
         for (uint256 x; x < p.n; ++x) {
             bool pulled;
-            bool delivered;
-            bool ran;
+            uint256 firstDeliver = type(uint256).max;
+            uint256 firstItem = type(uint256).max;
             for (uint256 k; k < s.length; ++k) {
                 uint256 kind = s[k] & 0xff;
                 uint256 a = (s[k] >> 8) & 0xffff;
                 if (a != x) continue;
                 if (kind == MatchStep.PULL) pulled = true;
-                else if (kind == MatchStep.DELIVER) delivered = true;
-                else if (kind == MatchStep.ITEM) ran = true;
+                else if (kind == MatchStep.DELIVER && firstDeliver == type(uint256).max) firstDeliver = k;
+                else if (kind == MatchStep.ITEM && firstItem == type(uint256).max) firstItem = k;
             }
             uint256 produce = orderProduce(p.idx[x]);
-            if (!delivered) return false;
-            if (produce != 0 && !ran) return false;
-            if (!pulled && produce < p.fill[x]) return false;
+            bool delivered = firstDeliver != type(uint256).max;
+            bool ran = firstItem != type(uint256).max;
+            if (!delivered) completeIgnoringOrder = false;
+            if (_hasItem(p.idx[x]) && !ran) completeIgnoringOrder = false;
+            if (!pulled && produce < p.fill[x]) completeIgnoringOrder = false;
+            // Hoisted ahead of its DELIVER — or with no DELIVER at all.
+            if (isPreFund(p.idx[x]) && ran && firstItem < firstDeliver) early = true;
         }
-        return true;
+    }
+
+    /// @dev "This plan would SETTLE if only its pre-funded items were not hoisted" —
+    ///      measured, not predicted. Snapshot the EVM, run the plan's REPAIRED twin
+    ///      (every pre-funded item that precedes its own order's first DELIVER moved
+    ///      to just after it; nothing else changes), record whether it settled, and
+    ///      roll the whole world back (handler storage included — the result rides
+    ///      out in a local). A hoisted plan whose twin settles is one where the item
+    ///      ORDER is the only thing wrong, i.e. exactly what a core that handed out
+    ///      the delivery ledger at open (or not at all) would let through, since the
+    ///      module holds residue enough to "fund" the hoisted item. Counted in
+    ///      {earlyItemProbes}; the hoisted plan itself settling is a finding
+    ///      ({_checkSettledMatch}).
+    function _repairedSettles(MatchPlan memory plan, address solver) internal returns (bool ok) {
+        // `plan` is a memory REFERENCE: swap the schedule in for the probe and put
+        // the submitted one back, rather than aliasing a "copy".
+        uint256[] memory submitted = plan.schedule;
+        plan.schedule = _repairSchedule(submitted, plan.orders.length);
+        uint256 snap = vm.snapshotState();
+        vm.prank(solver);
+        try settlement.matchSettle(plan) returns (uint256[][] memory, address[] memory, uint256[] memory) {
+            ok = true;
+        } catch {}
+        vm.revertToStateAndDelete(snap);
+        plan.schedule = submitted;
+    }
+
+    /// @dev `s` with every ITEM step of a pre-funded slot that precedes that slot's
+    ///      first DELIVER deferred to immediately after that DELIVER. A slot with no
+    ///      DELIVER at all keeps its items dropped (the twin then cannot settle,
+    ///      which is the honest answer: that plan was incomplete anyway).
+    function _repairSchedule(uint256[] memory s, uint256 n) internal view returns (uint256[] memory r) {
+        uint256[] memory firstDeliver = new uint256[](n);
+        for (uint256 x; x < n; ++x) {
+            firstDeliver[x] = type(uint256).max;
+        }
+        for (uint256 k; k < s.length; ++k) {
+            uint256 a = (s[k] >> 8) & 0xffff;
+            if (s[k] & 0xff == MatchStep.DELIVER && a < n && firstDeliver[a] == type(uint256).max) {
+                firstDeliver[a] = k;
+            }
+        }
+        r = new uint256[](s.length);
+        uint256 w;
+        for (uint256 k; k < s.length; ++k) {
+            uint256 kind = s[k] & 0xff;
+            uint256 a = (s[k] >> 8) & 0xffff;
+            if (kind == MatchStep.ITEM && a < n && _slotIsPreFund(a) && k < firstDeliver[a]) continue; // deferred
+            r[w++] = s[k];
+            if (kind == MatchStep.DELIVER && a < n && k == firstDeliver[a] && _slotIsPreFund(a)) {
+                for (uint256 q; q < k; ++q) {
+                    if (s[q] & 0xff == MatchStep.ITEM && (s[q] >> 8) & 0xffff == a) r[w++] = s[q];
+                }
+            }
+        }
+        assembly {
+            mstore(r, w)
+        }
+    }
+
+    /// @dev Slot → book index for the plan currently being probed. Set by
+    ///      {_doMatchSettle} just before {_repairedSettles} so the repair can tell
+    ///      which slots are pre-funded without threading the probe through.
+    uint256[3] internal probeIdx;
+
+    function _slotIsPreFund(uint256 x) internal view returns (bool) {
+        return isPreFund(probeIdx[x]);
     }
 
     function _checkSettledMatch(MatchProbe memory p) internal {
         ++matchesSettled;
         uint256 cell = p.idx[0];
+        bool pf;
+        for (uint256 x; x < p.n; ++x) {
+            if (isPreFund(p.idx[x])) pf = true;
+        }
+        if (pf) ++preFundMatchesSettled;
+        // Checked FIRST so it is the finding that gets filed: the core's delivery
+        // ledger is the only thing standing between a hoisted pre-funded item and the
+        // residue / in-flight delivery sitting in the shared module, and the end-state
+        // ledger below cannot see the difference (the later DELIVER refills the
+        // module, so balances come out identical) — only the ORDER can.
+        if (p.itemEarly) _rec(F_FILL, "a pre-funded item ran before its order's DELIVER and the match settled, order", cell);
         if (p.deadSentinel) _rec(F_FILL, "a match settled a cancelled order, order", cell);
         if (p.deadNonce) _rec(F_CANCEL, "a match settled an order on a cancelled nonce, order", cell);
         if (!p.complete) _rec(F_FILL, "an incomplete schedule settled, order", cell);
@@ -1063,15 +1375,23 @@ contract StateHandler is MockSettlementBase {
     ///      must equal `donated` exactly ({CoreStateInvariants}), and every
     ///      conservation check above is blind to it by construction — so a sweep
     ///      that dipped into the donation would surface as an over-paid solver.
+    ///
+    ///      Half the time (`tokSeed` bit 1) the donation goes INTO the shared
+    ///      pre-fund module instead: residue that belongs to no order, which a
+    ///      pre-funded spend must never touch (it ends at `balance − amount`). Tallied
+    ///      in `moduleResidue` and asserted exactly by {CoreStateInvariants}.
     function doDonate(uint256 actorSeed, uint256 tokSeed, uint256 amtSeed) external {
         address who = _actor(actorSeed);
         MockERC20 t = _tok(tokSeed % 2);
+        bool toModule = (tokSeed >> 1) % 2 == 1;
+        address dst = toModule ? address(supply) : address(settlement);
         uint256 amt = amtSeed % 1_000_000 + 1;
 
         uint256[] memory before = _snap();
         vm.prank(who);
-        try t.transfer(address(settlement), amt) {
-            donated[address(t)] += amt;
+        try t.transfer(dst, amt) {
+            if (toModule) moduleResidue[address(t)] += amt;
+            else donated[address(t)] += amt;
         } catch {}
         _close(before);
     }

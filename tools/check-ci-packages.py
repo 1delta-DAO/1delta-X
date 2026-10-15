@@ -18,6 +18,7 @@ NOT_A_TEST_PACKAGE = {
     "core-deploy": "via-IR deploy build of Settlement; gated by `make size-check` / `make test-deployed`",
     "periphery-deploy": "via-IR deploy build of the lens/7683 settlers; gated by `make size-check`",
     "solvers-deploy": "Cancun deploy build of AggregatorFillSolver (+ its RouteSandbox); gated by `make size-check-solvers`, used by `make deploy-aggregator-fill`",
+    "modules-transfer-deploy": "Cancun deploy build of NativeUnwrapModule; used by `make simulate-native-unwrap` / `make deploy-native-unwrap`",
 }
 
 

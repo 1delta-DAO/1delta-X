@@ -77,9 +77,9 @@ export function assertBlockClockHeadroom(
  * current block number — and is refused near the `uint32` block-clock limit
  * ({@link assertBlockClockHeadroom}).
  *
- * An order whose plain `TAKE` funds an input leg ({@link takeFundsInputLeg}) must
- * carry a policy other than `ItemPolicy.ANY` — run it through
- * {@link withDefaultItemPolicy} first (it signs `CANONICAL`). Signing it at `ANY`
+ * An order whose `TAKE` / `TAKE_FOR` funds an input leg ({@link takeFundsInputLeg})
+ * must carry a policy other than `ItemPolicy.ANY` — run it through
+ * {@link withDefaultItemPolicy} first (it signs `ORDERED`). Signing it at `ANY`
  * lets any `matchSettle` caller PULL the leg before the TAKE and spend the maker's
  * Permit3 allowance twice for one fill (`ACCEPTED-PATTERNS-REVIEW.md` B8), so it
  * needs the explicit `opts.itemPolicy: ItemPolicy.ANY` (e.g. a CYCLE participant).
@@ -98,8 +98,8 @@ export async function signOrder(
     takeFundsInputLeg(order, { settlement: d.settlement })
   ) {
     throw new Error(
-      "signOrder: a TAKE item funds an input leg but the order signs ItemPolicy.ANY — a matchSettle caller could " +
-        "pull that leg first and spend the Permit3 allowance twice. Apply withDefaultItemPolicy(order) (CANONICAL), " +
+      "signOrder: a TAKE / TAKE_FOR item funds an input leg but the order signs ItemPolicy.ANY — a matchSettle caller could " +
+        "pull that leg first and spend the Permit3 allowance twice. Apply withDefaultItemPolicy(order) (ORDERED), " +
         "or pass opts.itemPolicy = ItemPolicy.ANY to sign ANY deliberately.",
     );
   }

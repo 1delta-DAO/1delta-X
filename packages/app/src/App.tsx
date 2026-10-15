@@ -13,7 +13,7 @@ import { PreAuditGate, PreAuditStrip, useAcknowledgement } from "./components/Pr
 import { RaffleNotice } from "./components/Raffle";
 import { TermsLink } from "./components/TermsLink";
 import { chainById, chainLabel } from "./config/chains";
-import { deploymentFor, exclusivityForMarket, solverForMarket } from "./config/deployments";
+import { deploymentFor, exclusivityForMarket, nativeOutFor, solverForMarket, type NativeOutShape } from "./config/deployments";
 import { marketById, pairsWith, pinnedToken, symbolsOn, wrappedNativeSymbol } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
 import { useMarketFloorInputs } from "./hooks/useMarketFloor";
@@ -152,9 +152,11 @@ export default function App() {
   }, [wallet.provider, onChain, chainId]);
 
   const resting = useRestingOrders(ticket.marketId);
-  // NATIVE-OUT (task 28): receiving the wrapped native coin, the maker may ask for the raw
-  // coin instead — unwrapped by the deployed NativeUnwrapModule inside the fill (pull
-  // delivery, + ~40k gas). Market and limit tickets; a TWAP's later slices sign WRBTC.
+  // NATIVE-OUT: receiving the wrapped native coin, the maker may ask for the raw coin
+  // instead. With a NativeBalance view deployed (task 30) on a DIRECT market the order
+  // signs the view as its output token and the solver unwraps and sends the coin (+~25k
+  // gas, no item, no extra approval); otherwise the dormant NativeUnwrapModule shape
+  // (task 28, pull). Market and limit tickets; a TWAP's later slices sign WRBTC.
   const [nativeOutChosen, setNativeOutChosen] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem("x.nativeOut") === "1";
@@ -170,22 +172,34 @@ export default function App() {
       /* a private window: the choice lasts this session */
     }
   }, []);
-  const nativeOutModule = deployment?.nativeUnwrap;
-  // Offered as its own entry in the RECEIVE dropdown wherever WRBTC could be received.
+  const nativeOutShape: NativeOutShape | undefined = useMemo(() => nativeOutFor(deployment, ticket.marketId), [deployment, ticket.marketId]);
+  const nativeOutDirect = !!nativeOutShape && "nativeBalance" in nativeOutShape;
+  // Offered as its own entry in the RECEIVE dropdown wherever WRBTC could be received
+  // (the shape is decided by the WRBTC market once it is picked); ACTIVE only when that
+  // market has a shape — else the form honestly shows WRBTC.
   const nativeOutAvailable =
-    !!nativeOutModule &&
+    (!!deployment?.nativeBalance || !!deployment?.nativeUnwrap) &&
     !!wrappedSymbol &&
     ticket.mode !== "twap" &&
     (ticket.recvToken === wrappedSymbol || pairsWith(chainId, ticket.payToken).includes(wrappedSymbol));
-  const nativeOutActive = nativeOutAvailable && nativeOutChosen && ticket.recvToken === wrappedSymbol;
+  const nativeOutActive = nativeOutAvailable && !!nativeOutShape && nativeOutChosen && ticket.recvToken === wrappedSymbol;
   // Who may fill this market's orders, as they will be signed (shown on the form).
   const marketDelivery = useMemo(() => {
-    if (nativeOutActive) return { direct: false, windowSeconds: 0, overrideBps: 0 };
+    // The module shape is pull with no window; the NativeBalance shape is the market's DIRECT one.
+    if (nativeOutActive && !nativeOutDirect) return { direct: false, windowSeconds: 0, overrideBps: 0 };
     const solver = solverForMarket(deployment, ticket.marketId);
     const win = exclusivityForMarket(deployment, ticket.marketId);
     return { direct: !!solver && solver !== zeroAddress, windowSeconds: win?.seconds ?? 0, overrideBps: win?.overrideBps ?? 0 };
-  }, [deployment, ticket.marketId, nativeOutActive]);
+  }, [deployment, ticket.marketId, nativeOutActive, nativeOutDirect]);
   const fills = useFills();
+  // FILL TRACKING: a fill of one of this wallet's orders moves its balances — the RAW
+  // native coin for a native-out order (Settlement verified the maker's native balance,
+  // not a token's) — so re-read them (native included) at once, not on the next poll.
+  const refreshBalances = rawBalances.refresh;
+  const myFillKey = fills.filter((f) => f.mine && !f.simulated && f.size > 0).map((f) => f.id).join(",");
+  useEffect(() => {
+    if (myFillKey) refreshBalances();
+  }, [myFillKey, refreshBalances]);
   const allOrders = useRestingOrders();
 
   const merged = useMemo(
@@ -305,13 +319,14 @@ export default function App() {
       tokenIn: payPinned.address,
       tokenOut: recvPinned.address,
       amountIn,
-      // A native-out order is pull delivery (lib/order.ts `nativeOut`).
-      delivery: nativeOutActive ? ("pull" as const) : quoteDelivery(deployment, ticket.marketId),
+      // A native-out order: DIRECT through the NativeBalance view (the filler resolves a
+      // `nativeOut` request to direct), PULL for the module shape (lib/order.ts `nativeOut`).
+      delivery: nativeOutActive ? (nativeOutDirect ? ("direct" as const) : ("pull" as const)) : quoteDelivery(deployment, ticket.marketId),
       ...(wallet.address ? { maker: wallet.address } : {}),
       ...(quoteWithPermit ? { funding: "permit" as const } : {}),
       ...(nativeOutActive ? { nativeOut: true } : {}),
     };
-  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit, tooSmall !== null, nativeOutActive]);
+  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit, tooSmall !== null, nativeOutActive, nativeOutDirect]);
   const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
   // Defence in depth: a quote is only THE price for the request it answers (same pay
   // amount and tokens) — never one left over from a previous amount or pair (it priced,
@@ -540,8 +555,8 @@ export default function App() {
         kind: "market" | "limit" | "twap";
         /** Sign plain PULL delivery whatever the market's default: the filler's quote was its inventory's (the RIF rail). */
         pull?: boolean;
-        /** Receive the raw native coin: the NativeUnwrapModule shape (pull delivery). */
-        nativeOut?: Address | undefined;
+        /** Receive the raw native coin: the NativeBalance view (direct) or the NativeUnwrapModule shape (pull). */
+        nativeOut?: NativeOutShape | undefined;
       },
     ): Promise<SignedOrder> => {
       if (!signer || !wallet.address) throw new Error("wallet not connected");
@@ -585,10 +600,12 @@ export default function App() {
         side: spec.side,
         pay,
         recv,
-        solver: spec.pull || spec.nativeOut ? zeroAddress : solverForMarket(deployment, spec.marketId),
+        // The module shape is pull (no solver, no window); the NativeBalance shape keeps the
+        // market's DIRECT solver — the one that unwraps and sends the coin.
+        solver: spec.pull || (spec.nativeOut && "module" in spec.nativeOut) ? zeroAddress : solverForMarket(deployment, spec.marketId),
         // Pull markets: the solver's ~2-block soft window, then open to all (B13).
         exclusivity: spec.pull || spec.nativeOut ? undefined : exclusivityForMarket(deployment, spec.marketId),
-        ...(spec.nativeOut ? { nativeOut: { module: spec.nativeOut } } : {}),
+        ...(spec.nativeOut ? { nativeOut: spec.nativeOut } : {}),
         amountIn: spec.amountIn,
         targetOut: spec.targetOut,
         minOut: spec.minOut,
@@ -677,7 +694,7 @@ export default function App() {
       // Sign FIRST. Nothing is recorded — no fill, no row — until there is a
       // signature behind it, so a declined or failed signature leaves no
       // phantom trade in the history (G-TS_SIGN-3, G-TS_SIGN-15).
-      const nativeOut = nativeOutActive ? nativeOutModule : undefined;
+      const nativeOut = nativeOutActive ? nativeOutShape : undefined;
       let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind, pull, nativeOut });
       // Gasless funding: a second prompt, the ERC-2612 permit for exactly this order's
       // input, valid until the order's own expiry. It rides with the order to the book.
@@ -768,7 +785,7 @@ export default function App() {
       setSigning(false);
       setSignPhase(null);
     }
-  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf, rawBalances, gaslessActive, wallet.address, wallet.provider, signer, payMeta.address, chainId, nativeOutActive, nativeOutModule]);
+  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf, rawBalances, gaslessActive, wallet.address, wallet.provider, signer, payMeta.address, chainId, nativeOutActive, nativeOutShape]);
 
   const [orderError, setOrderError] = useState<string | null>(null);
 

@@ -739,6 +739,7 @@ Route strategy:
 | Env | Default | Meaning |
 |---|---|---|
 | `AGGREGATOR_SOLVER` | — | the deployed, operator-gated `AggregatorFillSolver` |
+| `AGGREGATOR_SOLVER_LEGACY` | — | comma list of earlier solver instances still operated after a migration. Each gets its own route strategy that takes ONLY orders naming it as `exclusiveFiller` (signed before the switch) and retains its spread on itself; everything else goes to `AGGREGATOR_SOLVER`. Remove an entry once its last such order has expired (limit orders: up to 7 days) |
 | `ROUTE_POOLS` | the app's 3 Rootstock Oku pools (venue 0) + SushiSwap v3 WRBTC/USDT0 0.3 % (venue 1) | `;`-separated `tokenA/tokenB/fee[/venue]` (fee in hundredths of a bip; venue = index into the solver's pool-venue allowlist, default 0 = Oku, 1 = SushiSwap v3) |
 | `ROUTE_PATHS` | `USDRIF>500>USDT0>3000>WRBTC` | `;`-separated multi-hop paths in swap order, usable both ways, 1–4 hops, optional `@venue` suffix for the whole path (default 0) or a per-hop `fee:venue` (mixed venues), e.g. `0xWRBTC>3000>0xUSDT0@1`, `0xUSDRIF>500:0>0xUSDT0>3000:1>0xWRBTC` (`""` = none). Always quoted, on top of the discovered paths |
 | `ROUTE_DISCOVERY` | `1` | discover the pool graph and route multi-hop / mixed-venue over it (*Pool routing*); `0` = only `ROUTE_POOLS` / `ROUTE_PATHS` |
@@ -762,6 +763,11 @@ Route strategy:
 | `WRBTC`, `SWAP_ROUTER`, `QUOTER_V2` | Rootstock mainnet | overrides (`QUOTER_V2` = venue 0's quoter, also the rebalancer's; `SWAP_ROUTER` is the rebalancer's RIF sale only — route fills never call it) |
 | `SUSHI_ENABLED` | `1` | the Sushi API route source (pull orders only) |
 | `ROUTE_OKU_PULL` | `1` | whether the local pool plans (every venue) compete on pull orders (`0` = API-only pull fills; direct orders always use a pool plan) |
+| `NATIVE_BALANCE` | SDK `NATIVE_BALANCE[CHAIN_ID]` (chain 30: `0xA45e…854c`, deployed 2026-10-15) | the `NativeBalance` view (task 30): a DIRECT order whose only output leg is this token receives raw RBTC — routed as WRBTC, the pool plan's last hop pays the solver, which unwraps and sends the coin. On only when the solver's `nativeDelivery()` returns (it, `WRBTC`) (solver v3; a revert = pre-v3 = off); `""` = off. `nativeOut` quotes resolve to DIRECT |
+| `NATIVE_DIRECT_GAS` | `30000` | extra gas of a native fill over a plain direct one (unwrap + native send + typed callback; measured +29.7k receipt gas by `e2e/native-direct-fork.sh`), until the `+native` gas shape is learned |
+| `ITEM_FILLS` | `0` | route item-bearing PULL orders through `executeItemFill` (task 31), scheduled by the SDK's `classifyItemFill` (sources early, sinks late) |
+| `NETTED_DELIVERY_FUNDED_ITEMS` | `0` | the target Settlement's `matchSettle` also runs pre-funded MAKE, leg-reference TAKE_FOR and SETTLE items (the task-31 Settlement); `0` = the LIVE Rootstock Settlement (pull MAKE and TAKE only) |
+| `ITEM_FILL_GAS` | `120000` | extra gas of an item fill (`matchSettle` + the items) over a pull route fill, until the `+items` gas shape is learned |
 | `SUSHI_API_URL` | `https://api.sushi.com` | API base |
 | `SUSHI_ROUTER` | `0xAC4c6e212A361c968F1725b4d055b47E63F80b75` | the pinned RedSnwapper; any other `tx.to` is refused |
 | `SUSHI_TIMEOUT_MS` | `4000` | per-request timeout |

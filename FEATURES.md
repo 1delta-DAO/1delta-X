@@ -490,14 +490,19 @@ references the new module address in the order it signs.
   preview, `getOrderRelevantStates` (one call returning everything an off-chain
   book needs to decide whether an order is still live and funded), signature
   check, `validateOrder` with a human-readable reason.
-- **Known limitation (2026-10-14): native OUTPUT needs filler capital today.** The
-  in-fill unwrap (`NativeUnwrapModule`, a pre-funded MAKE item) runs only where outputs are
-  delivered before inputs are paid. The zero-capital route solver fills the other way round
-  (`PostInputs`: item-free) and its `matchSettle` entry refuses pre-funded MAKE items, so
-  every native fill would need inventory or a flash loan. Fix planned without capital and
-  without a Settlement change: a `NativeBalance` view token on DIRECT orders, with the solver
-  unwrapping and sending RBTC in its callback —
-  [docs/native-rbtc-delivery-plan.md](docs/native-rbtc-delivery-plan.md), task 30.
+- **Zero-capital fills for orders that carry items (task 31, 2026-10-14; next Settlement
+  version).** The single-order path runs items only after the filler has fronted the outputs,
+  and `PostInputs` is item-free, so every order whose item consumes its own delivery
+  (swap→supply, swap→repay, native-out through `NativeUnwrapModule`, an LP mint) and every
+  SETTLE order (OCO bracket legs, NFT sales) used to need inventory or a flash loan.
+  `matchSettle` now admits pre-funded MAKE, TAKE_FOR (not the BALANCE form) and SETTLE items,
+  and keeps a leg-reference item behind its own delivery with the delivery ledger written at
+  DELIVER, so `PULL → PRESEND → CALL → DELIVER → ITEM` fills them with zero capital. Only
+  genuine cycles (leverage at the LTV edge) still need a flash or a counter-order —
+  [docs/fill-ordering-capital-plan.md](docs/fill-ordering-capital-plan.md).
+- **Native RBTC out without a Settlement change (task 30):** a `NativeBalance` view token on
+  DIRECT orders, with the solver unwrapping and sending RBTC in its callback —
+  [docs/native-rbtc-delivery-plan.md](docs/native-rbtc-delivery-plan.md).
 - [`NativeSettler`](packages/periphery/src/NativeSettler.sol) +
   [`NativeForwarderFactory`](packages/periphery/src/NativeForwarderFactory.sol)
   — native ETH handled entirely at the edge: the core and Permit3 stay

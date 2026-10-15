@@ -24,7 +24,7 @@ deployer `0x00001d4754680958E7f8fe42D60842Ebde4Cb30D`, gas price 23,696,000 wei
 | AggregatorFillSolver | `0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287` | settlement = Settlement, operators = [`0xcafe35944e3195d59b4a354Ea23D60a0445c083a`], policy = (maker 0, protocol 0, recipient 0x0) |
 | RouteSandbox (the solver's child) | `0xdadE4B0F9dEa9f2CC371E07f76653971b2c62C04` | (Settlement, Permit3, SolverCallbackExecutor); owner = the solver |
 
-## AggregatorFillSolver v2 (2026-10-12, commit 5388a6f) — CURRENT
+## AggregatorFillSolver v2 (2026-10-12, commit 5388a6f) — LIVE (the filler still drives it; superseded by v3 below once the filler switches)
 
 Direct Uniswap-v3-style pool routes + ERC-2612 permits + gas pass (see packages/solvers
 README). Plain CREATE from the same deployer (nonce 4), profile `solvers-deploy` (via-IR,
@@ -48,6 +48,12 @@ so its spread stays on `0x48dbdC43…32F1` (no per-fill payout transfer: −5.2k
 −6.2k pull). Recover it in batches from the operator:
 `cast send 0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1 'sweep(address,address,uint256)' <token> <to> <amount>`.
 Leave one wei of each token behind — the solver's balance floor keeps the slot warm.
+Or run `packages/beta-filler/e2e/sweep-solver.sh`. It signs with a Foundry keystore
+(`ACCOUNT`, default `operator`; import the key once with
+`cast wallet import operator --interactive`) and asks for the password once. It is a dry
+run by default; `--send` broadcasts after you type `yes`. It leaves the 1-wei floors
+unless `--all` is given, which is for retiring a solver. `SOLVER` takes a comma list, and
+`SWEEP_TO` sets the destination.
 
 ## NativeUnwrapModule (2026-10-14, commit 8001ccc) — task 28, RBTC receipts
 
@@ -69,6 +75,50 @@ refuses pre-funded MAKE) cannot do without capital. It serves fillers that hold 
 app's RBTC receipts move to the capital-free `NativeBalance` + solver v3 design:
 docs/native-rbtc-delivery-plan.md. Order shape and fork proof: tasks/28 and
 `packages/modules/transfer/test/fork/NativeUnwrapRootstock.fork.t.sol`.
+
+## AggregatorFillSolver v3 + NativeBalance (2026-10-15) — task 30, native RBTC delivery
+
+Deployed with `make deploy-native-delivery BROADCAST=1`
+(`packages/solvers/script/deploy-native-delivery.sh`). That is ONE `forge script` run of
+`DeployAggregatorFill` with `DEPLOY_NATIVE_BALANCE=true`, profile `solvers-deploy` (via-IR,
+runs 1e6, Cancun), plain CREATE from the deployer at nonces 6 and 7.
+
+- **Source:** branch `zero-capital-item-fills` on top of `06fac81`, with uncommitted changes
+  (solver v3 with `sweepAll` and the hand-encoded `matchSettle` call; task 31's core changes
+  are in the tree but do not touch these two contracts).
+- **Gas price:** 24,406,880 wei (minimum gas price × 1.03).
+- **Cost:** 5,634,314 gas = 0.0001375 RBTC. The deployer is left with 0.0000238 RBTC.
+
+| contract | address | tx | gas |
+| --- | --- | --- | --- |
+| NativeBalance | `0xA45ec37619C9F9B2f9d54692d578D1b1246c854c` | `0x258791704294374fb6dbccf65135669f9ed55b00f4669a3491bc14e8b20aa4fd` (block 9,326,807) | 106,623 |
+| AggregatorFillSolver v3 | `0x5987A4AFE1b680DAC657506B69C56b06FFe86cD1` | `0xa22a7988da96b391c89fa0c7be22491b1ab8d1064c2a1d0ba90804418acab583` (block 9,326,809) | 5,527,691 |
+| RouteSandbox (child) | `0xeBbBf5719B699a450b2537852E4286A7e69Bb1aD` | read from `SANDBOX()`. The script's forge log printed `0x31611a70…`, forge's simulated child address, which is wrong, as on v2 | — |
+
+**Constructor:**
+- settlement = Settlement;
+- operators = [`0xcafe35944e3195d59b4a354Ea23D60a0445c083a`];
+- policy = (0, 0, 0x0);
+- venues = [Oku `0xaF37…cAD82`, Sushi v3 `0x46B3…202e`], both with init code hash `0xe34f…8b54`;
+- nativeBalance = `0xA45e…854c`, wnative = WRBTC `0x542f…677d`.
+
+**Read back 2026-10-15:**
+- Code sizes: NativeBalance 246 B, solver 22,777 B, sandbox 2,309 B. The sandbox's `OWNER()` is the solver.
+- Solver: `SETTLEMENT()` = Settlement, `EXECUTOR()` = `0x9685…8bA0`, `POOL_VENUES()` = 2, surplus policy 0/0.
+- `nativeDelivery()` = (NativeBalance, WRBTC).
+- `isOperator(0xcafe…)` = true; `isOperator(deployer)` = false.
+- `NativeBalance.balanceOf(deployer)` equals the deployer's RBTC balance; `decimals()` = 18.
+- The script's simulation re-derived both live WRBTC/USD₮0 pools through the venues.
+
+**Verified:** Sourcify exact match for both, jobs `00f57d55-70f8-4fe7-bddc-7a451461ab72`
+(NativeBalance) and `34443224-7ea3-49e8-8a6e-61ff8706c278` (solver).
+
+**Status: DORMANT until the off-chain switch.** The filler's `AGGREGATOR_SOLVER` still names
+v2, and native delivery is off until `NATIVE_BALANCE` (filler, book) and
+`VITE_DEPLOYMENTS[30].nativeBalance` (app) are set. Orders signed with v2 as their exclusive
+filler can only be filled by v2 until they expire: market orders within 5 minutes, limit
+orders up to 7 days. Retained spread on v3 is paid out with
+`sweepAll(tokens, to, 1)`; `e2e/sweep-solver.sh` does this.
 
 ## Read back on mainnet (2026-10-09)
 

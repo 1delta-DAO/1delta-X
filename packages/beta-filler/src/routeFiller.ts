@@ -4,6 +4,7 @@ import {
   SUSHI_RED_SNWAPPER_ABI,
   decodeAggregatorExecuteFillResult,
   encodeAggregatorExecuteFill,
+  encodeAggregatorExecuteItemFill,
   toSolverPermit,
   type PoolVenue,
   type Erc2612Permit,
@@ -50,8 +51,6 @@ import {
   liveDecayPerBlock,
   pathLabel,
   patchesLiveOutput,
-  NATIVE_OUT_GAS,
-  NATIVE_OUT_NOT_ROUTABLE,
   PERMIT_IN_FILL_GAS,
   planGasEstimate,
   planKind,
@@ -67,6 +66,7 @@ import {
   venueName,
   type PlanKind,
   type RouteCandidate,
+  type RouteClass,
 } from "./route";
 import { sanitize } from "./sanitize";
 import { buildNordsternPlan, fetchNordsternRoute, type NordsternQuote } from "./nordstern";
@@ -161,6 +161,11 @@ export class RouteFiller {
   private lastIndexerError: string | undefined;
   private graphRefresh: Promise<void> | undefined;
   private ready = false;
+  /**
+   * NATIVE delivery (task 30): `undefined` until {@link init} has read the solver's
+   * `nativeDelivery()`; then whether it is (NATIVE_BALANCE, WRBTC).
+   */
+  private nativeOn: boolean | undefined;
   /** Our share of each fill's surplus after the solver's maker/protocol split, ppm. */
   private keepPpm = PPM;
   private sushiCalls = 0;
@@ -392,6 +397,7 @@ export class RouteFiller {
     if (keep <= 0n) throw new Error(`solver ${s} surplus split leaves the filler nothing (maker ${makerPpm} + protocol ${protocolPpm} ppm)`);
     this.keepPpm = keep;
     this.sandbox = sandbox;
+    this.nativeOn = await this.initNative(read);
     await this.initVenues(read);
     this.ready = true;
     // The pool graph (never fatal: a failed discovery keeps ROUTE_POOLS / ROUTE_PATHS).
@@ -405,6 +411,29 @@ export class RouteFiller {
     this.log(
       `route strategy: solver ${s} (${gated ? "gated" : "OPEN"}), sandbox ${sandbox}, surplus split maker ${makerPpm} / protocol ${protocolPpm} ppm (we keep ${keep}), ${this.rc.pools.length} pool(s), ${this.rc.paths.length} path(s), discovery ${this.rc.discovery.enabled ? `on (≤${this.rc.maxHops} hops, ${this.rc.maxCandidates} candidates, ${activePools(this.graph, this.rc.discovery.minLiquidity).length} active pools)` : "off"}, venues ${[...this.quoters.keys()].map(venueName).join("+") || "none"}, sushi ${this.rc.sushi.enabled ? `on (${this.rc.sushi.router}, ≤${this.rc.sushi.maxPerSweep}/sweep)` : "off"}, nordstern ${this.rc.nordstern.enabled ? `on (${this.rc.nordstern.router}, ≤${this.rc.nordstern.maxPerSweep}/sweep, haircut ${this.rc.nordstern.haircutBps} bps)` : "off"}`,
     );
+  }
+
+  /**
+   * NATIVE delivery (task 30) is on only when NATIVE_BALANCE is configured AND the solver
+   * delivers through exactly that view into WRBTC — its `nativeDelivery()` pair (solver
+   * v3; `(0, 0)` = off on that instance). A pre-v3 solver has no such function: the read
+   * reverts, and native is off. Either way a warning, never a start-up failure — the rest
+   * of the route is unaffected.
+   */
+  private async initNative(read: <T>(fn: string, args?: unknown[]) => Promise<T>): Promise<boolean> {
+    const want = this.rc.nativeBalance;
+    if (!want) return false;
+    let pair: readonly [Address, Address];
+    try {
+      pair = await read<readonly [Address, Address]>("nativeDelivery");
+    } catch (e) {
+      this.log(`⚠ native delivery OFF: solver ${this.rc.solver} has no nativeDelivery() (pre-v3): ${sanitize(errorReason(e))}`);
+      return false;
+    }
+    const [nb, w] = pair;
+    if (nb.toLowerCase() === want.toLowerCase() && w.toLowerCase() === this.cfg.wrbtc.toLowerCase()) return true;
+    this.log(`⚠ native delivery OFF: solver ${this.rc.solver} delivers through (${nb}, ${w}), configured (${want}, ${this.cfg.wrbtc})`);
+    return false;
   }
 
   /**
@@ -508,6 +537,7 @@ export class RouteFiller {
    * {@link init}), a pair is not refused for lacking a path: discovery may find one.
    */
   accepts(entry: BookEntry): boolean {
+    if (!this.mine(entry)) return false;
     return classifyRoute(entry.announce.order, this.rc, { ...this.extras(entry), anyPath: this.rc.discovery.enabled && !this.ready }).ok;
   }
 
@@ -516,8 +546,13 @@ export class RouteFiller {
       hasPermitBatch: !!entry.announce.permitBatch,
       sigless: !!entry.announce.sigless,
       graph: this.edges(),
-      // Native-out orders (task 28): the one item shape the route takes.
+      // The NativeUnwrapModule shape (task 28): recognised, routable only as an item fill.
       ...(this.rc.nativeUnwrap ? { nativeUnwrap: { module: this.rc.nativeUnwrap, wrapped: this.cfg.wrbtc } } : {}),
+      // Native delivery through the NativeBalance view (task 30) — until init has checked
+      // the solver, optimistically (consider() re-checks after init).
+      ...(this.rc.nativeBalance && this.nativeOn !== false ? { nativeBalance: { view: this.rc.nativeBalance, wrapped: this.cfg.wrbtc } } : {}),
+      // Item fills (task 31) against this Settlement's netted-path capabilities.
+      ...(this.rc.itemFills ? { itemFills: { nettedDeliveryFundedItems: this.rc.itemFills.nettedDeliveryFundedItems, settlement: this.cfg.settlement } } : {}),
     };
   }
 
@@ -532,9 +567,17 @@ export class RouteFiller {
     return { orderHash, status: "failed", reason, strategy: "route" };
   }
 
+  /** A legacy instance (`onlyNamed`) takes only orders naming its solver; the primary takes any. */
+  private mine(entry: BookEntry): boolean {
+    return !this.rc.onlyNamed || entry.announce.order.exclusiveFiller.toLowerCase() === this.rc.solver.toLowerCase();
+  }
+
   async consider(entry: BookEntry): Promise<FillOutcome> {
     const { orderHash } = entry;
     const order = entry.announce.order;
+    // Before anything that costs RPC: a legacy solver passes on every order not signed for it.
+    // Not logged: it would be one line per book order per legacy instance.
+    if (!this.mine(entry)) return { orderHash, status: "skipped", reason: `legacy solver ${this.rc.solver}: the order does not name it`, strategy: "route", rest: true };
     // The pool graph decides which pairs route: refresh it when stale (never throws;
     // a no-op until init) and, before calling a pair unroutable, make sure the
     // solver's venues and the graph are loaded at all (a cold start).
@@ -560,9 +603,11 @@ export class RouteFiller {
       if (blocked) return { ...this.skip(orderHash, blocked.reason), final: blocked.global };
       await this.init();
       await this.ensureGraph();
-      // Re-derive the pair's paths over the (possibly just refreshed) graph.
-      const paths = this.pathsFor(order.legsIn[0]!.token, order.legsOut[0]!.token);
-      return await this.tryFill(orderHash, order, entry.announce.sig, fillable, cls.direct, paths, entry.fillPermit);
+      if (cls.native && !this.nativeOn) return this.skip(orderHash, "native delivery is off (the solver's nativeDelivery() is not NATIVE_BALANCE / WRBTC)", true);
+      // Re-derive the pair's paths over the (possibly just refreshed) graph — to the ROUTED
+      // output token (WRBTC for a native order).
+      const paths = this.pathsFor(order.legsIn[0]!.token, cls.tokenOut);
+      return await this.tryFill(orderHash, order, entry.announce.sig, fillable, cls, paths, entry.fillPermit);
     } catch (e) {
       // Nothing was sent (a sent tx is handled inside tryFill).
       return this.failed(orderHash, e);
@@ -590,11 +635,12 @@ export class RouteFiller {
     order: Order,
     sig: Hex,
     fillAmount: bigint,
-    direct: boolean,
+    cls: Pick<RouteClass, "direct" | "tokenOut" | "native" | "itemFill">,
     paths: RoutePath[],
     fillPermit?: Erc2612Permit,
   ): Promise<FillOutcome> {
     const { cfg, chain, rc } = this;
+    const { direct, native, itemFill } = cls;
     const now = Date.now();
     // A direct SELL still decaying patches the LIVE owed into the route (task 05): the
     // decay since the preview stays with us as input residue. That switches the solver
@@ -603,13 +649,18 @@ export class RouteFiller {
     //    Only worth it when one block of decay beats the typed path's gas (decided in
     //    step 3, once gas is priced in the output token): small tickets skip it.
     const nowSec = BigInt(Math.floor(now / 1000));
-    const liveCandidate = patchesLiveOutput(order, direct, nowSec);
+    // An ITEM fill (executeItemFill) can honour no live patch (task 17): never one there.
+    const liveCandidate = !itemFill && patchesLiveOutput(order, direct, nowSec);
+    // The token the route ends in: `legsOut[0]`'s, or WRBTC for a NATIVE order (task 30),
+    // whose last hop pays the solver, which unwraps it and sends the maker the coin.
+    const tokenOut = cls.tokenOut;
     // Gas is PRICED at estimate × r, r learned per shape from our receipts (gasRatio.ts).
-    // A native-out order (classified: its only item is the NativeUnwrapModule's MAKE) is
-    // its own gas shape, and its item's gas is part of the pre-simulation estimate.
-    const nativeOut = order.items.length > 0;
-    const nativeGas = nativeOut ? NATIVE_OUT_GAS : 0n;
-    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, order.legsOut[0]!.token, rc.solver, fillPermit ? "permit" : undefined, nativeOut);
+    // A native fill (+ the solver's unwrap-and-send) and an item fill (+ matchSettle and
+    // the items) are their own gas shapes, and their extra gas is part of the
+    // pre-simulation estimate until the shape has receipts.
+    const variant = native ? ("native" as const) : itemFill ? ("items" as const) : undefined;
+    const nativeGas = native ? rc.nativeDirectGas : itemFill ? rc.itemFills?.gas ?? 0n : 0n;
+    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, tokenOut, rc.solver, fillPermit ? "permit" : undefined, variant);
     const pricedGas = (estimate: bigint) => this.gasRatios.priced(shape, estimate);
     // A gasless maker's order (./permit.ts) carries its ERC-2612 permit IN the fill: the
     // solver runs it first, in the same tx (and the same simulation). Its gas is part of
@@ -635,7 +686,9 @@ export class RouteFiller {
     //    on-chain price floor, so a maker-ward move after this point reverts
     //    `BumpTooLow` instead of eroding the margin (task 08).
     const pv = await previewFill(chain, cfg.lens, order, fillAmount, rc.solver, gasPrice);
-    const minBumpBps = await previewBump(chain, cfg.lens, order, rc.solver, gasPrice);
+    // `executeItemFill` refuses a bump floor (`ItemFillUnsupported`, task 17): matchSettle
+    // carries none. The pull plan's `maxPay = owed` still turns a maker-ward move into a revert.
+    const minBumpBps = itemFill ? 0n : await previewBump(chain, cfg.lens, order, rc.solver, gasPrice);
     const received = pv.received[0] ?? 0n;
     const owed = pv.paid[0] ?? 0n;
     if (received === 0n || owed === 0n) return this.skip(orderHash, "zero-sized preview", true);
@@ -648,7 +701,6 @@ export class RouteFiller {
     //    orders only, at most SUSHI_MAX_PER_SWEEP / NORDSTERN_MAX_PER_SWEEP API calls per
     //    sweep — a Sushi and a Nordstern API route, decoded and validated against this
     //    fill (Nordstern priced at its haircut figure, never its raw toAmount).
-    const tokenOut = order.legsOut[0]!.token;
     // An order signed from a quote WE issued (matched by its terms, ./quote.ts) is gated
     // WITHOUT the haircut: the quote already charged gas + its gas margin, and it would
     // be refused for a cushion the quote never asked for. The plan's on-chain floor
@@ -686,7 +738,11 @@ export class RouteFiller {
     const profitOut = await this.nativeToToken(rc.minProfitWei, tokenOut);
     const gasOutAt = (gasUnits: bigint) => this.nativeToToken(gasPrice * gasUnits, tokenOut);
     let liveOut = false;
-    if (liveCandidate) {
+    if (liveCandidate && native) {
+      // A native fill always runs the solver's typed callback (it unwraps the priced
+      // amount), so the live patch costs nothing extra there.
+      liveOut = true;
+    } else if (liveCandidate) {
       const typedOut = await gasOutAt(pricedGas(TYPED_CALLBACK_GAS));
       liveOut = typedOut !== undefined && liveDecayPerBlock(order, owed, nowSec) > typedOut;
     }
@@ -694,7 +750,7 @@ export class RouteFiller {
     // extra pool hop adds POOL_HOP_GAS), with the typed path's and the in-fill permit's
     // extra gas — only a floor: the plan is re-priced at the simulated figure below.
     const estimateFor = (c: Pick<Candidate, "source"> & { path?: RoutePath }) =>
-      planGasEstimate(rc.gasEstimate, planKind(c)) + (c.source === "pool" && c.path ? extraHopGas(c.path.fees.length) : 0n) + (liveOut ? TYPED_CALLBACK_GAS : 0n) + permitGas + nativeGas;
+      planGasEstimate(rc.gasEstimate, planKind(c)) + (c.source === "pool" && c.path ? extraHopGas(c.path.fees.length) : 0n) + (liveOut && !native ? TYPED_CALLBACK_GAS : 0n) + permitGas + nativeGas;
     const cands: Candidate[] = [];
     const gasOutOf = new Map<Candidate, bigint>();
     for (const r of raw) {
@@ -715,13 +771,17 @@ export class RouteFiller {
       try {
         const { plan } = buildPoolPlan({ direct, path: c.path, received, owed, quotedOut: c.out, costOut, profitRecipient: rc.profitRecipient, minBumpBps, liveOut });
         // Decode what we built and check it against the ORDER before anything is signed.
-        return validatePoolPlan(plan, order, { direct, path: c.path, received, owed });
+        return validatePoolPlan(plan, order, { direct, path: c.path, received, owed, routeOut: tokenOut });
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
       }
     };
     const simulate = async (plan: RoutePlan): Promise<Simulated> => {
-      const data = encodeAggregatorExecuteFill({ order, sig, fillAmount, plan, permits });
+      // An item-bearing order: the one-order matchSettle path, scheduled by the SDK
+      // classifier (sources early, sinks late — policy.ts plainShape).
+      const data = itemFill
+        ? encodeAggregatorExecuteItemFill({ order, sig, fillAmount, plan, permits, lateItems: itemFill.lateItems })
+        : encodeAggregatorExecuteFill({ order, sig, fillAmount, plan, permits });
       const sim = await chain.pub.call({ account: chain.me, to: rc.solver, data, gasPrice });
       if (!sim.data) throw new Error("simulation returned no data");
       const delivered = decodeAggregatorExecuteFillResult(sim.data);
@@ -775,7 +835,7 @@ export class RouteFiller {
           : v.c.source === "nordstern"
             ? `nordstern api ${v.c.quote.apiAmountOut}`
             : "sushi api";
-      const tag = `${direct ? (liveOut ? "direct+live" : "direct") : "pull"}${permits.length > 0 ? "+permit" : ""}${quoted ? ` quoted ${quoted.id}` : ""} ${orderHash} in ${received} ${order.legsIn[0]!.token} → owed ${owed} ${tokenOut} (${via}, quote ${v.c.out}, margin ${v.margin})`;
+      const tag = `${direct ? (liveOut ? "direct+live" : "direct") : "pull"}${native ? "+native" : ""}${itemFill ? `+items(late ${itemFill.lateItems})` : ""}${permits.length > 0 ? "+permit" : ""}${quoted ? ` quoted ${quoted.id}` : ""} ${orderHash} in ${received} ${order.legsIn[0]!.token} → owed ${owed} ${tokenOut} (${via}, quote ${v.c.out}, margin ${v.margin})`;
       try {
         picked = { c: v.c, sim: await simulate(v.plan), tag, margin: v.margin };
         break;
@@ -869,7 +929,7 @@ export class RouteFiller {
         throw new Error(r.reason);
       case "sent":
         this.onSpend();
-        this.log(`→ [route] sent executeFill ${tag} tx ${r.tx} (gas limit ${gasLimit} @ ${gasPrice} wei, simulated ${sim.gasUsed}, priced ${priced} at r ${Number(this.gasRatios.ratioPpm(shape)) / 1e6})`);
+        this.log(`→ [route] sent ${itemFill ? "executeItemFill" : "executeFill"} ${tag} tx ${r.tx} (gas limit ${gasLimit} @ ${gasPrice} wei, simulated ${sim.gasUsed}, priced ${priced} at r ${Number(this.gasRatios.ratioPpm(shape)) / 1e6})`);
         return { orderHash, status: "pending", tx: r.tx, paid: sim.delivered[0], received, strategy: "route", final: true };
     }
   }
@@ -896,13 +956,18 @@ export class RouteFiller {
     direct: boolean;
     gasPrice: bigint;
     permit?: boolean;
-    /** The maker receives raw RBTC (task 28): a pull fill plus the NativeUnwrapModule item. */
+    /**
+     * The maker receives raw RBTC through the NativeBalance view (task 30): a DIRECT fill
+     * routed into WRBTC (`tokenOut`), + NATIVE_DIRECT_GAS until the `+native` shape is learned.
+     */
     nativeOut?: boolean;
   }): Promise<Verdict<{ candidate: PricedCandidate }>> {
     const { cfg, rc } = this;
-    // The solver cannot fill the native-out shape (route.ts `classifyRoute`): never quote it.
-    if (a.nativeOut) return { ok: false, reason: `route: ${NATIVE_OUT_NOT_ROUTABLE}` };
+    if (a.nativeOut && !a.direct) return { ok: false, reason: "route: native delivery is DIRECT only" };
+    if (a.nativeOut && !rc.nativeBalance) return { ok: false, reason: "route: native delivery is off (NATIVE_BALANCE unset)" };
+    if (a.nativeOut && !eqAddr(a.tokenOut, cfg.wrbtc)) return { ok: false, reason: "route: native delivery ends in WRBTC (tokenOut must be WRBTC)" };
     await this.init();
+    if (a.nativeOut && !this.nativeOn) return { ok: false, reason: "route: native delivery is off (the solver's nativeDelivery() is not NATIVE_BALANCE / WRBTC)" };
     await this.ensureGraph();
     const inList = (t: Address) => rc.routeTokens.some((x) => x.toLowerCase() === t.toLowerCase());
     if (!inList(a.tokenIn) || !inList(a.tokenOut)) return { ok: false, reason: "route: pair outside ROUTE_TOKENS" };
@@ -926,9 +991,11 @@ export class RouteFiller {
     for (const r of raw) cands.push({ ...r, routeGasOut: (await this.nativeToToken(a.gasPrice * rankingGasUnits(planKind(r), r.gasUnits), a.tokenOut)) ?? 0n });
     const best = rankRoutes(cands)[0]!;
     const delivery = a.direct ? "direct" : "pull";
-    // A native-out quote learns from its own shapes; before any, the plain figure + NATIVE_OUT_GAS.
-    const plainShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver, undefined, a.nativeOut);
-    const permitShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver, "permit", a.nativeOut);
+    // A native quote learns from its own shapes (keyed on WRBTC, like the fill); before
+    // any, the plain figure + NATIVE_DIRECT_GAS.
+    const variant = a.nativeOut ? ("native" as const) : undefined;
+    const plainShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver, undefined, variant);
+    const permitShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver, "permit", variant);
     // Hops beyond the first cost POOL_HOP_GAS each on top of the single-hop figures (the
     // fallback and the plan-kind floor); a LEARNED estimate is the pair's own receipts,
     // whatever route they took, so it is only floored.
@@ -939,7 +1006,7 @@ export class RouteFiller {
     const permitAdd = a.permit ? PERMIT_IN_FILL_GAS : 0n;
     const learnedPermit = a.permit ? this.gasRatios.typicalEstimate(permitShape) : undefined;
     const learnedPlain = this.gasRatios.typicalEstimate(plainShape);
-    const nativeAdd = a.nativeOut ? NATIVE_OUT_GAS : 0n;
+    const nativeAdd = a.nativeOut ? rc.nativeDirectGas : 0n;
     const fallback = (a.direct ? cfg.quote.gasEstimateDirect : cfg.quote.gasEstimatePull) + hopGas + nativeAdd;
     const base = learnedPermit ?? (learnedPlain ?? fallback) + permitAdd;
     const floor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas + permitAdd + nativeAdd;
@@ -1034,6 +1101,8 @@ export class RouteFiller {
     return d;
   }
 }
+
+const eqAddr = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /** Whether `p` is the configured path `c`, in either direction. */
 function samePathEitherWay(c: RoutePath, p: RoutePath): boolean {

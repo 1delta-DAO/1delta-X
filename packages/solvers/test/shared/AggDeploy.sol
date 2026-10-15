@@ -15,7 +15,24 @@ Vm constant AGG_VM = Vm(address(uint160(uint256(keccak256("hevm cheat code")))))
 function newAgg(address settlement, address[] memory ops, SurplusPolicy memory policy, PoolVenue[] memory venues)
     returns (AggregatorFillSolver)
 {
+    return newAggNative(settlement, ops, policy, venues, address(0), address(0));
+}
+
+/// @dev {newAgg} with native delivery (task 30) configured: `nativeBalance` / `wnative`
+///      as the constructor's last two arguments (both zero = off, what {newAgg} passes).
+function newAggNative(
+    address settlement,
+    address[] memory ops,
+    SurplusPolicy memory policy,
+    PoolVenue[] memory venues,
+    address nativeBalance,
+    address wnative
+) returns (AggregatorFillSolver) {
     string memory artifact = AGG_VM.envOr("AGG_ARTIFACT", string(""));
-    if (bytes(artifact).length == 0) return new AggregatorFillSolver(settlement, ops, policy, venues);
-    return AggregatorFillSolver(AGG_VM.deployCode(artifact, abi.encode(settlement, ops, policy, venues)));
+    if (bytes(artifact).length == 0) {
+        return new AggregatorFillSolver(settlement, ops, policy, venues, nativeBalance, wnative);
+    }
+    return AggregatorFillSolver(
+        payable(AGG_VM.deployCode(artifact, abi.encode(settlement, ops, policy, venues, nativeBalance, wnative)))
+    );
 }

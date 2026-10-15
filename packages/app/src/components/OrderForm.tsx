@@ -148,9 +148,10 @@ interface OrderFormProps {
   /** The pay token is the wrapped native coin: RBTC above the gas reserve counts as spendable (human units). */
   autoWrap?: { symbol: string; value: number } | null;
   /**
-   * The deployment has a NativeUnwrapModule and WRBTC is receivable here: the raw coin
-   * (RBTC) is its own entry in the RECEIVE dropdown — picking it receives `wrapped`,
-   * unwrapped inside the fill (`on` = it is picked). Null otherwise.
+   * The deployment can deliver the raw coin (a NativeBalance view on a DIRECT market, else
+   * the NativeUnwrapModule) and WRBTC is receivable here: the raw coin (RBTC) is its own
+   * entry in the RECEIVE dropdown — picking it prices `wrapped` and receives the coin
+   * (`on` = it is picked and the market has a shape for it). Null otherwise.
    */
   nativeOut?: { native: string; wrapped: string; on: boolean; set: (on: boolean) => void } | null;
   /** The wallet holds the wrapped native coin: offer turning it back (behind a confirm). */
@@ -272,7 +273,8 @@ export function OrderForm(props: OrderFormProps) {
   // Selling WRBTC: RBTC above the gas reserve is spendable too (auto-wrapped at funding).
   const payBal = balOf(payToken, payBalance, autoWrap);
   const paySpendable = payBal.kind === "ok" ? payBal.value : payBalance;
-  // RBTC picked in the receive dropdown (native-out): the order still receives WRBTC, unwrapped in the fill.
+  // RBTC picked in the receive dropdown (native-out): the ticket is still priced in WRBTC; the
+  // order receives the raw coin (the NativeBalance view, or the module's unwrap in the fill).
   const recvShown = nativeOut?.on ? nativeOut.native : recvToken;
   const recvBal = nativeOut?.on ? balOf(nativeOut.native, wallet.native.balance) : balOf(recvToken, balances[recvToken]);
   const recvOptions = (() => {

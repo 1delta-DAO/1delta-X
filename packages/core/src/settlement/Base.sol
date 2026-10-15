@@ -205,15 +205,15 @@ abstract contract Base is Signatures {
     ///      route it chose and the freedom the maker granted: the order is fillable,
     ///      just not that way.
     error ItemPolicyViolated(uint256 order, uint256 item);
-    /// @dev A `matchSettle` order carries a SETTLE item. SETTLE routes the maker's
-    ///      asset to the filler, not a pool counterparty — out of scope for the
-    ///      netted flow (a shared-pool SETTLE needs its own design). Consequence
-    ///      worth knowing (audit 2026-09-30 PRICE-12): every `OcoGroupModule`
-    ///      bracket leg carries a SETTLE claim item, so a bracket leg can be neither
-    ///      CoW-matched here nor filled through a `PostInputs*` callback (which
-    ///      refuses any item) — only through a forward entry, with inventory, flash
-    ///      or credit funding. The item-free shared-nonce fill-once bracket is the
-    ///      matchable alternative.
+    /// @dev A `matchSettle` order carries an item whose op is above the {ItemOp}
+    ///      enum — a malformed record ({Base._runItem} rejects it too) — or a
+    ///      `TAKE_FOR` with the BALANCE-relative funding descriptor, whose wallet
+    ///      read the schedule would control (see {Batch._assertMatchShape}). Until
+    ///      2026-10-14 (task 31) this also refused SETTLE, TAKE_FOR and pre-funded
+    ///      MAKE items, which left every delivery-consuming order (and every OCO
+    ///      bracket leg, PRICE-12) fillable only with filler capital; those ops are
+    ///      admitted now, see {Batch._assertMatchShape} and
+    ///      docs/fill-ordering-capital-plan.md. The name is kept for ABI stability.
     error MatchSettleItemUnsupported();
     /// @dev A `matchSettle` order carries an output leg addressed at Settlement
     ///      itself — the maker "self-burn". The single-order path strands such a leg

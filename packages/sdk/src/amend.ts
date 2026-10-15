@@ -100,7 +100,7 @@ export interface AmendOptions {
   leaveNonceGroup?: boolean;
   /**
    * An explicit item policy for the replacement. Unset, the replacement gets the
-   * SDK default ({@link withDefaultItemPolicy}): `CANONICAL` when a TAKE funds an
+   * SDK default ({@link withDefaultItemPolicy}): `ORDERED` when a TAKE / TAKE_FOR funds an
    * input leg and the policy would otherwise be `ANY`.
    */
   itemPolicy?: ItemPolicy;

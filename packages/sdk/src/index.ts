@@ -25,6 +25,7 @@ export * from "./validators";
 export * from "./venueAuth";
 export * from "./lending";
 export * from "./native";
+export * from "./itemFill";
 export * from "./json";
 export * from "./aggregator";
 export * from "./erc2612";

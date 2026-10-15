@@ -172,6 +172,62 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
         aggSolver.sweep(address(tB), address(0xD00D), 1e18);
     }
 
+    /// `sweepAll`: one transaction pays out every token above the floor; a token at or
+    /// below `keep` is skipped; `keep = 0` empties the instance; non-operators refused.
+    function test_sweepAll_batchesEveryTokenAboveTheFloor() public {
+        tA.mint(address(aggSolver), 5e18);
+        tB.mint(address(aggSolver), 7e18);
+        tC.mint(address(aggSolver), 1); // a bare floor: skipped
+        address[] memory toks = new address[](3);
+        (toks[0], toks[1], toks[2]) = (address(tA), address(tB), address(tC));
+        address treasury = address(0x7EA5);
+
+        vm.prank(address(0xD00D));
+        vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, address(0xD00D)));
+        aggSolver.sweepAll(toks, address(0xD00D), 0);
+
+        aggSolver.sweepAll(toks, treasury, 1);
+        assertEq(tA.balanceOf(treasury), 5e18 - 1, "tA above the floor");
+        assertEq(tB.balanceOf(treasury), 7e18 - 1, "tB above the floor");
+        assertEq(tC.balanceOf(treasury), 0, "a bare floor is skipped");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "floor kept");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "floor kept");
+
+        aggSolver.sweepAll(toks, treasury, 0); // retire
+        assertEq(tA.balanceOf(address(aggSolver)), 0);
+        assertEq(tB.balanceOf(address(aggSolver)), 0);
+        assertEq(tC.balanceOf(address(aggSolver)), 0);
+        assertEq(tC.balanceOf(treasury), 1);
+    }
+
+    /// Gas: four retained tokens paid out in one `sweepAll` vs four `sweep` calls, each
+    /// from a fresh test (same cold accesses). On chain every `sweep` is also its own
+    /// transaction — 21k base each — which these execution figures do not include.
+    function _fourRetained() internal returns (address[] memory toks) {
+        MockERC20 tD = new MockERC20("D");
+        toks = new address[](4);
+        (toks[0], toks[1], toks[2], toks[3]) = (address(tA), address(tB), address(tC), address(tD));
+        for (uint256 i; i < 4; ++i) {
+            MockERC20(toks[i]).mint(address(aggSolver), 10e18);
+        }
+    }
+
+    function test_gas_sweepAll_fourTokens() public {
+        address[] memory toks = _fourRetained();
+        uint256 g0 = gasleft();
+        aggSolver.sweepAll(toks, address(0x7EA5), 1);
+        emit log_named_uint("sweepAll, 4 tokens, 1 tx (execution)", g0 - gasleft());
+    }
+
+    function test_gas_sweep_fourTokens() public {
+        address[] memory toks = _fourRetained();
+        uint256 g0 = gasleft();
+        for (uint256 i; i < 4; ++i) {
+            aggSolver.sweep(toks[i], address(0x7EA5), 10e18 - 1);
+        }
+        emit log_named_uint("4 x sweep, 4 txs (execution only)   ", g0 - gasleft());
+    }
+
     // ═══════════════════════════ AGG-2 ═══════════════════════════
 
     /// AGG-2: a second input leg in a third token used to be paid here and never
@@ -240,9 +296,9 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
     /// instance does: no policy, zero or not, deploys without an operator set.
     function test_audit_AGG_3_noInstanceWithoutOperators() public {
         vm.expectRevert(AggregatorFillSolver.NoOperators.selector);
-        new AggregatorFillSolver(address(settlement), new address[](0), SurplusPolicy({makerPpm: 1, protocolPpm: 0, protocolRecipient: address(0)}), new PoolVenue[](0));
+        new AggregatorFillSolver(address(settlement), new address[](0), SurplusPolicy({makerPpm: 1, protocolPpm: 0, protocolRecipient: address(0)}), new PoolVenue[](0), address(0), address(0));
         vm.expectRevert(AggregatorFillSolver.NoOperators.selector);
-        new AggregatorFillSolver(address(settlement), new address[](0), _noSplit(), new PoolVenue[](0));
+        new AggregatorFillSolver(address(settlement), new address[](0), _noSplit(), new PoolVenue[](0), address(0), address(0));
         assertTrue(newAgg(address(settlement), _ops(), _noSplit(), new PoolVenue[](0)).GATED());
     }
 

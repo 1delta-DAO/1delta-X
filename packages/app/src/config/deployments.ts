@@ -6,10 +6,12 @@ export {
   PULL_MODE,
   exclusivityForMarket,
   isPullMarket,
+  nativeOutFor,
   parseDeployments,
   solverForMarket,
   type DeploymentConfig,
   type ExclusivityWindow,
+  type NativeOutShape,
   type PullExclusivity,
 } from "./deploymentConfig";
 

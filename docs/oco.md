@@ -69,10 +69,13 @@ nonce must carry the fill-once bit, or a partial of one would burn the nonce and
 group would not behave as a bracket (G-TS_SIGN-8, see
 [condition-trees.md](condition-trees.md)).
 
-**Matching.** Shared-nonce brackets are the MATCHABLE form: `OcoGroupModule` legs
-carry a SETTLE item, so they cannot be CoW-matched through `matchSettle` (which
-rejects SETTLE) nor filled through a `PostInputs` callback or
-`AggregatorFillSolver` (PRICE-12, accepted).
+**Matching.** `OcoGroupModule` legs carry a SETTLE claim item. They cannot be
+filled through a `PostInputs` callback (item-free), but since task 31 (2026-10-14)
+`matchSettle` admits SETTLE, so they CoW-match and fill with zero capital through
+`AggregatorFillSolver.executeItemFill` (PRICE-12 is resolved for the netted path).
+Both sibling legs of one group in a single plan pass the validator at open (validators
+run before any item), and the second claim item reverts `GroupAlreadyClaimed`, so a
+plan can never fill both. The shared-nonce bracket stays matchable as well.
 
 ---
 

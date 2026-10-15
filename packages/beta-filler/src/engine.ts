@@ -1,5 +1,5 @@
 import { withSendGasPrice, type Chain } from "./chain";
-import { AUCTION_RECHECK_MS, type Config } from "./config";
+import { AUCTION_RECHECK_MS, legacyRouteConfig, type Config } from "./config";
 import { dispatch, type Strategy } from "./dispatch";
 import { Filler, type FillOutcome } from "./filler";
 import { GasRatios } from "./gasRatio";
@@ -133,6 +133,8 @@ export class Engine {
   readonly routeBudget: Budget;
   readonly filler?: Filler;
   readonly route?: RouteFiller;
+  /** Route strategies for AGGREGATOR_SOLVER_LEGACY instances (orders that name them only). */
+  readonly legacyRoutes: RouteFiller[] = [];
   readonly rebalancer: Rebalancer;
   /** Learned receipt/estimate gas ratios, shared by both strategies (gasRatio.ts). */
   readonly gasRatios: GasRatios;
@@ -180,6 +182,16 @@ export class Engine {
       this.strategies.push({ name: "inventory", consider: (e) => f.consider(e), accepts: (e) => f.accepts(e) });
     }
     if (cfg.strategies.route) {
+      // Legacy solver instances first (AGGREGATOR_SOLVER_LEGACY): each takes only the
+      // orders that name it as exclusive filler — signed before a solver migration — and
+      // passes on everything else at no RPC cost. Same budget, guard and gas ratios
+      // (keyed by solver) as the primary.
+      for (const legacy of cfg.route!.legacySolvers) {
+        const l = new RouteFiller({ ...cfg, route: legacyRouteConfig(cfg.route!, legacy) }, chain, this.routeBudget, log, mark, this.guard, this.gasRatios);
+        l.restoreGraph(state.poolGraph);
+        this.legacyRoutes.push(l);
+        this.strategies.push({ name: "route", consider: (e) => l.consider(e), accepts: (e) => l.accepts(e), beginSweep: () => l.beginSweep() });
+      }
       const r = new RouteFiller(cfg, chain, this.routeBudget, log, mark, this.guard, this.gasRatios, this.quotes);
       r.restoreGraph(state.poolGraph);
       this.route = r;

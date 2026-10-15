@@ -86,7 +86,15 @@ SETTLEMENT = "0xe6EDbb5c49Fb4CFb313476e3B78E274D3584ddf5"   # Rootstock beta 202
 PERMIT3 = "0xabaefb5ae495Dcbce40d1e057346f31A500668a8"
 LENS = "0xF9e905EdCC376FDaBF62Ca0966624611721C5206"
 # The deployed AggregatorFillSolver (route strategy). Empty = route strategy off.
-AGGREGATOR_SOLVER = "0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1"
+# v3 (2026-10-15, native delivery): new orders are signed for it and fill through it.
+AGGREGATOR_SOLVER = "0x5987A4AFE1b680DAC657506B69C56b06FFe86cD1"
+# Earlier instances still operated for the orders that NAME them as exclusive filler
+# (signed before the switch): v2, until its last such order expires (market ≤ 5 min,
+# limit ≤ 7 days after 2026-10-15). Remove it then, and sweep v2 with --all.
+AGGREGATOR_SOLVER_LEGACY = "0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1"
+# The NativeBalance view (task 30) — the SDK's chain-30 constant, pinned here too. The
+# route checks it against the solver's nativeDelivery() at start-up.
+NATIVE_BALANCE = "0xA45ec37619C9F9B2f9d54692d578D1b1246c854c"
 ORDERBOOK_URL = ""
 ORDERBOOK_CLIENT_IP = "127.0.0.2"
 # Optional Durable Object location hint, e.g. "wnam" (near the public Rootstock RPCs).
@@ -97,9 +105,10 @@ DO_LOCATION_HINT = ""
 INVENTORY_ENABLED = "1"
 # ROUTE_ENABLED defaults to on iff AGGREGATOR_SOLVER is set.
 # Retain mode: the spread stays on the solver (== AGGREGATOR_SOLVER), skipping the
-# per-fill payout transfer (−5.2k gas direct, −6.2k pull). Operators batch-recover it
-# with AggregatorFillSolver.sweep(token, to, amount).
-ROUTE_PROFIT_RECIPIENT = "0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1"
+# per-fill payout transfer (−5.2k gas direct, −6.2k pull). A legacy instance retains on
+# ITSELF (config.ts legacyRouteConfig). Operators batch-recover it with
+# AggregatorFillSolver.sweepAll(tokens, to, 1) on v3 (beta-filler e2e/sweep-solver.sh).
+ROUTE_PROFIT_RECIPIENT = "0x5987A4AFE1b680DAC657506B69C56b06FFe86cD1"
 ROUTE_SLIPPAGE_BPS = "10"
 ROUTE_STABLE_SLIPPAGE_BPS = "5"
 # v2 solver (2026-10-12): a pool plan assumes this − 30k = 265k (fork: 229k net direct).

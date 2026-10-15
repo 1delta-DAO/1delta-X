@@ -1,10 +1,12 @@
 /**
- * NATIVE-OUT (task 28): the route fills orders whose WRBTC leg goes to the deployed
- * NativeUnwrapModule and whose one MAKE item unwraps it for the maker — exactly that
- * shape (the app's lib/order.ts `nativeOut`), nothing looser. Quotes for it are pull,
- * route-only, + NATIVE_OUT_GAS, and bind only to native-out orders.
+ * NATIVE-OUT through the NativeUnwrapModule (task 28): the shape whose WRBTC leg goes to
+ * the deployed module and whose one MAKE item unwraps it for the maker is RECOGNISED
+ * exactly (the retired app shape), and routable only as an item fill — which the solver's
+ * schedule can never give the CANONICAL policy it is signed with. Native receipts now go
+ * through the NativeBalance view (task 30, nativeDirect.test.ts), and `nativeOut` quotes
+ * are DIRECT.
  */
-import { forLegPreFund, ItemOp, OrderSide, withDeltaVerifyOutputs, type Order } from "@1delta-x/sdk";
+import { forLegPreFund, ItemOp, ItemPolicy, OrderSide, withDeltaVerifyOutputs, withItemPolicy, type Order } from "@1delta-x/sdk";
 import { encodeAbiParameters, getAddress, zeroAddress, type Address, type Hex } from "viem";
 import { describe, expect, it } from "vitest";
 
@@ -49,7 +51,7 @@ describe("the native-out shape", () => {
   it("accepted exactly: the module's MAKE, amount 0, leg-0 reference, payout maker (0x0 or explicit)", () => {
     expect(nativeOutShape(nativeOrder(), MODULE, WRBTC)).toEqual({ ok: true });
     expect(nativeOutShape(nativeOrder({}, { data: data(forLegPreFund(0, WRBTC, 0), MAKER) }), MODULE, WRBTC).ok).toBe(true);
-    expect(plainShape(nativeOrder(), { nativeUnwrap: NU })).toEqual({ ok: true, nativeOut: true });
+    expect(plainShape(nativeOrder(), { nativeUnwrap: NU })).toMatchObject({ ok: true, nativeOut: true, itemSkip: expect.stringMatching(/ITEM_FILLS/) });
   });
 
   it.each([
@@ -74,9 +76,23 @@ describe("the native-out shape", () => {
     expect(rc.nativeUnwrap).toBe(MODULE); // the Rootstock deployment by default
   });
 
-  it("classifyRoute recognises it but refuses it: the deployed solver cannot fill a pre-funded MAKE (fork-proven)", () => {
+  it("classifyRoute recognises it but refuses it: not an item fill the solver can schedule (fork-proven on the live Settlement)", () => {
     const v = classifyRoute(nativeOrder(), rc, { nativeUnwrap: NU });
-    expect(v).toEqual({ ok: false, reason: NATIVE_OUT_NOT_ROUTABLE });
+    expect(v.ok).toBe(false);
+    expect(!v.ok && v.reason.startsWith(NATIVE_OUT_NOT_ROUTABLE)).toBe(true);
+    // Item fills on, live Settlement: the pre-funded MAKE is refused on the netted path.
+    const live = classifyRoute(nativeOrder(), rc, { nativeUnwrap: NU, itemFills: { nettedDeliveryFundedItems: false } });
+    expect(!live.ok && live.reason).toMatch(/pre-funded MAKE/);
+    // The task-31 Settlement: refused when signed CANONICAL (forward-only — the app's
+    // pre-task-31 shape)…
+    const canon = classifyRoute({ ...nativeOrder(), timing: withItemPolicy(0n, ItemPolicy.CANONICAL) }, rc, { nativeUnwrap: NU, itemFills: { nettedDeliveryFundedItems: true } });
+    expect(!canon.ok && canon.reason).toMatch(/CANONICAL/);
+    // …and an item fill when signed below it — ORDERED (the app's shape since task 31) or
+    // ANY: the MAKE runs after the delivery that funds it.
+    for (const p of [ItemPolicy.ORDERED, ItemPolicy.ANY]) {
+      const v = classifyRoute({ ...nativeOrder(), timing: withItemPolicy(0n, p) }, rc, { nativeUnwrap: NU, itemFills: { nettedDeliveryFundedItems: true } });
+      expect(v.ok && [v.nativeOut, v.itemFill]).toEqual([true, { lateItems: 1n }]);
+    }
     expect(classifyRoute(nativeOrder(), rc).ok).toBe(false);
   });
 });
@@ -84,19 +100,18 @@ describe("the native-out shape", () => {
 describe("native-out quotes", () => {
   const body = { chainId: 30, side: "buy", tokenIn: ROOTSTOCK.usdt0, tokenOut: WRBTC, amountIn: "50000000", delivery: "auto", nativeOut: true };
 
-  it("parse: pull (an `auto` resolves to it), direct refused, a boolean only", () => {
+  it("parse: DIRECT now (task 30 — an `auto` resolves to it), pull refused, a boolean only", () => {
     const v = parseQuoteRequest(body, cfg);
-    expect(v.ok && [v.req.delivery, v.req.nativeOut]).toEqual(["pull", true]);
-    expect(parseQuoteRequest({ ...body, delivery: "direct" }, cfg).ok).toBe(false);
+    expect(v.ok && [v.req.delivery, v.req.nativeOut]).toEqual(["direct", true]);
+    expect(parseQuoteRequest({ ...body, delivery: "pull" }, cfg).ok).toBe(false);
     expect(parseQuoteRequest({ ...body, nativeOut: "yes" }, cfg).ok).toBe(false);
   });
 
-  it("a native-out quote binds only a native-out order, and a plain quote never one", () => {
-    const q: IssuedQuote = { id: "q", tokenIn: ROOTSTOCK.usdt0.toLowerCase(), tokenOut: WRBTC.toLowerCase(), amountIn: "50000000", amountOut: (6n * 10n ** 14n).toString(), delivery: "pull", issuedAt: 0, validUntil: 2_000_000_000, nativeOut: true };
+  it("no quote binds the module shape (an item order), a plain quote its plain order", () => {
+    const q: IssuedQuote = { id: "q", tokenIn: ROOTSTOCK.usdt0.toLowerCase(), tokenOut: WRBTC.toLowerCase(), amountIn: "50000000", amountOut: (6n * 10n ** 14n).toString(), delivery: "pull", issuedAt: 0, validUntil: 2_000_000_000 };
     const plain = nativeOrder({ legsOut: [{ token: WRBTC, start: 6n * 10n ** 14n, end: 0n, recipient: zeroAddress }], items: [] });
-    expect(quoteMatches(q, nativeOrder(), 1, 30)).toBe(true);
-    expect(quoteMatches(q, plain, 1, 30)).toBe(false);
-    expect(quoteMatches({ ...q, nativeOut: undefined }, nativeOrder(), 1, 30)).toBe(false);
-    expect(quoteMatches({ ...q, nativeOut: undefined }, plain, 1, 30)).toBe(true);
+    expect(quoteMatches(q, nativeOrder(), 1, 30)).toBe(false);
+    expect(quoteMatches({ ...q, nativeOut: true }, nativeOrder(), 1, 30)).toBe(false);
+    expect(quoteMatches(q, plain, 1, 30)).toBe(true);
   });
 });

@@ -336,8 +336,8 @@ word the maker already signs. The policy lives at [96:100):
 | value | policy | rule |
 | --- | --- | --- |
 | 0 | `ANY` | any order, any interleaving — **the default, and what every order signed before this existed means** |
-| 1 | `ORDERED` | items in signed index order; other steps may still interleave |
-| 2 | `ATOMIC` | signed order **and** back-to-back, no foreign step between them |
+| 1 | `ORDERED` | items in signed index order; other steps may still interleave; **and** (task 31) a `PULL` of the order waits for every non-MAKE item of it (TAKE, TAKE_FOR, SETTLE) |
+| 2 | `ATOMIC` | `ORDERED` **and** back-to-back, no foreign step between them |
 | 3 | `CANONICAL` | `ATOMIC`, **and** the item group runs after this order's `DELIVER` and before any `PULL` of its input legs |
 
 No `Order` change, no EIP-712 typehash change, **no golden-hash break**, and
@@ -376,6 +376,17 @@ so the plan must fund its deliveries from elsewhere (another order's pull, a
 `PRESEND`, a `CALL`). Both rules revert `ItemPolicyViolated(order, item)` — for a
 refused pull, `item` is the input-leg index.
 
+**ORDERED gained the PULL half in task 31 (2026-10-14).** The allowance argument
+needs only "no `PULL` ahead of the item that funds the leg", not CANONICAL's whole
+forward shape — and CANONICAL's "items after `DELIVER`" makes a sell-out-of-a-position
+order unfillable without capital, since its delivery can only be funded by the very
+input its `TAKE` produces. So under `ORDERED` and `ATOMIC` a `PULL` now waits for every
+non-MAKE item of its order, resolved once at open, without waiting for the delivery:
+`TAKE → PULL → PRESEND → CALL → DELIVER → MAKEs` is legal and zero-capital. The SDK
+defaults input-funding TAKE orders to `ORDERED` (it used to sign `CANONICAL`). A TAKE
+that must run AFTER the delivery (a borrow to the wallet behind a swap-and-deposit) now
+has to precede every `PULL` under `ORDERED`, so such an order is signed `ANY`.
+
 **When to reach for it, and when not.** `ATOMIC` is the right answer for a
 multi-item order on a non-deferring lender. But if the pair can be **fused into one
 module call** ([settlement-modules.md §8](settlement-modules.md)), that is better
@@ -405,8 +416,9 @@ The load-bearing new check is **S8**, and it is the one an audit should stare at
 the guards must be *set-and-check at execution time*, never a completeness compare
 in Phase 3 alone.
 
-Retained guards from the item path: SETTLE items rejected
-(`MatchSettleItemUnsupported` — it routes to the filler, not the pool), duplicate
+Retained guards from the item path: an item op above the enum, and the
+BALANCE-relative `TAKE_FOR` funding form, rejected (`MatchSettleItemUnsupported`;
+the balance form's wallet read would be the schedule's choice), duplicate
 input tokens rejected (`MatchDuplicateInput` — item proceeds are still attributed
 per token within a step window). A TAKE's proceeds token that is not an input leg of
 its order is no longer simply stranded here: `_creditItemProceeds` refunds an
@@ -414,6 +426,20 @@ un-attributed gain to the maker as the item runs **when the token is in the plan
 universe** (the union of every order's leg tokens); a token outside the universe
 strands exactly as on `fill` (see SECURITY.md, "A TAKE item's proceeds token must
 appear in `order.legsIn`").
+
+**Delivery-funded items and SETTLE (task 31, 2026-10-14).** `SETTLE`, `TAKE_FOR`
+(literal and leg-reference forms) and the pre-funded `MAKE` used to be refused here,
+which left every order that consumes its own delivery (swap→supply, swap→repay,
+native-out, an LP mint) and every OCO bracket leg fillable only with filler capital.
+They are admitted now. `_stepDeliver` hands an order its delivery ledger
+(`FillCtx.outs`) only when it delivers, so a leg-reference item scheduled before its
+DELIVER fails closed in `Base._forSlice` (`ForLegInvalid`) and one scheduled after it
+spends exactly what was delivered: the forward path's guarantee, reached by the
+ledger instead of a fixed ordering. A SETTLE item pays `msg.sender`, the solver that
+owes the deliveries; validators still run at open, so a module whose safety needs a
+validator to see another order's item effect must check it in the item (as
+`OcoGroupModule`'s claim does). The zero-capital schedule is `PULL → PRESEND → CALL →
+DELIVER → ITEM`. See [fill-ordering-capital-plan.md](fill-ordering-capital-plan.md).
 
 No `Order` field changes → **the golden order hash is untouched** and existing
 signed orders are matchable as-is.

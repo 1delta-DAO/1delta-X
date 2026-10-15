@@ -1,6 +1,6 @@
 # 30. Native RBTC delivery without filler capital (NativeBalance view + solver v3)
 
-- **Status:** open (planned 2026-10-14)
+- **Status:** contracts DEPLOYED 2026-10-15 (NativeBalance `0xA45ec376…854c`, solver v3 `0x5987A4AF…6cD1`, verified; docs/deployment-rootstock-beta.md). Remaining: the off-chain switch — filler `AGGREGATOR_SOLVER` v2→v3 (with v2 kept for orders naming it), `NATIVE_BALANCE` in the filler and book, `VITE_DEPLOYMENTS[30].nativeBalance` in the app, the SDK's chain-30 `NATIVE_BALANCE` constant, and a first small live RBTC fill.
 - **Layer:** contracts (periphery + solver) + filler + app + sdk + book
 - **Package:** `packages/periphery`, `packages/solvers`, `packages/beta-filler`, `packages/app`, `packages/sdk`, `packages/orderbook-worker`
 - **Severity:** design flaw: native receipts needed per-fill capital (inventory or flash)

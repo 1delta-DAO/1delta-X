@@ -18,6 +18,7 @@ import {
   hashOrderStruct,
   isFillOnce,
   isProportional,
+  nativeBalanceMisuse,
   JsonBodyError,
   orderFromJson,
   OrderSide,
@@ -345,6 +346,10 @@ export class OrderBookCore {
   /** Soft-cancel tombstones, then the admission policy (with displacement) — the Book's `precheck`. */
   private precheck(order: Order, hash: string, encodedBytes: number): AdmissionVerdict {
     if (this.isSoftCancelled(hash, order.maker)) return { ok: false, reason: "order was soft-cancelled by its maker" };
+    // The NativeBalance view is only ever a DELTA-VERIFIED output (task 30): as an input or
+    // a pull output it can never settle (it has no transferFrom) — refuse before the lens call.
+    const native = nativeBalanceMisuse(order, this.cfg.nativeBalance);
+    if (native) return { ok: false, reason: native };
     return checkAdmission(
       order,
       {
