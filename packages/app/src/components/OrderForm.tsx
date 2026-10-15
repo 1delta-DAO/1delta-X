@@ -118,6 +118,11 @@ interface OrderFormProps {
   allowance: AllowanceView;
   /** The exact wallet balance as a decimal string, for "max". */
   maxAmount: string | undefined;
+  /**
+   * 25 % / 50 % of the spendable balance as exact decimal strings (App, from wei), offered
+   * next to Max while the pay field has focus. Undefined until the balance is known.
+   */
+  quickAmounts?: Partial<Record<25 | 50, string>>;
   /** The ticket commits more than the wallet holds, compared in wei. */
   overBalance: boolean;
   /**
@@ -209,8 +214,36 @@ function Bal({ state, onConnect }: { state: BalanceState; onConnect: () => void 
       </button>
     );
   }
-  return <span className={`m${state.kind === "wrong-network" ? " warn" : ""}`}>{state.text}</span>;
+  return (
+    <>
+      <span className={`m${state.kind === "wrong-network" ? " warn" : ""}`}>{state.text}</span>
+      {state.kind === "ok" && state.wrap && (
+        <span className="wraptag" title={state.wrap.note}>
+          {state.wrap.tag}
+        </span>
+      )}
+    </>
+  );
 }
+
+/** The balance glyph that stands in for the word "Balance" (it kept the pay row from fitting one line). */
+function WalletGlyph() {
+  return (
+    <svg className="wglyph" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+      <path
+        d="M2.5 4.5h9a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 2 12V4a1.5 1.5 0 0 1 1.5-1.5H11v2M10.5 9.25h.01"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/** Pay-amount presets, as fractions of the spendable balance (percent). */
+const QUICK_PCTS = [25, 50] as const;
 
 export function OrderForm(props: OrderFormProps) {
   const {
@@ -229,6 +262,7 @@ export function OrderForm(props: OrderFormProps) {
     gate,
     allowance,
     maxAmount,
+    quickAmounts,
     overBalance,
     floor,
     figures,
@@ -446,16 +480,37 @@ export function OrderForm(props: OrderFormProps) {
           <div className="top">
             <span className="lbl">You pay</span>
             <span className="bal">
-              {payBal.kind === "ok" ? <>Balance </> : null}
+              {payBal.kind === "ok" ? (
+                <span className="wlabel" title="Balance">
+                  <WalletGlyph />
+                </span>
+              ) : null}
               <Bal state={payBal} onConnect={onConnect} />
               {payBal.kind === "ok" && (
-                <button
-                  type="button"
-                  disabled={maxAmount === undefined || paySpendable === undefined || paySpendable <= 0}
-                  onClick={() => maxAmount !== undefined && ticket.setAmount(maxAmount)}
-                >
-                  Max
-                </button>
+                <span className="quick">
+                  {/* 25 % / 50 % show while the pay field has focus (CSS :focus-within), Max always. */}
+                  {QUICK_PCTS.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      className="pct"
+                      // Keep the focus in the amount input: Safari does not focus a clicked
+                      // button, so the field would lose :focus-within and hide the chip mid-click.
+                      onMouseDown={(e) => e.preventDefault()}
+                      disabled={!quickAmounts?.[p] || paySpendable === undefined || paySpendable <= 0}
+                      onClick={() => quickAmounts?.[p] !== undefined && ticket.setAmount(quickAmounts[p]!)}
+                    >
+                      {p}%
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={maxAmount === undefined || paySpendable === undefined || paySpendable <= 0}
+                    onClick={() => maxAmount !== undefined && ticket.setAmount(maxAmount)}
+                  >
+                    Max
+                  </button>
+                </span>
               )}
               {payBal.kind === "ok" && <UnwrapLink unwrap={unwrap} symbol={payToken} native={wallet.native.symbol} />}
             </span>

@@ -228,6 +228,19 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
   border: 0; background: none; color: var(--lime); font-family: var(--mono);
   font-size: 11px; padding: 0 0 0 7px; font-weight: 700;
 }
+/* The pay row stays ONE line: the figure ellipsizes before anything wraps. */
+.field .top > .bal { display: inline-flex; align-items: baseline; min-width: 0; white-space: nowrap; }
+.field .bal .m { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.field .bal .wlabel { display: inline-flex; align-self: center; margin-right: 5px; color: var(--faint); }
+.field .bal .wglyph { display: block; }
+.field .bal .wraptag {
+  margin-left: 5px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--dim); font-size: 10px; cursor: help;
+}
+.field .bal .quick { display: inline-flex; align-items: baseline; }
+/* 25 % / 50 %: only while the pay field has focus (tapping one keeps focus inside the field). */
+.field .bal .quick .pct { display: none; }
+.field:focus-within .bal .quick .pct { display: inline; }
 .inp {
   display: flex; align-items: center; gap: 10px; border: 1px solid var(--line);
   border-radius: 10px; padding: 3px 14px 3px 16px; background: var(--bg); transition: border-color .16s;

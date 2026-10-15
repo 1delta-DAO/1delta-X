@@ -186,9 +186,14 @@ describe("spendable / Max / insufficient with RBTC", () => {
     expect(exceedsBalance("0.01", 18, spend)).toBe(true);
   });
 
-  it("the balance line names the auto-wrapped RBTC and sums the value", () => {
+  it("the balance line shows the summed total, the auto-wrapped RBTC as a tag with the split in its tooltip", () => {
     const s = balanceState({ connected: true, onChain: true, value: 0.01, symbol: "WRBTC", wrappable: { value: 0.04995, symbol: "RBTC" } });
-    expect(s).toEqual({ kind: "ok", text: "0.01 WRBTC + 0.04995 RBTC (auto-wrapped)", value: 0.01 + 0.04995 });
+    expect(s).toEqual({
+      kind: "ok",
+      text: "0.05995 WRBTC",
+      value: 0.01 + 0.04995,
+      wrap: { tag: "+RBTC", note: "0.01 WRBTC + 0.04995 RBTC — the RBTC is wrapped to WRBTC when you sign (gas reserve kept)" },
+    });
     // nothing wrappable → the plain line
     expect(balanceState({ connected: true, onChain: true, value: 0.01, symbol: "WRBTC", wrappable: { value: 0, symbol: "RBTC" } }).text).toBe(
       "0.01 WRBTC",

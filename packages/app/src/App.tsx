@@ -396,6 +396,14 @@ export default function App() {
   // balance — for WRBTC that already holds the RBTC gas reserve back (wrapSpendableWei).
   const maxAmount =
     payWei !== undefined && payMeta.decimals !== undefined ? formatUnits(maxSpendableWei(payWei, false), payMeta.decimals) : undefined;
+  // 25 % / 50 % of the same spendable figure, exact in wei (floored).
+  const quickAmounts = useMemo(() => {
+    if (payWei === undefined || payMeta.decimals === undefined) return undefined;
+    const spend = maxSpendableWei(payWei, false);
+    if (spend <= 0n) return undefined;
+    const at = (pct: bigint) => formatUnits((spend * pct) / 100n, payMeta.decimals!);
+    return { 25: at(25n), 50: at(50n) };
+  }, [payWei, payMeta.decimals]);
 
   // MARKET figures: the filler's quote when there is one — every number on the form
   // and the book's quote line come from it; the ladder walk only without a quote.
@@ -1007,6 +1015,7 @@ export default function App() {
             gate={gate}
             allowance={allowance}
             maxAmount={maxAmount}
+            {...(quickAmounts ? { quickAmounts } : {})}
             overBalance={overBalance}
             floor={plan?.kind === "market" && plan.floor ? { ...plan.floor, minOut: plan.minOut, targetOut: plan.targetOut } : null}
             figures={figures}

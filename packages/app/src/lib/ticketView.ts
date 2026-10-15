@@ -211,7 +211,12 @@ export type BalanceState =
   | { kind: "disconnected"; text: string }
   | { kind: "wrong-network"; text: string }
   | { kind: "loading"; text: string }
-  | { kind: "ok"; text: string; value: number };
+  /**
+   * `wrap`: part of `value` is native coin the ticket auto-wraps. The line shows the TOTAL
+   * (one short figure that fits the field's top row) plus a small `+RBTC` tag whose
+   * tooltip spells out the split.
+   */
+  | { kind: "ok"; text: string; value: number; wrap?: { tag: string; note: string } };
 
 /**
  * One balance line: a number only when it can be one. `wrappable` is native coin
@@ -232,8 +237,12 @@ export function balanceState(a: {
   if (w && w.value > 0) {
     return {
       kind: "ok",
-      text: `${fmtBalance(a.value)} ${a.symbol} + ${fmtBalance(w.value)} ${w.symbol} (auto-wrapped)`,
+      text: `${fmtBalance(a.value + w.value)} ${a.symbol}`,
       value: a.value + w.value,
+      wrap: {
+        tag: `+${w.symbol}`,
+        note: `${fmtBalance(a.value)} ${a.symbol} + ${fmtBalance(w.value)} ${w.symbol} — the ${w.symbol} is wrapped to ${a.symbol} when you sign (gas reserve kept)`,
+      },
     };
   }
   return { kind: "ok", text: `${fmtBalance(a.value)} ${a.symbol}`, value: a.value };
