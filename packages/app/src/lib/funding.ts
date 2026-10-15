@@ -200,6 +200,21 @@ export function fundingButtonLabel(plan: Pick<FundingPlan, "steps" | "trims">, a
   return `${reduce}${head}${plan.steps.length > 1 ? ` (1 of ${plan.steps.length})` : ""}`;
 }
 
+/**
+ * The funding button in parts, so it fits ONE line: the step's short label, and the
+ * "1/2" step counter as a separate badge. The wrap step drops "→ WRBTC" (the button's info
+ * tooltip spells out the wrap). {@link fundingButtonLabel} stays the one-string form.
+ */
+export function fundingButtonParts(
+  plan: Pick<FundingPlan, "steps" | "trims">,
+  a: { amount: string; token: string; nativeSymbol?: string },
+): { text: string; step: string | null } {
+  const first = plan.steps[0];
+  const head = first?.kind === "wrap" ? `Wrap ${fmtWei(first.amount)} ${a.nativeSymbol ?? "native"}` : fundingStepLabel(first, a);
+  const reduce = plan.trims && first?.kind !== "wrap" ? "Reduce: " : "";
+  return { text: `${reduce}${head}`, step: plan.steps.length > 1 ? `1/${plan.steps.length}` : null };
+}
+
 /** Whether anything is left standing that a revoke would clear. */
 export function hasLeftover(state: FundingState, now: number): boolean {
   const grantLive = state.grantAmount > 0n && (state.grantExpiration === 0 || state.grantExpiration >= now);

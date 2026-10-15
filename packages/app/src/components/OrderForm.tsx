@@ -79,6 +79,8 @@ export interface AllowanceView {
   trims: boolean;
   /** The funding button: the next transaction and its place, "Wrap 0.0123 RBTC → WRBTC (1 of 3)". */
   buttonLabel: string;
+  /** {@link buttonLabel} in parts: the short label and the "1/2" step badge (one line). */
+  buttonParts?: { text: string; step: string | null };
   /** Transactions still to send. */
   remaining: number;
   /** The next step wraps native coin first (WRBTC tickets funded from RBTC). */
@@ -987,17 +989,28 @@ export function OrderForm(props: OrderFormProps) {
                         ? `✓ exactly ${fmtAmt(allowance.required)} ${payToken} funded`
                         : allowance.approving
                           ? "Confirm in your wallet…"
-                          : allowance.required > 0
-                            ? allowance.buttonLabel
-                            : `Approve ${payToken}`}
+                          : allowance.required > 0 && allowance.buttonParts
+                            ? (
+                                <span className="ctarow">
+                                  <span className="ctatext">{allowance.buttonParts.text}</span>
+                                  {allowance.buttonParts.step && <span className="ctastep">{allowance.buttonParts.step}</span>}
+                                  {allowance.wrap && (
+                                    // The wrap's explanation, as a tooltip instead of a paragraph under the button.
+                                    <span
+                                      className="info"
+                                      role="img"
+                                      aria-label={`You hold too little ${payToken}: this transaction wraps exactly ${allowance.wrap.amount} ${allowance.wrap.nativeSymbol} into ${payToken} (1:1), keeping at least ${allowance.wrap.reserve} ${allowance.wrap.nativeSymbol} for gas`}
+                                      title={`You hold too little ${payToken}: this transaction wraps exactly ${allowance.wrap.amount} ${allowance.wrap.nativeSymbol} into ${payToken} (1:1), keeping at least ${allowance.wrap.reserve} ${allowance.wrap.nativeSymbol} for gas`}
+                                    >
+                                      i
+                                    </span>
+                                  )}
+                                </span>
+                              )
+                            : allowance.required > 0
+                              ? allowance.buttonLabel
+                              : `Approve ${payToken}`}
                   </button>
-                  {allowance.wrap && !allowance.covered && (
-                    <span className="capnote dim">
-                      You hold too little {payToken}: the first transaction wraps exactly {allowance.wrap.amount}{" "}
-                      {allowance.wrap.nativeSymbol} into {payToken} (1:1), keeping at least {allowance.wrap.reserve}{" "}
-                      {allowance.wrap.nativeSymbol} for gas
-                    </span>
-                  )}
                   {allowance.blocked && <div className="signerr">{allowance.blocked}</div>}
                   <span className="capnote dim oneline">
                     One exact approval

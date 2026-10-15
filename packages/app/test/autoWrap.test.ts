@@ -7,6 +7,7 @@ import {
   WRAPPED_NATIVE_ABI,
   fmtWei,
   fundingButtonLabel,
+  fundingButtonParts,
   fundingCalls,
   fundingStepLabel,
   planFunding,
@@ -129,6 +130,8 @@ describe("step labels", () => {
     const plan = planFunding(UNFUNDED, milli(10), 300, NOW, { tokenBalance: 0n, nativeBalance: milli(50) });
     expect(fundingStepLabel(plan.steps[0], LABEL)).toBe("Wrap 0.01 RBTC → WRBTC");
     expect(fundingButtonLabel(plan, LABEL)).toBe("Wrap 0.01 RBTC → WRBTC (1 of 3)");
+    // The button's one-line form: the short label + a step badge (the info tooltip explains the wrap).
+    expect(fundingButtonParts(plan, LABEL)).toEqual({ text: "Wrap 0.01 RBTC", step: "1/3" });
   });
 
   it("the wrap amount is the exact shortfall, rounded UP at 8 decimals", () => {

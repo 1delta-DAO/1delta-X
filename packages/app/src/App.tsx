@@ -32,7 +32,7 @@ import { readFillState, readMinValidNonce, readNonceWord, userTxGas, type Reader
 import { appNonces, fillOnceFor, openOrderNonces } from "./lib/nonces";
 import { orderPhase, phaseLine, type PhaseLine } from "./lib/orderLifecycle";
 import { IDLE, inFlight, runTx, txReducer } from "./lib/txFlow";
-import { fmtWei, fundingButtonLabel, hasLeftover, planFunding, planGasless, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
+import { fmtWei, fundingButtonLabel, fundingButtonParts, hasLeftover, planFunding, planGasless, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
 import { detectPermitDomain, gaslessDomain, signGaslessPermit } from "./lib/permit";
 import { buildOrder, inputWei } from "./lib/order";
 import { exceedsBalance, marketFigures, maxSpendableWei, sourceName, wrappableWei, wrapSpendableWei } from "./lib/ticketView";
@@ -509,6 +509,11 @@ export default function App() {
         : null,
     trims: fundingPlan?.trims ?? false,
     buttonLabel: fundingButtonLabel(fundingPlan ?? { steps: [], trims: false }, {
+      amount: fmtAmt(requiredHuman),
+      token: ticket.payToken,
+      nativeSymbol,
+    }),
+    buttonParts: fundingButtonParts(fundingPlan ?? { steps: [], trims: false }, {
       amount: fmtAmt(requiredHuman),
       token: ticket.payToken,
       nativeSymbol,
