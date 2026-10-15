@@ -30,10 +30,16 @@ describe("DIRECT funding (default): one exact approve to Settlement, the surface
     expect(planFunding({ ...unfunded, directAllowance: 500n }, 500n, 300, NOW).covered).toBe(true);
     expect(planFunding({ ...unfunded, erc20Allowance: 500n, grantAmount: 500n, grantExpiration: NOW + 7200 }, 500n, 300, NOW).covered).toBe(true);
   });
-  it("still EXACT: a larger direct allowance is trimmed down to the order", () => {
-    const plan = planFunding({ ...unfunded, directAllowance: 9_999n }, 500n, 300, NOW);
+  it("a LARGER direct allowance covers the order: no re-approve (it used to 'Reduce', re-prompting on every re-sized ticket)", () => {
+    const plan = planFunding({ ...unfunded, directAllowance: 501n }, 500n, 300, NOW);
+    expect(plan).toMatchObject({ steps: [], covered: true, trims: false });
+    // …it is still a standing allowance the form shows and can revoke.
+    expect(hasLeftover({ ...unfunded, directAllowance: 501n }, NOW)).toBe(true);
+  });
+  it("a SHORT direct allowance approves exactly the order's input", () => {
+    const plan = planFunding({ ...unfunded, directAllowance: 499n }, 500n, 300, NOW);
     expect(plan.steps).toEqual([{ kind: "direct-approve", amount: 500n }]);
-    expect(plan.trims).toBe(true);
+    expect(plan.trims).toBe(false);
   });
   it("strict mode refuses the direct surface → the two-leg Permit3 plan", () => {
     const plan = planFunding({ ...unfunded, strict: true }, 500n, 300, NOW);

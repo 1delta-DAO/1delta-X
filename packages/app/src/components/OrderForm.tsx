@@ -986,7 +986,7 @@ export function OrderForm(props: OrderFormProps) {
                     {allowance.mismatch
                       ? "Deployment mismatch — approvals disabled"
                       : allowance.covered
-                        ? `✓ exactly ${fmtAmt(allowance.required)} ${payToken} funded`
+                        ? `✓ ${fmtAmt(allowance.required)} ${payToken} funded`
                         : allowance.approving
                           ? "Confirm in your wallet…"
                           : allowance.required > 0 && allowance.buttonParts
@@ -1019,7 +1019,7 @@ export function OrderForm(props: OrderFormProps) {
                       tabIndex={0}
                       role="img"
                       aria-label="How the approval works"
-                      title={`One transaction: approve Settlement for exactly this order's ${payToken}. Settlement can only spend it through an order you signed; it stays until a fill uses it or you revoke it, and a new order's approval replaces it. (Makers in Permit3 strict mode approve Permit3 and grant Settlement instead — two transactions, the grant lapsing shortly after the order.)`}
+                      title={`One transaction: approve Settlement for exactly this order's ${payToken}. An approval already at or above it (left by an earlier order) covers it: no new transaction. Settlement can only spend it through an order you signed; it stays until fills use it or you revoke it. (Makers in Permit3 strict mode approve Permit3 and grant Settlement instead — two transactions, the grant lapsing shortly after the order.)`}
                     >
                       i
                     </span>

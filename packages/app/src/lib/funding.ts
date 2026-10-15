@@ -25,10 +25,19 @@ import { encodeFunctionData, erc20Abi, formatUnits, type Address, type Hex } fro
  * `token.approve(Settlement, exact)`. Settlement's pull tries the Permit3 leg and
  * falls back to the maker's direct ERC-20 allowance unless the maker is in Permit3
  * strict mode (`Base._pullViaPermit3`; the lens counts both). It is the surface a
- * gasless ERC-2612 permit already sets (spender = Settlement). Still EXACT; what it
- * gives up is the grant's auto-expiry: an unfilled order's allowance stands until
- * a fill or a revoke, and only a maker-signed order can spend it. Makers in strict
- * mode keep the two-leg Permit3 plan (the direct surface is refused for them).
+ * gasless ERC-2612 permit already sets (spender = Settlement). It approves EXACTLY the
+ * order's input when it must approve; what it gives up is the grant's auto-expiry: an
+ * unfilled order's allowance stands until a fill or a revoke, and only a maker-signed
+ * order can spend it. Makers in strict mode keep the two-leg Permit3 plan (the direct
+ * surface is refused for them).
+ *
+ * COVERED AT ≥, NOT == (2026-10-15). A standing direct allowance at or above the order's
+ * input funds it: no transaction. The direct path used to demand EQUALITY and "Reduce"
+ * anything larger, so a re-sized ticket (a Max that moved by a few wei with the balance,
+ * a new quote) re-prompted an approve each time — two approvals in a row for 0.000691 vs
+ * 0.000689 WRBTC. The surplus is still only spendable by an order the maker signs; the
+ * form shows the approved amount and a one-click revoke, so nothing standing is hidden
+ * (G-TS_SIGN-5's point). Strict-mode Permit3 legs stay exact (their grant is time-bounded).
  */
 
 /** What the chain says today, for one (maker, token). */
@@ -152,10 +161,9 @@ export function planFunding(
 
   if (!state.strict) {
     const direct = state.directAllowance ?? 0n;
-    if (direct !== required && !permit3Covered) {
-      trims ||= direct > required;
-      steps.push({ kind: "direct-approve", amount: required });
-    }
+    // Covered at ≥ (see the header): only a SHORT allowance costs a transaction, and then
+    // exactly the order's input.
+    if (direct < required && !permit3Covered) steps.push({ kind: "direct-approve", amount: required });
     return { steps, covered: steps.length === 0, trims, blocked };
   }
 
