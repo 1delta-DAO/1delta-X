@@ -33,6 +33,10 @@ Native-out is task 30's workaround for one of these.
    fold in tasks 16, 17 and 30.
 4. Filler: a shape classifier that picks `executeFill`, `executeItemFill`, flash, or
    skip.
+5. Redeploy `NativeUnwrapModule` **v2** with the new Settlement (`SEND_GAS` per chain,
+   default 100k). v2 caps the native send and falls back to WETH, so one payee cannot
+   kill or starve a plan that pays several makers natively. Built and tested 2026-10-15
+   (native-rbtc-delivery-plan §8).
 
 ## Acceptance
 

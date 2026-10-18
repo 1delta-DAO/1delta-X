@@ -48,7 +48,8 @@ cap and full-mode withdrawals can read `debt` / `credit` / `collateral`.
 | [`MidnightLendModule`](src/MidnightModules.sol) | MAKE | pull loan-token budget → `take(offer.buy = false, taker = maker)` (buy credit); sweep unspent to maker. Full-fill only | `abi.encode(Offer, bytes ratifierData, uint256 units, uint256 totalAmount)` |
 | [`MidnightTakerModule`](src/MidnightModules.sol) | TAKE | combined: `op=0` → `withdrawCollateral`; `op=1` → `withdraw` (redeem credit). Exact / Full mode (Full credit sized from `updatePosition`, not the stale `credit()`) | `abi.encode(uint8 op, Market, uint256 collateralIndex, uint8 balanceMode, uint256 totalAmount)` |
 | [`MidnightBorrowModule`](src/MidnightModules.sol) | TAKE | `take(offer.buy = true, taker = maker)` (sell debt units) → forward proceeds to `receiver`; reverts if the proceeds fall short of `amount`. Full-fill only | `abi.encode(Offer, bytes ratifierData, uint256 units, uint256 totalAmount)` |
-| [`MidnightPreFundModule`](src/MidnightPreFundModules.sol) | MAKE (pre-funded) | supply-collateral / repay funded by the fill's own delivered output leg | `abi.encode(forDesc, Market[, collateralIndex])` |
+| [`MidnightPreFundModule`](src/MidnightPreFundModules.sol) | MAKE (pre-funded) | op 0 supply-collateral / op 1 repay, funded by the fill's own delivered output leg | `abi.encode(forDesc, Market[, collateralIndex])` |
+| [`MidnightPreFundModule`](src/MidnightPreFundModules.sol) op 2 | MAKE (pre-funded) | LEND: `take(offer.buy = false, taker = maker)` for `units = forAmount · unitsPerAssetE18 / 1e18`, paid from the delivered loan token through an approval of exactly `forAmount`; unspent swept back. Partial fills OK | `abi.encode(forDesc, Offer, bytes ratifierData, uint256 unitsPerAssetE18)` (offer head pinned to `0x80`) |
 | [`MidnightLoopCallback`](src/MidnightLoopCallback.sol) | offer `callback` | borrow-and-loop: swaps a sell offer's proceeds to collateral and supplies it for the borrower | `callbackData = abi.encode(uint256 collateralIndex, uint24 dexFee, uint256 minRateWad)` |
 | [`interfaces/IMidnight.sol`](src/interfaces/IMidnight.sol) | — | structs + minimal Midnight surface + `MidnightIdLib.toId` | — |
 
@@ -156,6 +157,22 @@ L-ML-4). The borrower must `setIsAuthorized(loopCallback, true, borrower)`.
 false` offer, sweeping the unspent budget back. `MidnightTakerModule` op=1 (TAKE)
 redeems credit for the loan token — a redeem-and-swap exit.
 
+**Pre-funded lend (`MidnightPreFundModule` op 2, review 2026-10-18 M-5).** The
+pull `MidnightLendModule` needs a Permit3 allowance on the loan token, which a
+"sell X, lend the proceeds" maker never holds. The pre-funded op takes the loan
+token from the fill's delivery instead. It used to be deliberately absent —
+`take` is sized in UNITS at the offer's tick, not by the caller, so an absolute
+signed `units` cannot follow a delivery (hence the pull module's full-fill
+guard). The pre-funded op signs a RATE instead: `units = forAmount ·
+unitsPerAssetE18 / 1e18` credit units per delivered loan-token wei — the maker's
+limit price. The units therefore pro-rate with each delivery (partial fills and
+auction decay included), and the price bound is enforced by the scoped approval:
+Midnight pulls `buyerAssets` from the module through an allowance of exactly
+`forAmount`, so an offer priced worse than the rate reverts rather than drawing on
+another order's delivery parked on the singleton. A cheaper offer leaves
+`forAmount − buyerAssets`, swept back to the maker against the pre-delivery floor.
+Same Midnight grant as ops 0/1 (`setIsAuthorized(preFund, true, maker)`).
+
 ## Security properties
 
 - **MAKE modules reject non-Settlement callers** (`NotSettlement`); **TAKE modules
@@ -200,6 +217,7 @@ FOUNDRY_PROFILE=modules-morpho-midnight forge test
 | [`security/ModuleAuth`](test/security/ModuleAuth.t.sol) | `NotSettlement` / `OnlyPermit3` direct-call rejection; `setIsAuthorized` gate is load-bearing |
 | [`security/Audit20260930Midnight`](test/security/Audit20260930Midnight.t.sol) | 2026-09-30 audit regressions: borrow delivery bound under a fee rise, supply/repay grants, Full credit exit after a slash, strict blob heads, `balanceMode` range |
 | [`MidnightLoopCallback`](test/MidnightLoopCallback.t.sol) | borrow-and-loop; rate-scaled slippage floor across partial takes |
+| [`netted/NettedPreFund`](test/netted/NettedPreFund.t.sol) | the pre-fund family on `matchSettle` (dynamic `Market`/`Offer` decode on the netted path): pre-funded lend + repay parked side by side with loan/collateral residue, lend priced worse than its rate fails closed without touching parked funds, item before its own DELIVER fails closed, acyclic OPEN (borrow TAKE early → pre-funded supply late) and CLOSE (withdraw TAKE early → pre-funded repay late) at zero solver capital, pre-funded lend in two partial forward fills, op-2 gates |
 | [`fork/MidnightBaseFork`](test/fork/MidnightBaseFork.t.sol) | **live Base singleton**: supply/repay/withdraw auth gates, re-delegation, `MidnightIdLib.toId` == the venue's `touchMarket` id, `updatePosition` present. Needs a Base RPC (public fallbacks; `BASE_RPC_URL` overrides) |
 
 > The offer/ratifier economics (ticks, zero-coupon discounting) are still

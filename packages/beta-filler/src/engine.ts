@@ -11,6 +11,7 @@ import { QuoteBook, Quoter, type QuoteRequest, type QuoteResult } from "./quote"
 import { Rebalancer, type RebalanceOutcome } from "./rebalance";
 import { ROUTE_FILLS, RouteFiller } from "./routeFiller";
 import { sanitize } from "./sanitize";
+import { SolverSweeper, type SweepOutcome } from "./sweep";
 import { STATE_KEY, type FillerState, type RecentEvent, type StateStore } from "./state";
 
 export type Log = (m: string) => void;
@@ -70,6 +71,8 @@ export interface TickReport {
   evaluated: number;
   outcomes: FillOutcome[];
   rebalance?: RebalanceOutcome;
+  /** The operator sweep's step this tick (./sweep.ts), when it was due. */
+  solverSweep?: SweepOutcome;
   /** The rebalancer step ran this tick. */
   rebalanced?: boolean;
   /** Errors caught this tick (intake, RPC, …), sanitized. */
@@ -136,6 +139,8 @@ export class Engine {
   /** Route strategies for AGGREGATOR_SOLVER_LEGACY instances (orders that name them only). */
   readonly legacyRoutes: RouteFiller[] = [];
   readonly rebalancer: Rebalancer;
+  /** The operator sweep of retained solver balances (SOLVER_SWEEP), when configured. */
+  readonly solverSweeper?: SolverSweeper;
   /** Learned receipt/estimate gas ratios, shared by both strategies (gasRatio.ts). */
   readonly gasRatios: GasRatios;
   /** Indicative quotes issued (./quote.ts) — an order signed from one is gated without the haircut. */
@@ -198,6 +203,20 @@ export class Engine {
       this.strategies.push({ name: "route", consider: (e) => r.consider(e), accepts: (e) => r.accepts(e), beginSweep: () => r.beginSweep() });
     }
     this.rebalancer = new Rebalancer(cfg, chain, log, this.guard, { ...(state.rebalance ?? {}) }, mark);
+    if (cfg.strategies.route && cfg.route?.sweep && this.route) {
+      const r = this.route;
+      this.solverSweeper = new SolverSweeper(
+        cfg.route.sweep,
+        [cfg.route.solver, ...cfg.route.legacySolvers],
+        chain,
+        this.guard,
+        (t, a) => r.tokenValueWei(t, a),
+        log,
+        cfg.dryRun,
+        state.solverSweep,
+        mark,
+      );
+    }
     this.quoter = new Quoter(cfg, chain, this.guard, this.quotes, { route: this.route, inventory: this.filler }, this.now, (m) => this.o.log(m));
     this.cursor = state.cursor;
     this.recentEvents = [...(state.recent ?? [])];
@@ -236,6 +255,7 @@ export class Engine {
       gasRatios: this.gasRatios.toJSON(),
       ...(this.quotes.size ? { quotes: this.quotes.toJSON() } : {}),
       ...(this.route?.graphState() ? { poolGraph: this.route.graphState()! } : {}),
+      ...(this.solverSweeper ? { solverSweep: this.solverSweeper.state } : {}),
     };
   }
 
@@ -309,6 +329,8 @@ export class Engine {
         }
         // Do not re-quote the order we just filled while the book still serves it
         // (it indexes the fill a minute or so later): hold it until its fillable changes.
+        // Retained spread just grew: the operator sweep checks at the next idle tick.
+        if (p.kind === "fill" && p.strategy === "route") this.solverSweeper?.noteFill();
         if (p.kind === "fill" && p.orderHash && p.bookFillable !== undefined) {
           this.holds.set(p.orderHash.toLowerCase(), { until: now + this.cfg.sweep.restingRecheckMs, fillable: p.bookFillable, why: "filled" });
           this.dirty = true;
@@ -324,6 +346,14 @@ export class Engine {
         this.record({ type: p.kind === "fill" ? "filled" : "sent", strategy: p.strategy, kind: p.kind, orderHash: p.orderHash, tx: p.hash, reason: p.kind === "fill" ? undefined : "mined" });
         break;
       case "reverted":
+        if (res.lostRace) {
+          // Another filler's fill landed first (review S-5): no strike, no backoff; the
+          // next look fills the on-chain remainder (guard.ts `RaceProbe`).
+          const lr = res.lostRace;
+          this.o.log(`✗ ${who} ${what} ${p.hash} reverted: LOST A RACE (filled ${lr.filledBefore} → ${lr.filledAfter ?? (lr.nonceUsed ? "nonce consumed" : "?")}) — no strike, re-quoting the on-chain remainder`);
+          this.record({ type: "reverted", strategy: p.strategy, kind: p.kind, orderHash: p.orderHash, tx: p.hash, reason: "lost race" });
+          break;
+        }
         this.o.log(`✗ ${who} ${what} ${p.hash} reverted on-chain — ${p.kind === "fill" ? "order" : "action"} backed off`);
         this.record({ type: "reverted", strategy: p.strategy, kind: p.kind, orderHash: p.orderHash, tx: p.hash });
         break;
@@ -583,6 +613,24 @@ export class Engine {
         }
       }
       if (limits.canContinue && !limits.canContinue()) return rep;
+      // The operator sweep (SOLVER_SWEEP): only when nothing else was sent this tick.
+      if (this.solverSweeper && !o.paused) {
+        try {
+          const s = await this.solverSweeper.step(this.now());
+          if (s) {
+            rep.solverSweep = s;
+            if (s.status === "skipped" && !/nothing retained|below/.test(s.reason)) this.o.log(`· [sweep] ${s.solver}: ${s.reason}`);
+          }
+        } catch (e) {
+          rep.errors.push(`sweep: ${errMsg(e)}`);
+        }
+        if (this.guard.pending) {
+          rep.sent = this.guard.pending;
+          rep.pending = true;
+          await this.emit({ type: "sent", pending: this.guard.pending });
+          return rep;
+        }
+      }
       if (o.rebalance === false || !this.cfg.strategies.inventory) return rep;
       try {
         rep.rebalanced = true;

@@ -360,6 +360,15 @@ export async function previewFill(
   return { delta, received, paid };
 }
 
+/**
+ * The order's on-chain REMAINDER in fill-anchor units (lens `remaining`: total − filled,
+ * 0 once filled, cancelled or its fill-once nonce consumed). Read only after a lost race
+ * (guard.ts `RaceProbe`), when the book's `fillableAmount` is known to be stale.
+ */
+export async function remainingOf(c: Chain, lens: Address, order: Order): Promise<bigint> {
+  return (await c.pub.readContract({ address: lens, abi: SETTLEMENT_LENS_ABI, functionName: "remaining", args: [packOrder(order) as never] })) as bigint;
+}
+
 export async function previewBump(
   c: Chain,
   lens: Address,

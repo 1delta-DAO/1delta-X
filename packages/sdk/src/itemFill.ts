@@ -57,12 +57,80 @@ export interface ItemFillCaps {
   /** The Settlement address: a TAKE_FOR whose `recipient` equals it lands where `0x0` does. */
   settlement?: Address;
   /**
+   * The FUSED-COMPOSITE kind of an item's module, when the filler knows it (M-3 / S-4,
+   * review 2026-10-18): a module whose op both CONSUMES the order's delivery (deposits /
+   * repays with it) and FUNDS its input (borrows / withdraws to the settler). Such an
+   * item is a cycle by construction — `executeItemFill` cannot schedule it (early: the
+   * delivery is not there yet; late: the pull already needed its proceeds) — so the
+   * classifier marks it `needsFlash` (flash-required) instead of scheduling it. The
+   * modules cannot be recognised from `(op, data)` alone (op numbers collide across
+   * modules, RiverOpen has no op word), hence an address → kind lookup. `undefined` =
+   * not a known composite module.
+   */
+  compositeKind?: (item: Item) => FusedCompositeKind | undefined;
+  /**
    * A TAKE_FOR item's proceeds token (`IProceedsAsset.proceedsAsset(data)` on its
    * module), or `undefined` when unknown. Unknown proceeds routed to Settlement are
    * ASSUMED to fund an input leg — the cycle case — exactly as
    * `takeFundsInputLeg` assumes for a plain TAKE.
    */
   proceedsAsset?: (item: Item) => Address | undefined;
+}
+
+/**
+ * The module families that host FUSED COMPOSITE item ops (packages/modules/lending):
+ *  • `aave-v3-credit`    — AaveV3CreditModule: TAKE op word 1 (Leverage); every TAKE_FOR (Leverage);
+ *  • `dolomite-operator` — DolomiteOperatorModule: TAKE op word 4 / 5 (BatchOpen / BatchClose); every TAKE_FOR (Open = 6);
+ *  • `euler-v2-operator` — EulerV2OperatorModule: TAKE op (word & 0xff) 2 / 3 (BatchOpen / BatchClose); every TAKE_FOR (Open = 4);
+ *  • `fluid-take-for`    — FluidTakeForModule: every TAKE_FOR (single-purpose open, literal form included);
+ *  • `fluid-operate`     — FluidOperateModule: every TAKE (Mode Open = 0 / Close = 1);
+ *  • `river-open`        — RiverOpenModule: every TAKE;
+ *  • `river-prefund`     — RiverPreFundModule: every TAKE_FOR (Op.Open = 2, pre-funded collateral in,
+ *                          satUSD out — the module refuses any other op on that seam). Its MAKE ops
+ *                          (AddColl 0, Repay 1) are pre-funded sinks, not composites.
+ * Re-checked against the landed sources 2026-10-18 (after the M-1 pre-fund work): Dolomite's
+ * new pre-funded MAKE (Deposit 2 / Repay 3), FluidPreFundModule and EulerV2PreFundModule are
+ * sinks, not composites; Dolomite / Euler / Aave TAKE_FOR still admit only their Open / Leverage op.
+ * Non-composite ops of the same modules (a plain Borrow, Withdraw, Deposit, Repay) are not flagged.
+ */
+export type FusedCompositeKind = "aave-v3-credit" | "dolomite-operator" | "euler-v2-operator" | "fluid-take-for" | "fluid-operate" | "river-open" | "river-prefund";
+
+export const FUSED_COMPOSITE_KINDS: readonly FusedCompositeKind[] = [
+  "aave-v3-credit",
+  "dolomite-operator",
+  "euler-v2-operator",
+  "fluid-take-for",
+  "fluid-operate",
+  "river-open",
+  "river-prefund",
+];
+
+/**
+ * Whether `item`, on a module of `kind`, runs a FUSED COMPOSITE op (see
+ * {@link FusedCompositeKind} for the op table; layouts verified against the module
+ * sources 2026-10-18). A pure decode of `item.op` and word 0 of `item.data`.
+ */
+export function isFusedComposite(item: Item, kind: FusedCompositeKind): boolean {
+  const w = firstWord(item.data);
+  switch (kind) {
+    case "aave-v3-credit":
+      return item.op === ItemOp.TAKE_FOR || (item.op === ItemOp.TAKE && w === 1n);
+    case "dolomite-operator":
+      return item.op === ItemOp.TAKE_FOR || (item.op === ItemOp.TAKE && (w === 4n || w === 5n));
+    case "euler-v2-operator":
+      return item.op === ItemOp.TAKE_FOR || (item.op === ItemOp.TAKE && w !== undefined && w >> 16n === 0n && ((w & 0xffn) === 2n || (w & 0xffn) === 3n));
+    case "fluid-take-for":
+    case "river-prefund":
+      return item.op === ItemOp.TAKE_FOR;
+    case "fluid-operate":
+    case "river-open":
+      return item.op === ItemOp.TAKE;
+  }
+}
+
+/** Whether a classification is the flash-required skip (a cycle no zero-capital schedule fills). */
+export function needsFlashFill(p: ItemFillPath): p is { path: "skip"; reason: string; needsFlash: true } {
+  return p.path === "skip" && p.needsFlash === true;
 }
 
 /** First 32-byte word of an item's `data` (its funding descriptor, when the op reads one). */
@@ -91,7 +159,11 @@ const ZERO = "0x0000000000000000000000000000000000000000";
  *    under `ORDERED` / `ATOMIC` the PULL waits for every non-MAKE item, so a
  *    leg-reference TAKE_FOR (it consumes the delivery) is a cycle (`needsFlash`), and so
  *    is a non-MAKE item signed after a MAKE (a borrow-to-wallet behind a deposit);
- *    `ATOMIC` additionally needs every item on one side of the route.
+ *    `ATOMIC` additionally needs every item on one side of the route;
+ *  • a FUSED COMPOSITE (`caps.compositeKind`, {@link isFusedComposite}): one item that
+ *    both consumes the delivery and funds the pull — flash-required (`needsFlash`), on
+ *    any Settlement, whatever its policy (checked before the capability refusals: the
+ *    answer is "a flash", not "a newer Settlement").
  */
 export function classifyItemFill(order: Order, caps: ItemFillCaps): ItemFillPath {
   if (order.items.length === 0) return { path: "executeFill" };
@@ -105,6 +177,20 @@ export function classifyItemFill(order: Order, caps: ItemFillCaps): ItemFillPath
     path: "skip",
     reason: `${what}: this Settlement's matchSettle refuses it (needs the task-31 Settlement — nettedDeliveryFundedItems)`,
   });
+  // Fused composites first: a cycle by construction, whatever else the order carries.
+  if (caps.compositeKind) {
+    for (let k = 0; k < order.items.length; k++) {
+      const it = order.items[k]!;
+      const kind = caps.compositeKind(it);
+      if (kind !== undefined && isFusedComposite(it, kind)) {
+        return {
+          path: "skip",
+          reason: `item ${k}: fused composite (${kind}) — one item both consumes the delivery and funds the pull, a cycle; flash-required`,
+          needsFlash: true,
+        };
+      }
+    }
+  }
   const roles: ItemRole[] = [];
   let lateItems = 0n;
   for (let k = 0; k < order.items.length; k++) {

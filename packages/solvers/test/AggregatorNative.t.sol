@@ -18,7 +18,7 @@ import {NativeBalance} from "@periphery/NativeBalance.sol";
 
 import {MockRouter} from "./AggregatorFillSolver.t.sol";
 import {AggregatorPoolRouteTest, MockV3Pool} from "./AggregatorPoolRoute.t.sol";
-import {newAggNative} from "./shared/AggDeploy.sol";
+import {newAggNative, noGuard} from "./shared/AggDeploy.sol";
 
 /// @dev WETH9-shaped wrapped native: `withdraw` pays with `transfer` (2,300 gas stipend),
 ///      exactly like WETH9 / Rootstock's WRBTC, so the solver's `receive()` is held to
@@ -269,7 +269,11 @@ contract AggregatorNativeTest is AggregatorPoolRouteTest {
         ns.executeFill(o, sig, AMOUNT_IN, p, "", _np());
     }
 
-    /// WNATIVE or NativeBalance named by another leg is refused.
+    /// A second NativeBalance leg is refused. WNATIVE next to the native leg is ADMITTED
+    /// since 2026-10-18 (review S-7, `test/AggregatorZeroCapitalFills.t.sol`): a WNATIVE
+    /// fee leg to a third party must be paid by the route itself — this route pays only
+    /// the solver, so the core's delta check fails it, closed (`DeltaTooLow`), instead of
+    /// the solver refusing the shape up front.
     function test_native_conflictingLegsRefused() public {
         LegOut[] memory lo = new LegOut[](2);
         lo[0] = LegOut(address(nb), AMOUNT_OUT, 0, address(0));
@@ -278,7 +282,7 @@ contract AggregatorNativeTest is AggregatorPoolRouteTest {
         o.legsOut = PackedEncode.legsOut(lo);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _wnPlan(ns, 0);
-        vm.expectRevert(AggregatorFillSolver.NativeLegShape.selector);
+        vm.expectRevert(Base.DeltaTooLow.selector);
         ns.executeFill(o, sig, AMOUNT_IN, p, "", _np());
 
         lo[1] = LegOut(address(nb), 1e18, 0, address(0xFEE));
@@ -289,7 +293,7 @@ contract AggregatorNativeTest is AggregatorPoolRouteTest {
         ns.executeFill(o, sig, AMOUNT_IN, p, "", _np());
 
         o = _nativeOrder(13, address(0), ns);
-        o.legsIn = _legsIn1(address(wn), AMOUNT_IN);
+        o.legsIn = _legsIn1(address(nb), AMOUNT_IN); // the view token as an INPUT
         sig = _sign(o);
         vm.expectRevert(AggregatorFillSolver.NativeLegShape.selector);
         ns.executeFill(o, sig, AMOUNT_IN, p, "", _np());
@@ -351,7 +355,7 @@ contract AggregatorNativeTest is AggregatorPoolRouteTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _wnPlan(ns, 0);
         vm.expectRevert(AggregatorFillSolver.DirectNotMatchable.selector);
-        ns.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        ns.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
     }
 
     /// A recipient whose `receive()` reverts kills the fill (NativeUnwrapModule's posture).

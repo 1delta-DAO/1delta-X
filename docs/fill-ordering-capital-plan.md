@@ -291,7 +291,10 @@ are left. `AggregatorFillSolver` 20,779 → 22,777 (after `sweepAll` and the 202
 **Not done / remaining:**
 
 - deploy `NativeBalance` + solver v3 (task 30);
-- the next Settlement version (task 31);
+- the next Settlement version (task 31), together with a new `NativeUnwrapModule` (v2:
+  capped send + WETH fallback, so one payee cannot kill or starve a netted plan;
+  native-rbtc-delivery-plan §8). `SETTLEMENT` is immutable, so the module is redeployed
+  anyway;
 - the filler's solver address is still a single value, so v2→v3 migration is open;
 - SETTLE receipts in a foreign token are retained on the solver, not routed;
 - pool routes are single-output.

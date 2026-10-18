@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 
 import {BridgeOutBase} from "./BridgeOutBase.sol";
 import {IAcrossSpokePool} from "../vendor/IAcross.sol";
@@ -37,7 +38,14 @@ import {IAcrossSpokePool} from "../vendor/IAcross.sol";
 ///  while a negative `dstScalingFactor` floors each slice separately. Either
 ///  leaves the destination row below its anchor for good. So when `dstOrderHash`
 ///  is set, `totalAmount` (the item's full signed amount) is mandatory and the
-///  slice must equal it. A funnel deposit may opt in the same way.
+///  slice must equal it (on the PRE-FUNDED form: at least it — the slice is the
+///  leg's delivery there, see {BridgeOutBase._fullFillGate}). A funnel deposit may
+///  opt in the same way.
+///
+///  Funding: PULL (`data = abi.encode(AcrossSpec)`, the maker grants this module a
+///  Permit3 allowance for `inputToken`) or PRE-FUNDED (`data =
+///  abi.encode(forLegPreFund(j, inputToken), AcrossSpec)`, `legsOut[j]` addressed to
+///  this module, `item.amount` unread, no maker grant) — see {BridgeOutBase}.
 ///
 ///  ⚠ WRAPPED NATIVE TO A COUNTERFACTUAL FUNNEL ARRIVES AS ETH (audit 2026-09-30
 ///  BRIDGE-B-5). The Across SpokePool unwraps `outputToken == wrappedNativeToken`
@@ -85,9 +93,10 @@ contract AcrossBridgeOutModule is BridgeOutBase {
     /// @param commitmentExpiry  Unix time after which the inbox may refund even if
     ///                          no order ever activated.
     /// @param totalAmount       The item's FULL maker-signed amount. Mandatory (and
-    ///                          the slice must equal it) when `dstOrderHash` is
-    ///                          set; optional for a funnel deposit, where zero
-    ///                          allows partial slices. See the contract note.
+    ///                          the slice must equal it — PRE-FUNDED: be at least
+    ///                          it) when `dstOrderHash` is set; optional for a
+    ///                          funnel deposit, where zero allows partial slices.
+    ///                          See the contract note.
     struct AcrossSpec {
         address inputToken;
         address outputToken;
@@ -109,15 +118,26 @@ contract AcrossBridgeOutModule is BridgeOutBase {
     }
 
     /// @inheritdoc IMakerModule
+    /// @dev PULL: `data = abi.encode(AcrossSpec)`, `amount` = the pro-rated item slice.
+    ///      PRE-FUNDED: `data = abi.encode(forLegPreFund(j, inputToken), AcrossSpec)`,
+    ///      `amount` = what the core's delivery ledger recorded for `legsOut[j]`
+    ///      (addressed to this module). See {BridgeOutBase}.
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override onlySettlement {
-        AcrossSpec memory s = abi.decode(data, (AcrossSpec));
+        bool preFund = _isPreFund(data);
+        AcrossSpec memory s;
+        if (preFund) {
+            // The descriptor half of {PreFundModuleBase._gatePreFundMake}; the caller
+            // half is `onlySettlement`. Restated although `_isPreFund` just answered
+            // it, so the pin sits on this entrypoint where the shapes checker reads it.
+            PreFundGuard.requireLegRef(data);
+            (, s) = abi.decode(data, (uint256, AcrossSpec));
+        } else {
+            s = abi.decode(data, (AcrossSpec));
+        }
         _checkDestination(s.dstRecipient, s.dstChainId);
-        _fullFillGate(amount, s.totalAmount, s.dstOrderHash != bytes32(0));
+        _fullFillGate(amount, s.totalAmount, s.dstOrderHash != bytes32(0), preFund);
 
-        // Snapshot before the pull — see {_sweep}: the sweep must return only what
-        // THIS fill brought in, never a balance that was already resident.
-        uint256 floor = _floorOf(s.inputToken);
-        _pull(onBehalfOf, s.inputToken, amount);
+        uint256 floor = _fundIn(onBehalfOf, s.inputToken, amount, data, preFund);
         SafeTransferLib.forceApprove(s.inputToken, address(SPOKE_POOL), amount);
         _deposit(s, onBehalfOf, amount);
         SafeTransferLib.forceApprove(s.inputToken, address(SPOKE_POOL), 0);

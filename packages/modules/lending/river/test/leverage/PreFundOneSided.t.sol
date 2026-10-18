@@ -196,6 +196,61 @@ contract RiverPreFundOneSidedTest is CoreSettlementBase {
         assertEq(IERC20(BTCB).balanceOf(solver), btcbIn, "solver received the input leg");
     }
 
+    // ── PRE-FUNDED OPEN (op 2, TAKE_FOR) — River's side leg delivered by the fill.
+    //    The solver delivers BTCB straight to the module; the module opens the
+    //    maker's trove with exactly that collateral and settles the minted satUSD
+    //    to the pool. Against the {RiverOpenModule} twin (Leverage.t.sol) the maker
+    //    drops BOTH Permit3 token allowances to the module (BTCB and satUSD):
+    //    the grants left are the taker allowance and the diamond's delegate bit. ──
+    function test_preFundOpen_deliveredCollateral_zeroReceiveSideTokenApprovals() public {
+        uint256 side = 2 ether;
+        uint256 debt = 2000e18;
+        deal(BTCB, solver, side);
+        _approveSolverSide(side, BTCB);
+
+        bytes memory data = abi.encode(
+            RiverPreFundModule.OpenData({
+                forDesc: _forLegOp(0, BTCB, RiverPreFundModule.Op.Open),
+                xapp: XAPP,
+                tm: TM,
+                collateralToken: BTCB,
+                debtToken: SAT_USD,
+                maxFeePercentage: MAX_FEE,
+                upperHint: address(0),
+                lowerHint: address(0),
+                totalAmount: debt
+            })
+        );
+        vm.startPrank(maker);
+        permit3.approveTaker(address(settlement), address(preFund), keccak256(data), uint160(debt), 0);
+        IRiverXApp(XAPP).setDelegateApproval(address(preFund), true);
+        vm.stopPrank();
+        (uint160 amt,) = permit3.tokenAllowance(maker, address(preFund), BTCB);
+        assertEq(amt, 0, "no BTCB book entry to the module");
+        (amt,) = permit3.tokenAllowance(maker, address(preFund), SAT_USD);
+        assertEq(amt, 0, "no satUSD book entry to the module");
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item(ItemOp.TAKE_FOR, address(preFund), debt, address(0), data);
+        Order memory o = _order(maker, 602, SAT_USD, BTCB, debt, side, items);
+        _routeLegOut(o, BTCB, side, 0, address(preFund));
+        o.minFillAnchor = debt; // a trove opens once ⇒ full-fill only
+        bytes memory sig = _sign(o);
+
+        assertEq(IRiverTroveManager(TM).getTroveStatus(maker), 0, "no trove yet");
+        vm.prank(solver);
+        settlement.fill(o, sig, debt);
+
+        assertEq(IRiverTroveManager(TM).getTroveStatus(maker), 1, "trove active");
+        (uint256 debtNow, uint256 collNow) = _troveState();
+        assertEq(collNow, side, "trove holds exactly the delivered collateral");
+        assertGe(debtNow, debt, "debt >= minted amount (plus fee)");
+        assertEq(IERC20(SAT_USD).balanceOf(solver), debt, "solver paid out of the mint");
+        assertEq(IERC20(BTCB).balanceOf(address(preFund)), 0, "module drained of BTCB");
+        assertEq(IERC20(SAT_USD).balanceOf(address(preFund)), 0, "module drained of satUSD");
+        assertEq(IERC20(BTCB).balanceOf(maker), 0, "the maker's wallet never saw the BTCB");
+    }
+
     // ── Delegation is (still) the wall: the diamond gates value-in too. ──
     function test_preFundAddColl_withoutDelegate_reverts() public {
         uint256 satIn = 500e18;

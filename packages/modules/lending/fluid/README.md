@@ -94,7 +94,7 @@ out of scope and fails closed.
 
 ## Modules (`src/`)
 
-All in [`FluidModules.sol`](src/FluidModules.sol); minimal protocol surface in
+All in [`FluidModules.sol`](src/FluidModules.sol) except the pre-funded maker, which lives in [`FluidPreFundModules.sol`](src/FluidPreFundModules.sol); minimal protocol surface in
 [`interfaces/IFluid.sol`](src/interfaces/IFluid.sol).
 
 | Contract | Op | Fluid action | Notes |
@@ -105,7 +105,9 @@ All in [`FluidModules.sol`](src/FluidModules.sol); minimal protocol surface in
 | `FluidOperateModule` | TAKE | fused **Open** (supply `sideAmount` + borrow) / **Close** (repay `sideAmount` + withdraw) in one `operate` | `sideAmount` in `data` doesn't pro-rate ⇒ **full-fill only** (`FullFillGuard`); Close supports repay-all via `FLUID_ALL` + `repayCeiling` over-pull + residual sweep |
 | `FluidTakeForModule` | TAKE_FOR | fused open where the collateral is the core-sized `forAmount` | **partial fills work** on an existing position (one `operate` per slice); `nftId == 0` stays full-fill only — a fresh mint is position *identity*, N slices would mint N positions |
 
-Constructors: `FluidDepositModule` / `FluidRepayModule(permit3, settlement)`;
+| `FluidPreFundModule` (`FluidPreFundModules.sol`) | MAKE (pre-funded) | supply / pay back the core-delivered leg from the module's own balance: op `Deposit` `operate(nftId, +forAmount, 0)`, `Repay` `operate(nftId, 0, −forAmount)` (exact), `RepayAll` `operate(nftId, 0, type(int256).min)` (live-debt clamp, the delivery is the ceiling, remainder swept to the maker) | `data = abi.encode(forDesc, vault, token, nftId)`, op in descriptor bits [244,252); **zero receive-side grants** and no NFT grant (value-in is permissionless); `nftId` must be the maker's existing position; `token` must be the vault's supply (Deposit) / borrow (Repay, RepayAll) token (`WrongVaultToken`) |
+
+Constructors: `FluidDepositModule` / `FluidRepayModule` / `FluidPreFundModule(permit3, settlement)`;
 `FluidTakerModule` / `FluidOperateModule(permit3, vaultFactory, wrappedNative)`;
 `FluidTakeForModule(permit3, settlement, vaultFactory, wrappedNative)`.
 
@@ -114,6 +116,50 @@ Residual handling is delta-based (`_returnUnused`): a module returns what it
 caller-chosen address — and the vault allowance is zeroed **unconditionally**
 (a fee-on-transfer token can leave the balance at its floor with part of the
 approval unspent).
+
+## Zero-capital position shapes (`matchSettle`)
+
+A netted fill needs no filler capital when its items form no cycle: **sources**
+(TAKE — they credit the order's input legs) run early, **sinks** (pre-funded MAKE —
+they spend the order's own delivery) run late. Before `FluidPreFundModule`, every
+Fluid sink was a PULL from the maker's wallet, so a zero-capital fill needed a
+Permit3 allowance to the module for a token the maker never held, and the only
+wallet-free full close was the fused `FluidOperateModule` Close — one item that
+both consumes the delivery and funds the input, i.e. a cycle by construction
+(review 2026-10-18 M-1 / M-3). Now:
+
+| Shape | Early (source) | Late (sink) | Needs |
+|---|---|---|---|
+| lever up an existing position | `FluidTakerModule` Borrow | `FluidPreFundModule` Deposit | LTV headroom on the existing collateral |
+| partial deleverage | `FluidTakerModule` Withdraw | `FluidPreFundModule` Repay (exact) | delivery ≤ live debt; headroom for the withdraw |
+| **full close (debt → 0)** | `FluidTakerModule` Withdraw | `FluidPreFundModule` **RepayAll** | headroom for the withdraw; delivery ≥ live debt (sign with headroom — accrued interest is absorbed, the rest is swept back) |
+
+The remaining collateral stays in the now debt-free position (a later Withdraw, or
+the fused Close, takes it out). What stays a **true cycle** — and with the flash
+family or the fused modules — is a close at the LTV edge (no withdrawal is possible
+before the repay; Fluid reverts `Vault__PositionAboveCF`) and a fresh open
+(`nftId == 0` has no collateral to borrow against). Both acyclic directions are
+pinned on the live vault through the real `matchSettle`
+([`integration/FluidPreFund`](test/integration/FluidPreFund.t.sol)), and the
+shared-singleton interleaving on a mock vault
+([`unit/NettedPreFund`](test/unit/NettedPreFund.t.sol)).
+
+RepayAll specifics, all fork-pinned:
+
+- The scoped `forAmount` approval is the ceiling: a live debt above the delivery
+  fails closed in the vault's pull, so it can never draw another order's delivery
+  parked on the singleton between its DELIVER and its ITEM.
+- **One-shot.** On a zero debt Fluid's sentinel resolves to a 1-wei rounding
+  payback that the Liquidity layer rejects (`UserModule__OperateAmountInsufficient`)
+  — sign a RepayAll order full-fill.
+- Fluid rejects any literal |amount| below 10,000 wei (`Vault__InvalidOperateAmount`),
+  so a dust Deposit / Repay slice reverts rather than skipping. RepayAll is not
+  affected.
+
+The pre-fund module never touches a position NFT, so it needs no
+`setApprovalForAll` and no custody root: `vault` is maker-signed (it only ever
+spends its own maker's delivery, under a scoped and cleared approval), unlike the
+custody modules, which pin the VaultFactory.
 
 ## Smart vaults T2 / T3 / T4 — design (NOT yet implemented)
 
@@ -257,4 +303,6 @@ forge test --match-path 'packages/modules/lending/fluid/**'
 | [`leverage/Leverage`](test/leverage/Leverage.t.sol) | fused deposit+borrow open through a full settlement fill, incl. the partial-fill rejection |
 | [`leverage/TakeForOpen`](test/leverage/TakeForOpen.t.sol) | TAKE_FOR open: partial fills slice an existing position (one `operate` per slice), fresh-open stays full-fill only, balance-funded no-conversion shape |
 | [`security/TakerModuleAuth`](test/security/TakerModuleAuth.t.sol) | `OnlyPermit3` on every taker module — load-bearing under the factory-wide `setApprovalForAll` |
+| [`integration/FluidPreFund`](test/integration/FluidPreFund.t.sol) | `FluidPreFundModule` on the live wstETH-USDC vault: deposit / exact repay / RepayAll clamp (remainder swept, ceiling fails closed, one-shot), the bindings; acyclic open and acyclic **full close** through the real `matchSettle` at zero capital, and the LTV-edge close that is a cycle |
+| [`unit/NettedPreFund`](test/unit/NettedPreFund.t.sol) | the netted path on a mock vault: two makers' deliveries interleaved on one singleton with residue (each sweeps only its own surplus), item-before-delivery fails closed, a hostile RepayAll cannot reach a parked delivery, the acyclic open / deleverage / full close, the module's door |
 | [`security/FreshPosition`](test/security/FreshPosition.t.sol) | `nftId == 0` rejection on single-op modules; guard ordering; the stranding it prevents |

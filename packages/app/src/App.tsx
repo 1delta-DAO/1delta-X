@@ -34,7 +34,7 @@ import { orderPhase, phaseLine, type PhaseLine } from "./lib/orderLifecycle";
 import { IDLE, inFlight, runTx, txReducer } from "./lib/txFlow";
 import { fmtWei, fundingButtonLabel, fundingButtonParts, hasLeftover, planFunding, planGasless, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
 import { detectPermitDomain, gaslessDomain, signGaslessPermit } from "./lib/permit";
-import { buildOrder, inputWei } from "./lib/order";
+import { buildOrder, inputWei, ticketDelivery } from "./lib/order";
 import { exceedsBalance, marketFigures, maxSpendableWei, sourceName, wrappableWei, wrapSpendableWei } from "./lib/ticketView";
 import {
   defaultSlippageBps,
@@ -185,11 +185,16 @@ export default function App() {
   const nativeOutActive = nativeOutAvailable && !!nativeOutShape && nativeOutChosen && ticket.recvToken === wrappedSymbol;
   // Who may fill this market's orders, as they will be signed (shown on the form).
   const marketDelivery = useMemo(() => {
-    // The module shape is pull with no window; the NativeBalance shape is the market's DIRECT one.
-    if (nativeOutActive && !nativeOutDirect) return { direct: false, windowSeconds: 0, overrideBps: 0 };
-    const solver = solverForMarket(deployment, ticket.marketId);
-    const win = exclusivityForMarket(deployment, ticket.marketId);
-    return { direct: !!solver && solver !== zeroAddress, windowSeconds: win?.seconds ?? 0, overrideBps: win?.overrideBps ?? 0 };
+    // An item-bearing ticket (the module shape) is pull — with no window for the module
+    // shape; the NativeBalance shape is the market's DIRECT one (lib/order `ticketDelivery`, C-3).
+    const nativeModule = nativeOutActive && !nativeOutDirect;
+    const d = ticketDelivery({
+      solver: solverForMarket(deployment, ticket.marketId),
+      exclusivity: exclusivityForMarket(deployment, ticket.marketId),
+      itemBearing: nativeModule,
+      nativeModule,
+    });
+    return { direct: d.solver !== zeroAddress, windowSeconds: d.exclusivity?.seconds ?? 0, overrideBps: d.exclusivity?.overrideBps ?? 0 };
   }, [deployment, ticket.marketId, nativeOutActive, nativeOutDirect]);
   const fills = useFills();
   // FILL TRACKING: a fill of one of this wallet's orders moves its balances — the RAW
@@ -608,16 +613,25 @@ export default function App() {
       });
       const raw = balanceWei(paySymbol);
 
+      // Any item-bearing ticket (today: the NativeUnwrapModule shape) signs PULL with no
+      // solver (C-3: DIRECT + items has no zero-capital fill); the NativeBalance shape keeps
+      // the market's DIRECT solver — the one that unwraps and sends the coin. Pull markets:
+      // the solver's ~2-block soft window, then open to all (B13); a native ticket signs none.
+      const nativeModule = !!spec.nativeOut && "module" in spec.nativeOut;
+      const delivery = ticketDelivery({
+        solver: solverForMarket(deployment, spec.marketId),
+        exclusivity: spec.nativeOut ? undefined : exclusivityForMarket(deployment, spec.marketId),
+        itemBearing: nativeModule,
+        nativeModule,
+        ...(spec.pull ? { pull: true } : {}),
+      });
       const draft = buildOrder({
         maker: wallet.address,
         side: spec.side,
         pay,
         recv,
-        // The module shape is pull (no solver, no window); the NativeBalance shape keeps the
-        // market's DIRECT solver — the one that unwraps and sends the coin.
-        solver: spec.pull || (spec.nativeOut && "module" in spec.nativeOut) ? zeroAddress : solverForMarket(deployment, spec.marketId),
-        // Pull markets: the solver's ~2-block soft window, then open to all (B13).
-        exclusivity: spec.pull || spec.nativeOut ? undefined : exclusivityForMarket(deployment, spec.marketId),
+        solver: delivery.solver,
+        exclusivity: delivery.exclusivity,
         ...(spec.nativeOut ? { nativeOut: spec.nativeOut } : {}),
         amountIn: spec.amountIn,
         targetOut: spec.targetOut,

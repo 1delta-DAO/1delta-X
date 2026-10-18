@@ -7,7 +7,10 @@ import {
   NO_PATCH,
   OrderSide,
   POOL_ROUTE,
+  FUSED_COMPOSITE_KINDS,
   classifyItemFill,
+  isFusedComposite,
+  needsFlashFill,
   encodeAggregatorExecuteItemFill,
   encodePoolRoute,
   forBalance,
@@ -16,6 +19,7 @@ import {
   forTotal,
   withDeltaVerifyOutputs,
   withItemPolicy,
+  type FusedCompositeKind,
   type Item,
   type ItemFillCaps,
   type Order,
@@ -148,6 +152,54 @@ describe("classifyItemFill", () => {
     expect(at(ItemPolicy.ATOMIC, [TAKE(), MAKE_PULL()])).toMatchObject({ path: "skip" });
     // ANY: anything acyclic.
     expect(at(ItemPolicy.ANY, [MAKE_PULL(), TAKE()])).toMatchObject({ path: "executeItemFill", lateItems: 1n });
+  });
+
+  it("M-3: every fused composite (one item consumes the DELIVER and funds the PULL) → flash-required", () => {
+    const COMP = A("0x00000000000000000000000000000000000000c0");
+    const comp = (kind: FusedCompositeKind): ItemFillCaps["compositeKind"] => (it) => (it.module === COMP ? kind : undefined);
+    const on = (over: Partial<Item>) => ({ module: COMP, ...over });
+    // [kind, composite items, non-composite items of the same module]
+    const table: Array<[FusedCompositeKind, Item[], Item[]]> = [
+      ["aave-v3-credit", [item(ItemOp.TAKE, word(1n), on({})), item(ItemOp.TAKE_FOR, word(forLeg(0, 4)), on({}))], [item(ItemOp.TAKE, word(0n), on({}))]],
+      [
+        "dolomite-operator",
+        [item(ItemOp.TAKE, word(4n), on({})), item(ItemOp.TAKE, word(5n), on({})), item(ItemOp.TAKE_FOR, word(forLeg(0, 4)), on({}))],
+        [item(ItemOp.TAKE, word(0n), on({})), item(ItemOp.TAKE, word(1n), on({})), item(ItemOp.MAKE, word(2n), on({}))],
+      ],
+      [
+        "euler-v2-operator",
+        [item(ItemOp.TAKE, word(2n), on({})), item(ItemOp.TAKE, word(3n | (7n << 8n)), on({})), item(ItemOp.TAKE_FOR, word(forLeg(0, 4)), on({}))],
+        [item(ItemOp.TAKE, word(0n), on({})), item(ItemOp.TAKE, word(1n), on({}))],
+      ],
+      ["fluid-take-for", [item(ItemOp.TAKE_FOR, word(forLeg(0, 4)), on({})), item(ItemOp.TAKE_FOR, word(forTotal(5n)), on({}))], []],
+      ["fluid-operate", [item(ItemOp.TAKE, word(0n), on({})), item(ItemOp.TAKE, word(1n), on({}))], []],
+      ["river-open", [item(ItemOp.TAKE, word(BigInt(MOD2)), on({}))], []],
+      // RiverPreFundModule: Open (2) is its only TAKE_FOR op; AddColl / Repay are pre-funded MAKE sinks.
+      ["river-prefund", [item(ItemOp.TAKE_FOR, word(forLegPreFund(0, WETH, 2)), on({}))], [item(ItemOp.MAKE, word(forLegPreFund(0, WETH, 0)), on({ amount: 0n })), item(ItemOp.MAKE, word(forLegPreFund(0, WETH, 1)), on({ amount: 0n }))]],
+    ];
+    expect(table.map((r) => r[0]).sort()).toEqual([...FUSED_COMPOSITE_KINDS].sort());
+    for (const [kind, composites, plain] of table) {
+      for (const it0 of composites) {
+        expect(isFusedComposite(it0, kind)).toBe(true);
+        // On BOTH Settlements and whatever the policy (a flash, not a newer core, is the answer) —
+        // and also when a harmless sink follows it.
+        for (const caps of [LIVE, NEXT]) {
+          for (const timing of [0n, withItemPolicy(0n, ItemPolicy.ORDERED)]) {
+            const v = classifyItemFill(order([it0, MAKE_PULL()], { timing }), { ...caps, compositeKind: comp(kind) });
+            expect(v).toMatchObject({ path: "skip", needsFlash: true });
+            expect(needsFlashFill(v)).toBe(true);
+            expect(v.path === "skip" && v.reason).toMatch(/fused composite/);
+          }
+        }
+      }
+      for (const it0 of plain) {
+        expect(isFusedComposite(it0, kind)).toBe(false);
+        expect(needsFlashFill(classifyItemFill(order([it0]), { ...NEXT, compositeKind: comp(kind) }))).toBe(false);
+      }
+    }
+    // Without the lookup the same plain-TAKE composite looks like a source (the gap this closes).
+    expect(classifyItemFill(order([item(ItemOp.TAKE, word(0n), on({}))]), LIVE)).toMatchObject({ path: "executeItemFill", lateItems: 0n });
+    expect(needsFlashFill({ path: "skip", reason: "x" })).toBe(false);
   });
 
   it("an unknown op, or a TAKE_FOR without a descriptor → skip", () => {

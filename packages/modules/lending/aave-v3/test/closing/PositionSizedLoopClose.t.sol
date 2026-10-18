@@ -69,7 +69,7 @@ contract PositionSizedLoopCloseTest is AaveModulesBase {
         wethDebtToken = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][WETH].debt;
 
         fillModule = new PositionFillModule();
-        unwrapModule = new NativeUnwrapModule(WETH, address(settlement));
+        unwrapModule = new NativeUnwrapModule(WETH, address(settlement), 100_000);
 
         vm.label(WSTETH, "wstETH");
         vm.label(aWSTETH, "aWstETH");

@@ -26,6 +26,21 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 ///         WHOEVER fills an auction-discovered amount. An outputless
 ///         integrator order typically carries both.
 ///
+///  Why there is NO pre-funded form (review 2026-10-18 M-5)
+///  ──────────────────────────────────────────────────────
+///  A pre-funded MAKE spends a delivery the core made to the module on an OUTPUT
+///  leg. Any such leg can be addressed to the fee recipient directly instead —
+///  `LegOut.recipient = feeRecipient`, a fixed leg (`end == 0`) for an absolute
+///  amount, sliced per fill exactly like this item — and the core then delivers
+///  the fee with no module, no maker approval and one transfer fewer. So wherever
+///  a pre-funded form could fund this item, a fee output leg already replaces the
+///  item outright. Where this module IS the right tool — an outputless order —
+///  there is no delivery to pre-fund from: the fee is the maker's own token from
+///  their own wallet, the approval covers a token the maker already holds and
+///  pays with, and no filler capital is involved at any point. (Proceeds of an
+///  earlier TAKE item land in the wallet, not in the delivery ledger, so a
+///  pre-fund descriptor could not reference them either.) Pull-only by design.
+///
 ///  Trust model: `msg.sender == SETTLEMENT` makes
 ///  the maker's order signature the sole authority over `(token, recipient,
 ///  amount)`, and the maker's Permit3 allowance to THIS module caps what it can

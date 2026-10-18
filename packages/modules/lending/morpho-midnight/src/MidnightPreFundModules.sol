@@ -7,7 +7,8 @@ import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 
-import {IMidnight, Market, MidnightIdLib} from "./interfaces/IMidnight.sol";
+import {IMidnight, Market, Offer, MidnightIdLib} from "./interfaces/IMidnight.sol";
+import {MidnightBlob} from "./MidnightModules.sol";
 
 // ──────────────── Morpho Midnight PRE-FUNDED one-sided modules ────────────────
 //
@@ -30,22 +31,37 @@ import {IMidnight, Market, MidnightIdLib} from "./interfaces/IMidnight.sol";
 // PERMISSIONLESS (audit 2026-09-30 L-ML-1); that was true of the old test mock,
 // never of the venue.
 //
-//  WHICH Midnight ops fit the pre-fund shape — and which don't
-//  ───────────────────────────────────────────────────────
-//  Midnight is an order-book venue, so its three value-in ops split:
+//  WHICH Midnight ops fit the pre-fund shape — all three value-in ops
+//  ──────────────────────────────────────────────────────────────────
+//  Midnight is an order-book venue, so its three value-in ops split in HOW they
+//  are sized, not in whether they fit:
 //    • `supplyCollateral` and `repay` consume EXACTLY the amount the caller
 //      instructs, pulled from `msg.sender` (callback forced to 0), crediting
 //      `onBehalf` — the same contract shape as Aave's `supply`/`repay`, so the
-//      pre-fund seam fits verbatim. These two are implemented below.
-//    • The LEND leg (`take` on an `offer.buy == false` offer) does NOT fit and
-//      is deliberately absent: `take` consumes `buyerAssets` — a figure fixed by
-//      the signed offer's `units` and tick economics, NOT sized by the delivery
-//      — so "fund the op with whatever was delivered" cannot hold; the leg is
-//      full-fill-only (its `units` cannot pro-rate, {MidnightLendModule}'s
-//      guard) which forfeits the pacing the descriptor exists to provide; and
-//      it is not delivery-sized anyway. Lend stays a pull-funded MAKE
-//      ({MidnightLendModule}).
+//      pre-fund seam fits verbatim (ops 0 and 1).
+//    • The LEND leg (`take` on an `offer.buy == false` offer, op 2) is priced in
+//      UNITS: `take(units)` charges `buyerAssets(units)`, a figure set by the
+//      offer's tick, not by the caller. This used to be the reason it was absent
+//      ("not delivery-sized"; the pull {MidnightLendModule} signs an absolute
+//      `units` and is therefore full-fill only). It IS expressible once the
+//      maker signs a RATE instead of a count: `units = forAmount ·
+//      unitsPerAssetE18 / 1e18` — credit units bought per delivered loan-token
+//      wei, the maker's limit price. The fill then follows the delivery (auction
+//      decay and partial fills included: the units pro-rate with `forAmount`),
+//      and the price bound is enforced by the SCOPED approval: Midnight pulls
+//      `buyerAssets` from this module through an allowance of exactly
+//      `forAmount`, so an offer priced worse than the signed rate cannot be paid
+//      for and reverts (fail closed) — it can never draw on another order's
+//      delivery parked here. A cheaper offer leaves `forAmount − buyerAssets`,
+//      swept back to the maker against the pre-delivery floor (review 2026-10-18
+//      M-5).
 //
+//  Byte map for Op.Lend, the one DYNAMIC-SECOND blob here:
+//    abi.encode(forDesc, Offer offer, bytes ratifierData, uint256 unitsPerAssetE18)
+//    — forDesc@0 (op 2), offer offset@32 (MUST be 0x80: {MidnightBlob.requireHead}
+//      pins the 4-word head, so a blob built for a shorter layout cannot alias
+//      `unitsPerAssetE18` onto a tail word), ratifierData offset@64, rate@96.
+
 //  Why these ride the MAKE seam
 //  ────────────────────────────
 //  These ops move NOTHING out of the position — they supply or retire whatever the
@@ -97,10 +113,14 @@ import {IMidnight, Market, MidnightIdLib} from "./interfaces/IMidnight.sol";
 //                          collateralIndex@64, then the encoded Market.
 //   Op.Repay:            abi.encode(forDesc, Market market)
 //                        — forDesc@0 (op 1 in bits [244,252)), market offset@32.
+//   Op.Lend:             abi.encode(forDesc, Offer offer, bytes ratifierData, uint256 unitsPerAssetE18)
+//                        — forDesc@0 (op 2), offer offset@32 (= 0x80), ratifierData
+//                          offset@64, unitsPerAssetE18@96. See the header.
 contract MidnightPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     enum Op {
         SupplyCollateral,
-        Repay
+        Repay,
+        Lend
     }
 
 
@@ -109,6 +129,9 @@ contract MidnightPreFundModule is PreFundModuleBase, IMakerModule, IFundingSourc
 
     /// @dev The descriptor named an op this module does not implement.
     error BadOp(uint256 op);
+    /// @dev A Lend blob carried a `buy == true` offer — that would make the maker
+    ///      the SELLER (a borrow), the inverse of the signed op.
+    error WrongOfferSide();
 
 
     constructor(address _permit3, address _settlement, address _midnight)
@@ -131,6 +154,8 @@ contract MidnightPreFundModule is PreFundModuleBase, IMakerModule, IFundingSourc
         } else if (op == uint256(Op.Repay)) {
         // Its own frame — see the supply sibling.
         _repayAndSweep(onBehalfOf, forAmount, data);
+        } else if (op == uint256(Op.Lend)) {
+        _lend(onBehalfOf, forAmount, data);
         } else {
             revert BadOp(op);
         }
@@ -194,6 +219,38 @@ contract MidnightPreFundModule is PreFundModuleBase, IMakerModule, IFundingSourc
     }
 
 
+    /// @dev Op 2: buy credit units for the maker, sized from the delivery by the
+    ///      signed rate, paid out of this fill's delivery only.
+    function _lend(address onBehalfOf, uint256 forAmount, bytes calldata data) private {
+        // 4 head words: (forDesc, Offer, bytes, rate) — see the byte map.
+        MidnightBlob.requireHead(data, 32, 0x80);
+        (, Offer memory offer, bytes memory ratifierData, uint256 unitsPerAsset) =
+            abi.decode(data, (uint256, Offer, bytes, uint256));
+        // The maker must be the BUYER (lender): `buy == false`. Nothing downstream
+        // re-derives the side, so an inverted offer would book debt instead of
+        // credit — the {MidnightLendModule} assertion, verbatim.
+        if (offer.buy) revert WrongOfferSide();
+        address loanToken = offer.market.loanToken;
+        // The delivery must have landed HERE, in the offer's loan token; the floor
+        // also bounds the sweep below to this fill's own delivery.
+        uint256 floor = PreFundGuard.floorOf(data, loanToken, forAmount);
+        // Checked math: an overflowing maker-signed rate reverts the fill.
+        uint256 units = forAmount * unitsPerAsset / 1e18;
+        if (units != 0) {
+            // EXACTLY `forAmount`, cleared afterwards: this allowance is the price
+            // bound (see the header) and the cap on what `take` may pull from this
+            // shared singleton. Scoped even against the immutable venue (D-1).
+            SafeTransferLib.forceApprove(loanToken, address(midnight), forAmount);
+            // taker = maker (gains the credit; needs `isAuthorized[maker][this]`,
+            // the grant ops 0/1 already need); seller-side receiver unused on the
+            // buy side; takerCallback = 0 ⇒ this module is the payer.
+            midnight.take(offer, ratifierData, units, onBehalfOf, address(0), address(0), "");
+            SafeTransferLib.forceApprove(loanToken, address(midnight), 0);
+        }
+        // `forAmount − buyerAssets`, measured — never sized from `take`'s return.
+        PreFundGuard.sweepSurplus(loanToken, onBehalfOf, floor);
+    }
+
     /// @inheritdoc IFundingSource
     /// @dev Funded by the fill's OWN delivery — a wallet/allowance read would
     ///      preview a self-funding order as short.
@@ -203,12 +260,17 @@ contract MidnightPreFundModule is PreFundModuleBase, IMakerModule, IFundingSourc
         override
         returns (address asset, uint256 available)
     {
-        // PER-OP, because the two layouts differ: SupplyCollateral carries a
-        // trailing `collateralIndex` that Repay does not, so a single decode
-        // reads out of bounds on one of them.
-        if (_preFundOp(data) == uint256(Op.Repay)) {
+        // PER-OP, because the three layouts differ: SupplyCollateral carries a
+        // trailing `collateralIndex` that Repay does not, and Lend's dynamic
+        // member is an `Offer` (whose first field is the `Market`), so a single
+        // decode reads the wrong struct on at least one of them.
+        uint256 op = _preFundOp(data);
+        if (op == uint256(Op.Repay)) {
             (, Market memory market) = abi.decode(data, (uint256, Market));
             asset = market.loanToken;
+        } else if (op == uint256(Op.Lend)) {
+            (, Offer memory offer) = abi.decode(data, (uint256, Offer));
+            asset = offer.market.loanToken;
         } else {
             (, Market memory market, uint256 collateralIndex) = abi.decode(data, (uint256, Market, uint256));
             asset = market.collateralParams[collateralIndex].token;

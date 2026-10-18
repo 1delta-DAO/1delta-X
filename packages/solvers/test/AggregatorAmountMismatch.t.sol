@@ -10,6 +10,7 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {AggregatorFillSolver, RoutePlan, NO_PATCH, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 import {AggregatorItemFillTest, IAggregatorItemFill} from "./AggregatorItemFill.t.sol";
+import {noGuard} from "./shared/AggDeploy.sol";
 
 /// @title AggregatorAmountMismatchTest
 /// @notice Review 2026-10-05 ("mismatching amounts"): the amount the solver ROUTES
@@ -51,7 +52,7 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
     function _netted(Order memory o, RoutePlan memory plan) internal returns (bool ok, bytes memory ret) {
         bytes memory sig = _sign(o);
         (ok, ret) = address(aggSolver).call(
-            abi.encodeCall(IAggregatorItemFill.executeItemFill, (o, sig, AMOUNT_IN, plan, bytes(""), 0, new Permit2612[](0)))
+            abi.encodeCall(IAggregatorItemFill.executeItemFill, (o, sig, AMOUNT_IN, plan, bytes(""), 0, new Permit2612[](0), noGuard()))
         );
     }
 
@@ -282,7 +283,7 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         (bool ok, bytes memory ret) = address(aggSolver).call(
             abi.encodeCall(
                 IAggregatorItemFill.executeItemFill,
-                (o, sig, AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 1 << 0, new Permit2612[](0))
+                (o, sig, AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 1 << 0, new Permit2612[](0), noGuard())
             )
         );
         assertTrue(ok, string(ret));
@@ -319,7 +320,7 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         (bool ok, bytes memory ret) = address(aggSolver).call(
             abi.encodeCall(
                 IAggregatorItemFill.executeItemFill,
-                (o, _sign(o), AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 1 << 0, new Permit2612[](0))
+                (o, _sign(o), AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 1 << 0, new Permit2612[](0), noGuard())
             )
         );
         assertFalse(ok, "ORDERED refuses PULL before the TAKE");
@@ -331,7 +332,7 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         (ok, ret) = address(aggSolver).call(
             abi.encodeCall(
                 IAggregatorItemFill.executeItemFill,
-                (o, _sign(o), AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 0, new Permit2612[](0))
+                (o, _sign(o), AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 0, new Permit2612[](0), noGuard())
             )
         );
         assertTrue(ok, string(ret));
@@ -346,7 +347,7 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         (ok, ret) = address(aggSolver).call(
             abi.encodeCall(
                 IAggregatorItemFill.executeItemFill,
-                (o, _sign(o), AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 1 << 0, new Permit2612[](0))
+                (o, _sign(o), AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 1 << 0, new Permit2612[](0), noGuard())
             )
         );
         assertFalse(ok, "CANONICAL refuses PULL before the TAKE");

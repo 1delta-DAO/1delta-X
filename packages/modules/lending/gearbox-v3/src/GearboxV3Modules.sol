@@ -452,3 +452,73 @@ contract GearboxCreditBorrowModule is ITakerModule, IGearboxBot {
         IGearboxCreditFacadeV3(facade).botMulticall(creditAccount, calls);
     }
 }
+
+// ──────────────────── Gearbox credit-account withdraw taker module ────────────────────
+//
+// `botMulticall([withdrawCollateral(token, amount, receiver)])` — move collateral OUT
+// of the maker's credit account with NO new debt. This is the value-out leg the
+// credit side was missing (review 2026-10-18 M-2): the only other value-out op,
+// {GearboxCreditBorrowModule}, pairs the withdrawal with `increaseDebt`, so a
+// position could be levered up through modules but never deleveraged or closed —
+// with any amount of capital.
+//
+// With it, a deleverage / close is ACYCLIC and needs zero filler capital: this TAKE
+// runs EARLY (the position's LTV headroom carries the debt for one step — Gearbox's
+// end-of-multicall collateral check runs on this call alone), the solver converts the
+// collateral, and the debt asset is delivered to {GearboxCreditPreFundModule}'s
+// `Repay` op, which runs LATE. A close at the LTV edge, where no withdrawal is
+// possible before the repay, is a true cycle and stays with the flash family.
+//
+// The maker must first grant this module the bot role with a mask EXACTLY equal to
+// `requiredPermissions()`:
+//   facade.multicall(ca, [setBotPermissions(module, 0x20)])
+// `data = abi.encode(creditAccount, token)` — base = 64.
+//
+// `withdrawCollateral` transfers exactly `amount` of `token` from the account to
+// `receiver` or reverts (insufficient balance, or the collateral check fails), so
+// there is no venue clamp to bound and the core measures the arrival itself. A
+// `type(uint256).max` "whole balance" request is unreachable: Permit3's `take` passes
+// `amount` as `uint160`.
+//
+// Gearbox has no bot-reachable "close account" — `closeCreditAccount` is owner-only —
+// so "close" through modules means debt to zero (`decreaseDebt` caps at the total
+// debt; zero is the one state below `minDebt` Gearbox accepts) plus this withdraw of
+// whatever collateral the maker wants out. The empty account stays the maker's.
+//
+// The {GearboxCreditAuth} borrower check is what stands between a maker's account and
+// any filler who knows its address — the same chain as the borrow module, derived
+// from `creditAccount`, never from `data`.
+//
+contract GearboxCreditWithdrawModule is ITakerModule, IGearboxBot {
+    IPermit3 public immutable permit3;
+
+    error OnlyPermit3();
+
+    constructor(address _permit3) {
+        permit3 = IPermit3(_permit3);
+    }
+
+    /// @inheritdoc IGearboxBot
+    /// @dev Withdraw-only: `WITHDRAW_COLLATERAL` and nothing else — no borrow bit, so
+    ///      a maker granting this bot to deleverage hands it no credit line. Gearbox
+    ///      matches the mask exactly, and this is a separate address from the borrow
+    ///      module, so the two grants stay independent.
+    function requiredPermissions() external pure override returns (uint192) {
+        return GearboxCreditAuth.WITHDRAW_COLLATERAL_PERMISSION;
+    }
+
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        (address creditAccount, address token) = abi.decode(data, (address, address));
+        // Binds the account to the Permit3 principal — see {GearboxCreditBorrowModule}.
+        (, address facade) = GearboxCreditAuth.authorize(creditAccount, onBehalfOf);
+
+        MultiCall[] memory calls = new MultiCall[](1);
+        calls[0] = MultiCall({
+            target: facade,
+            callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.withdrawCollateral, (token, amount, receiver))
+        });
+        IGearboxCreditFacadeV3(facade).botMulticall(creditAccount, calls);
+    }
+}

@@ -153,11 +153,12 @@ in one 43k-gas `deposit` before signing (`lib/funding.ts`).
   filler that holds WRBTC (inventory, other venues) and for pull orders.
 - App and filler shape code for it stays dormant. The app's RBTC entry moves to the
   `NativeBalance` shape once the solver v3 is live.
-- **Erratum in its NatSpec** (`NativeUnwrapModule.sol`, the "Posture" note): it cites CoW's
-  ETH buy token as an example of a full-gas send. CoW pays with Solidity `transfer`
-  (2,300 gas, §6). The rest of the note is correct: a reverting receiver kills the fill
-  there too. The source is left unchanged, because the module is deployed and verified,
-  and editing even a comment changes the metadata hash and breaks the exact source match.
+- **v2 in the tree (2026-10-15), not deployed** (§8): capped send plus WETH fallback,
+  for batch safety. The deployed v1 (`0xB6107a1D…C735`, source at commit `8001ccc`) stays
+  bound to the live Settlement. v2 ships with the task-31 Settlement, which needs a new
+  module anyway, because `SETTLEMENT` is an immutable. v1's NatSpec cited CoW as a
+  full-gas send. That is wrong, since CoW pays with a 2,300-gas `transfer` (§6), and v2's
+  NatSpec corrects it.
 
 ## 6. Comparison: how CoW Protocol handles native coin
 
@@ -212,6 +213,8 @@ native option is documented.
 - **We do not copy the 2,300 stipend.** It is failure class C10
   ([failure-classes.md](reference-audits/failure-classes.md#c10--hard-coded-gas-stipends-on-value-transfer)).
   CoW needs access lists to get around it, and those cover cold access but not real work.
+  Where native sends share a transaction we cap the gas generously and fall back to WETH
+  instead (§8).
 - **No EthFlow-style escrow for now.** Wrapping before signing is what CoW recommends for
   repeat users. With 7-day limit orders, an escrow would add on-chain cancels or a
   refund keeper.
@@ -232,15 +235,22 @@ admits items, the check runs first. And every native-aware exit module wraps bef
 pays (`FluidCustodyBase._operateOut`, `CompoundV2NativeWithdrawModule`,
 `ListaNativeCollateralTakerModule`, rule C10).
 
-The flip side is that **neither native path serves a position close today**:
+The flip side: `NativeBalance` never serves a position close. `NativeUnwrapModule` serves
+one only when the remainder can be signed as an **output leg**:
 
-- **Leftover collateral** after a close (Aave-style WRBTC, Tropykus kRBTC, Fluid native
-  vault) is a surplus of TAKE proceeds. The core refunds it to the maker in the wrapped
-  token (`Core._payInputsToSolver`, the netted reconcile), **after** the items. No item can
+- **Collateral other than the wrapped native, debt in the wrapped native, sell it all:
+  works.** `aave-v3/test/closing/PositionSizedLoopClose.t.sol` closes a wstETH/WETH
+  loop and ends in native ETH. Its steps are a position-sized withdraw, a repay from WETH
+  leg 0, and the remainder as WETH leg 1 to the module. It runs on forward `fill`, so the
+  filler fronts the outputs (see the cycle note below).
+- **The collateral IS the wrapped native** (WRBTC / Tropykus kRBTC / a Fluid native
+  vault): only the part sold for the debt is a leg. The **unsold remainder** is a surplus
+  of TAKE proceeds. The core refunds it to the maker in the wrapped token
+  (`Core._payInputsToSolver`, the netted reconcile), **after** the items. No item can
   unwrap it, and `NativeUnwrapModule` only spends an output leg's delivery
   (`requireLegRef`).
 - A gasless user may hold no native coin to pay for the unwrap afterwards.
-- **Cheapest fix, no core change:** a TAKE item can already name its own recipient. So a
+- **Cheapest fix for the wrapped-native case, no core change:** a TAKE item can already name its own recipient. So a
   close can be signed as: repay → TAKE the sold collateral to Settlement → TAKE the
   remainder with `recipient = maker`. The native-aware exit modules then need a
   maker-signed flag: *when the recipient is not Settlement, send raw native with a
@@ -249,3 +259,57 @@ The flip side is that **neither native path serves a position close today**:
   would need the same option in the generic withdraw module.
 - A full close still needs repay-before-withdraw: one flash around the plan, or a
   counter-order. That is unchanged by task 31.
+
+## 8. Batch safety: several native payouts in one transaction
+
+**The problem.** A single-order fill with an uncapped native send is fine: a hostile
+recipient only kills its own maker's fill. Two entries put several makers' native sends
+into **one** transaction:
+
+| Entry | Several native payouts in one tx | One hostile recipient, uncapped |
+| --- | --- | --- |
+| `matchSettle` after task 31 (`NativeUnwrapModule` items) | yes, e.g. `NettedNativeUnwrap.t.sol` pays two makers | all or nothing: a revert kills every order; a gas burner eats the whole tx |
+| `batchFill` (module orders, filler holds WRBTC) | yes | each order is try/catch-isolated against reverts, but **not against gas**: the 63/64 rule starves every later order |
+| solver `executeFill` / `executeItemFill` (incl. `NativeBalance`) | no: one order per tx | own fill only |
+
+Makers' funds are never at risk (the fills are atomic). What is at risk is the filler's
+gas and the liveness of the other makers' fills.
+
+**The fix: `NativeUnwrapModule` v2** (`packages/modules/transfer/src/NativeUnwrapModule.sol`).
+
+- The send gets a **capped but generous** budget, `SEND_GAS`. It is an immutable set per
+  chain at deploy (script default 100,000), sized for smart-account `receive()`s. The
+  cap bounds what one recipient can burn.
+- If the send fails (no `receive()`, a revert, or more than `SEND_GAS` needed), the
+  module re-wraps exactly `amount` and pays it **in WETH** (`PaidWrapped` event). A token
+  transfer cannot be refused, so one recipient can no longer revert a batch. The maker
+  gets the same value, wrapped. Without the fallback, that maker would have an order
+  nobody can fill.
+- **A caller cannot force the downgrade.** A send starved below `SEND_GAS` leaves the
+  module only ~1/64 of its gas (EIP-150), too little for the re-wrap. On top of that, the
+  module refuses up front (`InsufficientSendGas`) unless the full budget can reach the
+  recipient. `test_module_noGasLimit_forcesWrappedPayout` sweeps the caller's gas limit
+  from 60k to 400k in 1k steps against a payee that needs 90k: every attempt reverts or
+  pays native, never WETH.
+- **It is not a C10 stipend.** A payee whose `receive()` does ~66k of real work is paid
+  natively (`test_batch_heavySmartAccountPayee_getsNative`). A payee needing more than
+  the budget is paid in WETH, never refused.
+- Tests (`NettedNativeUnwrap.t.sol`, `NativeUnwrapModule.t.sol`):
+  - a reverting payee in a two-maker plan: the plan settles, the payee gets WETH, the
+    other maker gets native;
+  - a gas-burning payee: the plan settles within baseline + `SEND_GAS` + 62k.
+
+  Mutation-checked: without the cap the burner test fails (1.02 G gas). The guard is
+  defence in depth: removing it still reverts (out of gas) instead of downgrading.
+
+**Not changed:**
+
+- **`NativeBalance` / solver v3** keeps its uncapped send. It is always one order per
+  tx, and a WETH fallback could not satisfy the measured native delta anyway.
+- **The deployed v1 module** stays as is (see §5).
+
+**Before go-live on Rootstock:**
+
+- measure `SEND_GAS` for the smart accounts in use there;
+- confirm `CALL_OVERHEAD` (40k headroom) under Rootstock's own gas schedule with one live
+  fill.

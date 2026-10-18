@@ -636,7 +636,7 @@ burning a transaction.
 | `test_presend_boundedByOutstanding` | a mid-schedule pre-send on a balanced match hands the solver nothing |
 | `test_donatedBalance_untouched` | S4/S5 against a pre-seeded pool |
 | `test_deferredInvariant_restoredByLaterOrder` | the deferred check itself — an invariant restored by a later order passes |
-| `test_settleItem_reverts` / `test_duplicateInput_reverts` / `test_lengthMismatch_reverts` | shape and arity guards |
+| `test_settleItem_admittedAtOpen` / `test_duplicateInput_reverts` / `test_lengthMismatch_reverts` | shape and arity guards (SETTLE is admitted at open since task 31; the end-to-end SETTLE fill is `test_settleItem_zeroCapital_eitherPosition`) |
 | `test_spotFundsLeverage_zeroSolverCapital` | parity: the old `batchSettleItems` headline as a schedule |
 
 **Stateful walk** — `packages/core/test/invariants/StateHandler.sol:doMatchSettle`

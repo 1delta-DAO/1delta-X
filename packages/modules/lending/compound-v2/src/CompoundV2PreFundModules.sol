@@ -9,7 +9,8 @@ import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 
-import {ICErc20} from "./interfaces/ICompoundV2.sol";
+import {ICErc20, ICEther} from "./interfaces/ICompoundV2.sol";
+import {IWETH} from "./CompoundV2NativeModules.sol";
 
 // ──────────────── Compound v2 PRE-FUNDED one-sided modules ────────────────
 //
@@ -25,9 +26,10 @@ import {ICErc20} from "./interfaces/ICompoundV2.sol";
 // are permissionless value-in (`mint` funded by the caller with the receipt
 // forwarded; `repayBorrowBehalf` is Compound v2's one native on-behalf call).
 //
-// ERC20 underlyings ONLY — the cEther market's value-in calls take native ETH via
-// `msg.value`, which is a different funding seam entirely; the pre-fund shape does
-// not cover it (see {CompoundV2NativeModules} for the native pull-funded ops).
+// {CompoundV2PreFundModule} serves ERC20 underlyings; the cEther market's value-in
+// calls take native ETH via `msg.value`, so its pre-funded twin is a separate
+// contract below ({CompoundV2NativePreFundModule}): the delivered leg is WETH, and
+// the module unwraps EXACTLY `forAmount` inside the item for the payable call.
 //
 //  Why these ride the MAKE seam
 //  ────────────────────────────
@@ -180,4 +182,151 @@ contract CompoundV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSou
         (,, asset) = abi.decode(data, (uint256, address, address));
         available = type(uint256).max;
     }
+}
+
+// ──────────────── Compound v2 NATIVE (cEther) PRE-FUNDED one-sided module ────────────────
+//
+// The pre-funded twin of {CompoundV2NativeDepositModule} / {CompoundV2NativeRepayModule}
+// (review 2026-10-18 M-5): those PULL WETH from the maker through a Permit3 token
+// allowance, so a zero-capital "sell X, deposit/repay ETH" order needed the maker
+// to approve the module for a token they never held. Here the maker signs the WETH
+// output leg with `recipient = module` and a pre-funded `MAKE` item whose
+// leg-reference descriptor points at it; the core sizes `forAmount` to exactly
+// that delivery (`ctx.outs`), and the module unwraps it and calls cEther.
+//
+//    Deposit → weth.withdraw(forAmount) → cEther.mint{value}      (cTokens forwarded)
+//    Repay   → weth.withdraw(min(forAmount, debt)) → cEther.repayBorrowBehalf{value}
+//              (the unused WETH is swept back to the maker, still WRAPPED)
+//
+// WHY THE UNWRAP IS EXACT, AND NOT A BALANCE SWEEP. Two makers' WETH deliveries can
+// sit on this singleton at once on the netted path (`matchSettle` delivers, then
+// runs items, in a solver-chosen order). The module therefore unwraps the core-sized
+// `forAmount` (or less) and never "whatever WETH is here" — the {NativeUnwrapModule}
+// rule. And since the size comes from the delivery LEDGER rather than from a
+// pro-rated `item.amount`, the leg-vs-item rounding asymmetry that module documents
+// (SELL legs ceil per fill, items floor cumulatively) does not arise: what was
+// delivered is what is unwrapped.
+//
+// `weth` is an IMMUTABLE, so `withdraw(x)` credits exactly `x` native; the descriptor's
+// funding token must equal it ({PreFundGuard.floorOf} reverts `FundingTokenMismatch`
+// otherwise). `cEther` is maker-named: a fake one can swallow the ETH it is handed,
+// but that is this fill's own delivery — nothing below the floors is reachable.
+// Native and WETH sweeps are both floored at their pre-call balances (F19 / F26/2a),
+// and the ETH side wraps before it leaves, so the maker never receives raw native.
+//
+// Both ops are permissionless on-behalf at the venue (`mint` is funded by the
+// caller with the receipt forwarded; `repayBorrowBehalf` is Compound v2's native
+// on-behalf call): the receive side needs NO grant of any kind.
+//
+// `data = abi.encode(forDesc, cEther)` — descriptor word FIRST (forDesc@0, op in bits
+// [244,252), funding token = `weth` in bits [16,176)), cEther@32; 64 bytes.
+
+/// @notice The pre-funded cEther deposit / repay ops, funded by a delivered WETH leg.
+contract CompoundV2NativePreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
+    enum Op {
+        Deposit,
+        Repay
+    }
+
+    /// @dev The wrapped native token the funding leg must be denominated in.
+    IWETH public immutable weth;
+
+    /// @dev The descriptor named an op this module does not implement.
+    error BadOp(uint256 op);
+
+    constructor(address _permit3, address _settlement, address _weth) PreFundModuleBase(_permit3, _settlement) {
+        weth = IWETH(_weth);
+    }
+
+    /// @param onBehalfOf the maker — whose position this fill acts on.
+    /// @param forAmount  this fill's delivered WETH leg, core-sized; unwrapped and
+    ///                   spent from this module's own balance.
+    function makeOnBehalf(address onBehalfOf, uint256 forAmount, bytes calldata data) external override {
+        _gatePreFundMake(data);
+        // A dust slice can floor the funding leg to zero; skip — it accumulates
+        // exactly across fills.
+        if (forAmount == 0) return;
+        uint256 op = _preFundOp(data);
+        if (op == uint256(Op.Deposit)) {
+            _mintAndForward(onBehalfOf, forAmount, data);
+        } else if (op == uint256(Op.Repay)) {
+            _repayAndSweep(onBehalfOf, forAmount, data);
+        } else {
+            revert BadOp(op);
+        }
+    }
+
+    /// @dev Unwrap exactly the delivery, mint cEther to THIS module (no `mintBehalf`),
+    ///      forward only this mint's receipt.
+    function _mintAndForward(address onBehalfOf, uint256 forAmount, bytes calldata data) private {
+        (, address cEther) = abi.decode(data, (uint256, address));
+        // The delivery must have landed HERE, in WETH — the descriptor's token is
+        // pinned to the immutable `weth`, so a leg in any other token reverts
+        // `FundingTokenMismatch`, and one not addressed here underflows. KEEP the
+        // floor: it is what bounds the sweep below to this fill's own WETH.
+        uint256 wFloor = PreFundGuard.floorOf(data, address(weth), forAmount);
+        uint256 cFloor = IERC20(cEther).balanceOf(address(this));
+        uint256 ethFloor = address(this).balance;
+        weth.withdraw(forAmount);
+        ICEther(cEther).mint{value: forAmount}(); // reverts on error
+        uint256 cBal = IERC20(cEther).balanceOf(address(this));
+        if (cBal > cFloor) SafeTransferLib.safeTransfer(cEther, onBehalfOf, cBal - cFloor);
+        _sweepNativeAsWeth(onBehalfOf, ethFloor);
+        PreFundGuard.sweepSurplus(address(weth), onBehalfOf, wFloor);
+    }
+
+    /// @dev Repay `min(forAmount, live debt)` in native; the unused delivery goes
+    ///      back to the maker as WETH.
+    function _repayAndSweep(address onBehalfOf, uint256 forAmount, bytes calldata data) private {
+        (, address cEther) = abi.decode(data, (uint256, address));
+        uint256 wFloor = PreFundGuard.floorOf(data, address(weth), forAmount);
+        // Taken BEFORE the venue call, and load-bearing: a zero live debt skips the
+        // repay, and an unfloored sweep would then pay out every wei of ETH resident
+        // on this singleton (F26/2a, the {CompoundV2NativeRepayModule} note).
+        uint256 ethFloor = address(this).balance;
+        uint256 toRepay;
+        {
+            // cEther reverts on an over-send, so the cap is mandatory, not a nicety.
+            uint256 debt = ICEther(cEther).borrowBalanceCurrent(onBehalfOf);
+            toRepay = forAmount < debt ? forAmount : debt;
+        }
+        if (toRepay != 0) {
+            weth.withdraw(toRepay);
+            ICEther(cEther).repayBorrowBehalf{value: toRepay}(onBehalfOf); // reverts on error
+        }
+        _sweepNativeAsWeth(onBehalfOf, ethFloor);
+        // `forAmount − toRepay` of the delivery, still wrapped — measured against the
+        // pre-delivery floor, never sized from the venue's behaviour (F27/C-3).
+        PreFundGuard.sweepSurplus(address(weth), onBehalfOf, wFloor);
+    }
+
+    /// @dev Wrap and return the native THIS CALL left above `floor` (none on an
+    ///      honest cEther). Wrapping keeps the sweep reentrancy-free and the maker
+    ///      on the ERC20 side; see {CompoundV2NativeDepositModule._sweepNativeAsWeth}
+    ///      for why the floor is not optional.
+    function _sweepNativeAsWeth(address to, uint256 floor) private {
+        uint256 bal = address(this).balance;
+        if (bal > floor) {
+            unchecked {
+                uint256 delta = bal - floor;
+                weth.deposit{value: delta}();
+                SafeTransferLib.safeTransfer(address(weth), to, delta);
+            }
+        }
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev Funded by the fill's OWN delivery — a wallet/allowance read would
+    ///      preview a self-funding order as short.
+    function fundingSource(address, bytes calldata)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        asset = address(weth);
+        available = type(uint256).max;
+    }
+
+    receive() external payable {} // ETH from weth.withdraw — must stay empty (WETH9 pays via `transfer`)
 }

@@ -1,5 +1,6 @@
 import {
   concat,
+  decodeAbiParameters,
   decodeFunctionData,
   decodeFunctionResult,
   encodeAbiParameters,
@@ -123,7 +124,91 @@ export interface RoutePlan {
   originatorPpm: number;
   /** The router calldata. */
   data: Hex;
+  /**
+   * SOLVER v4 ONLY (2026-10-18, review S-1): the most of the ANCHOR OUTPUT token this fill
+   * may draw from the solver's own pre-fill balance on top of the route's proceeds; `0` /
+   * unset = delta-only (v3's behaviour, and the only value a v3 encoder accepts). With an
+   * EMPTY route ({@link POOL_ROUTE}, `data = "0x"`) the fill is served from inventory alone.
+   * Below 2^128 (`AmountTooLarge`), as `maxPay` is on v4.
+   */
+  inventory?: bigint;
 }
+
+/** Which `AggregatorFillSolver` ABI an instance speaks: v3 (LIVE on Rootstock, 2026-10-15) or v4 (in-tree, 2026-10-18). */
+export type AggregatorVersion = 3 | 4;
+
+/** The fill entries' selectors per version, pinned against the forge artifacts. */
+export const AGGREGATOR_SELECTORS = {
+  3: { executeFill: "0xd828b11a", executeItemFill: "0x12272841" },
+  4: { executeFill: "0x50358c9e", executeItemFill: "0xac44b909" },
+} as const satisfies Record<AggregatorVersion, { executeFill: Hex; executeItemFill: Hex }>;
+
+/**
+ * The version of a deployed solver from its RUNTIME BYTECODE: the v4 / v3 `executeFill`
+ * selector in the dispatcher (the sweep code's `sweepAll` detection, same idea).
+ * `undefined` = neither (not an AggregatorFillSolver, or a pre-v3 one).
+ */
+export function detectAggregatorVersion(code: Hex | undefined): AggregatorVersion | undefined {
+  const c = (code ?? "0x").toLowerCase();
+  if (c.includes(AGGREGATOR_SELECTORS[4].executeFill.slice(2))) return 4;
+  if (c.includes(AGGREGATOR_SELECTORS[3].executeFill.slice(2))) return 3;
+  return undefined;
+}
+
+/**
+ * `RoutePlan.router` sentinel for a SANDBOX MULTICALL route (v4): `data =
+ * abi.encode(address[] targets, bytes[] datas)` run in sequence from the sandbox, with NO
+ * automatic approval — the route approves for itself. The only route that spends a
+ * multi-input order's further currency (`MultiInputUnrouted` otherwise) or a listed
+ * SETTLE receipt. Only on {@link encodeAggregatorExecuteItemFill} v4.
+ */
+export const MULTI_ROUTE: Address = "0x0000000000000000000000000000000000000001";
+
+/** {@link MULTI_ROUTE}'s `data`. */
+export function encodeMultiRoute(targets: readonly Address[], datas: readonly Hex[]): Hex {
+  if (targets.length !== datas.length) throw new Error("encodeMultiRoute: targets / datas length mismatch (BadMulticall)");
+  return encodeAbiParameters([{ type: "address[]" }, { type: "bytes[]" }], [targets, datas]);
+}
+
+/**
+ * v4 `executeItemFill`'s race guard (and foreign SETTLE receipts): `filled[orderHash]`
+ * must still read `expectedFilled` (`OrderTaken`), and with `liveNonce` the order's own
+ * `(maker, nonce)` must be live (`NonceTaken`, a fill-once order). `orderHash = 0` = no check.
+ */
+export interface ItemFillGuard {
+  orderHash: Hex;
+  expectedFilled: bigint;
+  liveNonce: boolean;
+  receipts: Address[];
+}
+
+export const NO_ITEM_FILL_GUARD: ItemFillGuard = {
+  orderHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+  expectedFilled: 0n,
+  liveNonce: false,
+  receipts: [],
+};
+
+const itemFillGuardComponents = [
+  { name: "orderHash", type: "bytes32" },
+  { name: "expectedFilled", type: "uint256" },
+  { name: "liveNonce", type: "bool" },
+  { name: "receipts", type: "address[]" },
+] as const;
+
+const routePlanV4Components = [
+  { name: "router", type: "address" },
+  { name: "minOut", type: "uint256" },
+  { name: "maxPay", type: "uint256" },
+  { name: "inventory", type: "uint256" },
+  { name: "amountInOffset", type: "uint256" },
+  { name: "amountOutOffset", type: "uint256" },
+  { name: "minBumpBps", type: "uint256" },
+  { name: "profitRecipient", type: "address" },
+  { name: "originator", type: "address" },
+  { name: "originatorPpm", type: "uint32" },
+  { name: "data", type: "bytes" },
+] as const;
 
 const routePlanComponents = [
   { name: "router", type: "address" },
@@ -345,6 +430,50 @@ export const AGGREGATOR_FILL_SOLVER_ABI = [
 ] as const;
 
 /**
+ * `AggregatorFillSolver` v4 (in-tree 2026-10-18, UNDEPLOYED): {@link AGGREGATOR_FILL_SOLVER_ABI}
+ * with the v4 fill entries — `RoutePlan` gains `inventory` (`executeFill` 0x50358c9e) and
+ * `executeItemFill` takes a trailing {@link ItemFillGuard} (0xac44b909) — and the v4 errors.
+ */
+export const AGGREGATOR_FILL_SOLVER_V4_ABI = [
+  {
+    type: "function",
+    name: "executeFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "order", type: "tuple", components: orderComponents },
+      { name: "sig", type: "bytes" },
+      { name: "fillAmount", type: "uint256" },
+      { name: "plan", type: "tuple", components: routePlanV4Components },
+      { name: "takerData", type: "bytes" },
+      { name: "permits", type: "tuple[]", components: permit2612Components },
+    ],
+    outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
+  },
+  {
+    type: "function",
+    name: "executeItemFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "order", type: "tuple", components: orderComponents },
+      { name: "sig", type: "bytes" },
+      { name: "fillAmount", type: "uint256" },
+      { name: "plan", type: "tuple", components: routePlanV4Components },
+      { name: "takerData", type: "bytes" },
+      { name: "lateItems", type: "uint256" },
+      { name: "permits", type: "tuple[]", components: permit2612Components },
+      { name: "guard", type: "tuple", components: itemFillGuardComponents },
+    ],
+    outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
+  },
+  ...AGGREGATOR_FILL_SOLVER_ABI.filter((x) => !(x.type === "function" && (x.name === "executeFill" || x.name === "executeItemFill"))),
+  { type: "error", name: "AmountTooLarge", inputs: [] },
+  { type: "error", name: "MultiInputUnrouted", inputs: [] },
+  { type: "error", name: "BadMulticall", inputs: [] },
+  { type: "error", name: "OrderTaken", inputs: [{ name: "index", type: "uint256" }, { name: "expected", type: "uint256" }, { name: "actual", type: "uint256" }] },
+  { type: "error", name: "NonceTaken", inputs: [{ name: "index", type: "uint256" }, { name: "maker", type: "address" }, { name: "nonce", type: "uint256" }] },
+] as const;
+
+/**
  * `RouteSandbox` — the authority-less identity every route runs from. Owner-only
  * `exec`; the views let an operator check the wiring at start-up.
  */
@@ -374,7 +503,13 @@ export const ROUTE_SANDBOX_ABI = [
 /**
  * Encode `AggregatorFillSolver.executeFill`. Send it from an operator. `permits`
  * (default none) are the maker's ERC-2612 permits the solver runs before the fill —
- * see {@link toSolverPermit}.
+ * see {@link toSolverPermit}. `version` (default 3, the LIVE Rootstock instances) picks
+ * the ABI: v4's `RoutePlan` carries `inventory` (selector 0x50358c9e vs v3's 0xd828b11a).
+ *
+ * v4 only: `plan.inventory` may be set (below 2^128, `AmountTooLarge`, like `maxPay`), an
+ * EMPTY pool route (`router = POOL_ROUTE`, `data = "0x"`) is an inventory-only fill and
+ * then needs `inventory != 0`, and a {@link MULTI_ROUTE} is refused (`executeItemFill` only).
+ * v3 refuses any non-zero `inventory` — the field does not exist there.
  */
 export function encodeAggregatorExecuteFill(args: {
   order: Order;
@@ -383,37 +518,70 @@ export function encodeAggregatorExecuteFill(args: {
   plan: RoutePlan;
   takerData?: Hex;
   permits?: readonly Permit2612[];
+  version?: AggregatorVersion;
 }): Hex {
-  const p = args.plan;
-  if (p.router.toLowerCase() === POOL_ROUTE) {
-    // The contract reverts `BadPoolRoute`; fail before signing anything.
-    decodePoolRoute(p.data);
-    if (!isNoPatch(p.amountInOffset) && p.amountInOffset !== POOL_AMOUNT_IN_OFFSET) {
-      throw new Error(`encodeAggregatorExecuteFill: pool route amountInOffset must be 0 or NO_PATCH`);
-    }
-    if (!isNoPatch(p.amountOutOffset) && p.amountOutOffset !== POOL_AMOUNT_OUT_OFFSET) {
-      throw new Error(`encodeAggregatorExecuteFill: pool route amountOutOffset must be 32 or NO_PATCH`);
-    }
-  }
-  for (const field of ["amountInOffset", "amountOutOffset"] as const) {
-    const off = p[field];
-    if (!isNoPatch(off) && off + 32n > BigInt(size(p.data))) {
-      // The contract reverts `PatchOutOfBounds`; fail before signing anything.
-      throw new Error(`encodeAggregatorExecuteFill: ${field} ${off} past the end of a ${size(p.data)}-byte route`);
-    }
-  }
+  const p = checkPlan("encodeAggregatorExecuteFill", args, false);
   const permits = args.permits ?? [];
-  for (const pm of permits) {
-    if (pm.owner.toLowerCase() !== args.order.maker.toLowerCase()) {
-      // The contract reverts `PermitOwnerNotMaker`.
-      throw new Error(`encodeAggregatorExecuteFill: permit owner ${pm.owner} is not the maker ${args.order.maker}`);
-    }
+  if ((args.version ?? 3) === 4) {
+    return encodeFunctionData({
+      abi: AGGREGATOR_FILL_SOLVER_V4_ABI,
+      functionName: "executeFill",
+      args: [packOrder(args.order) as never, args.sig, args.fillAmount, { ...p, inventory: p.inventory ?? 0n } as never, args.takerData ?? "0x", permits as never],
+    });
   }
   return encodeFunctionData({
     abi: AGGREGATOR_FILL_SOLVER_ABI,
     functionName: "executeFill",
     args: [packOrder(args.order) as never, args.sig, args.fillAmount, p as never, args.takerData ?? "0x", permits as never],
   });
+}
+
+const U128 = 1n << 128n;
+
+/** The shape checks both encoders share, per version. Returns the plan. */
+function checkPlan(who: string, args: { order: Order; plan: RoutePlan; permits?: readonly Permit2612[]; version?: AggregatorVersion }, item: boolean): RoutePlan {
+  const p = args.plan;
+  const v4 = (args.version ?? 3) === 4;
+  const inv = p.inventory ?? 0n;
+  if (!v4 && inv !== 0n) throw new Error(`${who}: plan.inventory needs a v4 solver (v3 has no such field)`);
+  if (v4 && (p.maxPay >= U128 || inv >= U128 || inv < 0n)) throw new Error(`${who}: maxPay / inventory must be below 2^128 (AmountTooLarge)`);
+  const multi = p.router.toLowerCase() === MULTI_ROUTE;
+  if (multi) {
+    if (!v4 || !item) throw new Error(`${who}: MULTI_ROUTE is a v4 executeItemFill route only (MultiInputUnrouted elsewhere)`);
+    const [targets, datas] = decodeAbiParameters([{ type: "address[]" }, { type: "bytes[]" }], p.data) as readonly [readonly Address[], readonly Hex[]];
+    if (targets.length !== datas.length) throw new Error(`${who}: MULTI_ROUTE targets / datas length mismatch (BadMulticall)`);
+  }
+  const empty = p.router.toLowerCase() === POOL_ROUTE && size(p.data) === 0;
+  if (empty) {
+    if (!v4) throw new Error(`${who}: an EMPTY route (inventory-only fill) needs a v4 solver`);
+    if (inv === 0n) throw new Error(`${who}: an EMPTY route needs plan.inventory (nothing would pay the order)`);
+    if (!isNoPatch(p.amountInOffset) || !isNoPatch(p.amountOutOffset)) throw new Error(`${who}: an EMPTY route has no word to patch`);
+  } else if (p.router.toLowerCase() === POOL_ROUTE) {
+    // The contract reverts `BadPoolRoute`; fail before signing anything.
+    decodePoolRoute(p.data);
+    if (!isNoPatch(p.amountInOffset) && p.amountInOffset !== POOL_AMOUNT_IN_OFFSET) {
+      throw new Error(`${who}: pool route amountInOffset must be 0 or NO_PATCH`);
+    }
+    if (!isNoPatch(p.amountOutOffset) && p.amountOutOffset !== POOL_AMOUNT_OUT_OFFSET) {
+      throw new Error(`${who}: pool route amountOutOffset must be 32 or NO_PATCH`);
+    }
+  }
+  if (!empty && !multi) {
+    for (const field of ["amountInOffset", "amountOutOffset"] as const) {
+      const off = p[field];
+      if (!isNoPatch(off) && off + 32n > BigInt(size(p.data))) {
+        // The contract reverts `PatchOutOfBounds`; fail before signing anything.
+        throw new Error(`${who}: ${field} ${off} past the end of a ${size(p.data)}-byte route`);
+      }
+    }
+  }
+  for (const pm of args.permits ?? []) {
+    if (pm.owner.toLowerCase() !== args.order.maker.toLowerCase()) {
+      // The contract reverts `PermitOwnerNotMaker`.
+      throw new Error(`${who}: permit owner ${pm.owner} is not the maker ${args.order.maker}`);
+    }
+  }
+  return p;
 }
 
 /**
@@ -423,7 +591,9 @@ export function encodeAggregatorExecuteFill(args: {
  * `ItemFillUnsupported`): `plan.minBumpBps` must be 0 and `plan.amountOutOffset`
  * {@link NO_PATCH} — `matchSettle` carries no bump floor and no priced amount reaches the
  * route, so either would be a protection the operator does not get. A DIRECT order
- * reverts `DirectNotMatchable` on-chain.
+ * reverts `DirectNotMatchable` on-chain. v4 (`version: 4`, selector 0xac44b909) takes the
+ * trailing {@link ItemFillGuard} (default {@link NO_ITEM_FILL_GUARD}: no race check) and
+ * admits a {@link MULTI_ROUTE}; v3 (0x12272841) refuses a `guard`.
  */
 export function encodeAggregatorExecuteItemFill(args: {
   order: Order;
@@ -433,6 +603,8 @@ export function encodeAggregatorExecuteItemFill(args: {
   lateItems: bigint;
   takerData?: Hex;
   permits?: readonly Permit2612[];
+  version?: AggregatorVersion;
+  guard?: ItemFillGuard;
 }): Hex {
   const p = args.plan;
   if (p.minBumpBps !== 0n) throw new Error("encodeAggregatorExecuteItemFill: minBumpBps must be 0 (ItemFillUnsupported)");
@@ -440,11 +612,20 @@ export function encodeAggregatorExecuteItemFill(args: {
   const n = BigInt(args.order.items.length);
   if (args.lateItems < 0n || args.lateItems >> n !== 0n) throw new Error(`encodeAggregatorExecuteItemFill: lateItems names an item past ${n} (BadItemSchedule)`);
   // Shape checks shared with executeFill (pool-route offsets, patch bounds, permit owners).
-  encodeAggregatorExecuteFill(args);
+  checkPlan("encodeAggregatorExecuteItemFill", args, true);
+  const permits = (args.permits ?? []) as never;
+  if ((args.version ?? 3) === 4) {
+    return encodeFunctionData({
+      abi: AGGREGATOR_FILL_SOLVER_V4_ABI,
+      functionName: "executeItemFill",
+      args: [packOrder(args.order) as never, args.sig, args.fillAmount, { ...p, inventory: p.inventory ?? 0n } as never, args.takerData ?? "0x", args.lateItems, permits, (args.guard ?? NO_ITEM_FILL_GUARD) as never],
+    });
+  }
+  if (args.guard) throw new Error("encodeAggregatorExecuteItemFill: an ItemFillGuard needs a v4 solver");
   return encodeFunctionData({
     abi: AGGREGATOR_FILL_SOLVER_ABI,
     functionName: "executeItemFill",
-    args: [packOrder(args.order) as never, args.sig, args.fillAmount, p as never, args.takerData ?? "0x", args.lateItems, (args.permits ?? []) as never],
+    args: [packOrder(args.order) as never, args.sig, args.fillAmount, p as never, args.takerData ?? "0x", args.lateItems, permits],
   });
 }
 

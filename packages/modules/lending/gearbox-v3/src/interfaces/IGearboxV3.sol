@@ -77,6 +77,10 @@ interface ICreditManagerV3 {
     ///         account of THIS manager, which is what makes a fabricated account
     ///         address fail closed rather than resolve to a lie.
     function getBorrowerOrRevert(address creditAccount) external view returns (address);
+
+    /// @notice The suite's debt asset — what `decreaseDebt` burns from the account's
+    ///         balance. Immutable on CreditManagerV3.
+    function underlying() external view returns (address);
 }
 
 /// @notice Gearbox's bot interface. `BotListV3.setBotPermissions` reads

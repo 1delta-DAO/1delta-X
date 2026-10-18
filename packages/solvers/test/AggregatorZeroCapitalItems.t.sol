@@ -17,6 +17,7 @@ import {AggregatorFillSolver, RoutePlan, NO_PATCH, Permit2612} from "@solvers/ag
 import {MockERC20} from "@coretest/shared/MockSettlementBase.t.sol";
 import {AggregatorFillSolverTest, MockRouter} from "./AggregatorFillSolver.t.sol";
 import {MockWNative} from "./AggregatorNative.t.sol";
+import {noGuard} from "./shared/AggDeploy.sol";
 
 /// @dev A PRE-FUNDED lending-style sink: the fill delivers the leg straight to this
 ///      module, and the item "supplies" exactly that delivery (the ledger amount the
@@ -120,13 +121,13 @@ contract AggregatorZeroCapitalItemsTest is AggregatorFillSolverTest {
     /// A USD-for-native order through the deployed-shape unwrap module: WNATIVE leg to
     /// the module + pre-funded MAKE item, flagged LATE. Zero inventory.
     function test_itemFill_nativeUnwrapModule_zeroInventory() public {
-        NativeUnwrapModule m = new NativeUnwrapModule(address(wn), address(settlement));
+        NativeUnwrapModule m = new NativeUnwrapModule(address(wn), address(settlement), 100_000);
         Order memory o = _unwrapOrder(1, m);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _planFor(AMOUNT_IN, address(aggSolver), AMOUNT_OUT, NO_PATCH);
         p.router = address(wnRouter);
         uint256 before = maker.balance;
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", LATE0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", LATE0, _np(), noGuard());
         assertEq(maker.balance - before, AMOUNT_OUT, "raw native in the maker's wallet");
         assertEq(wn.balanceOf(address(m)), 0, "module holds nothing");
         assertEq(wn.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "WNATIVE spread to the caller");
@@ -137,13 +138,13 @@ contract AggregatorZeroCapitalItemsTest is AggregatorFillSolverTest {
     /// The same order with the item scheduled EARLY (before its DELIVER) fails closed
     /// in the core: the delivery ledger is empty until DELIVER (`ForLegInvalid`).
     function test_itemFill_nativeUnwrapModule_earlyItemFailsClosed() public {
-        NativeUnwrapModule m = new NativeUnwrapModule(address(wn), address(settlement));
+        NativeUnwrapModule m = new NativeUnwrapModule(address(wn), address(settlement), 100_000);
         Order memory o = _unwrapOrder(2, m);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _planFor(AMOUNT_IN, address(aggSolver), AMOUNT_OUT, NO_PATCH);
         p.router = address(wnRouter);
         vm.expectRevert(Base.ForLegInvalid.selector);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
     }
 
     // ═══════════════ (b) swap → supply (pre-funded lending MAKE) ═══════════════
@@ -162,7 +163,7 @@ contract AggregatorZeroCapitalItemsTest is AggregatorFillSolverTest {
         MockPreFundSupply m = new MockPreFundSupply(address(settlement), lendingPool);
         Order memory o = _supplyOrder(3, m);
         bytes memory sig = _sign(o);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", LATE0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", LATE0, _np(), noGuard());
         assertEq(m.supplied(maker), AMOUNT_OUT, "supplied exactly the delivery, for the maker");
         assertEq(tB.balanceOf(lendingPool), AMOUNT_OUT);
         assertEq(tB.balanceOf(maker), 0, "the maker's wallet never held tB (no receive-side approval)");
@@ -177,7 +178,7 @@ contract AggregatorZeroCapitalItemsTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
         vm.expectRevert(Base.ForLegInvalid.selector);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
     }
 
     // ═══════════════ (c) an OCO bracket leg (SETTLE claim) ═══════════════
@@ -206,7 +207,7 @@ contract AggregatorZeroCapitalItemsTest is AggregatorFillSolverTest {
         Order memory sl = _ocoLeg(11 + lateItems * 2, oco, groupId); // its stop-loss sibling
         bytes memory sig = _sign(tp);
         uint256 makerB = tB.balanceOf(maker);
-        aggSolver.executeItemFill(tp, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", lateItems, _np());
+        aggSolver.executeItemFill(tp, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", lateItems, _np(), noGuard());
         assertEq(tB.balanceOf(maker) - makerB, AMOUNT_OUT, "bracket leg filled with zero inventory");
         assertEq(oco.claim(maker, groupId), tp.nonce + 1, "group claimed by the filled leg");
         _assertZeroInventory(address(tB));
@@ -215,7 +216,7 @@ contract AggregatorZeroCapitalItemsTest is AggregatorFillSolverTest {
         bytes memory sig2 = _sign(sl);
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
         vm.expectRevert(abi.encodeWithSelector(Base.ValidationFailed.selector, uint256(0)));
-        aggSolver.executeItemFill(sl, sig2, AMOUNT_IN, p, "", lateItems, _np());
+        aggSolver.executeItemFill(sl, sig2, AMOUNT_IN, p, "", lateItems, _np(), noGuard());
     }
 
     function test_itemFill_ocoBracketLeg_claimEarly() public {
@@ -244,7 +245,7 @@ contract AggregatorZeroCapitalItemsTest is AggregatorFillSolverTest {
         RoutePlan memory p = _plan(address(aggSolver), 80e18);
         p.router = address(r2);
         p.data = abi.encodeCall(TwoOutRouter.swap, (AMOUNT_IN, 85e18, 6e18, address(aggSolver)));
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
         assertEq(tB.balanceOf(maker), 80e18);
         assertEq(tC.balanceOf(maker), 5e18);
         assertEq(tB.balanceOf(address(this)), 5e18 - 1, "tB spread back through the pool sweep");
@@ -287,7 +288,7 @@ contract AggregatorZeroCapitalItemsTest is AggregatorFillSolverTest {
             })
         );
         bytes memory sig = _sign(o);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", 0, _np(), noGuard());
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "legs settled from the route");
         assertEq(tC.balanceOf(maker), 0, "swept");
         assertEq(tC.balanceOf(address(aggSolver)), 50e18, "the SETTLE receipt is retained, not routed / split");

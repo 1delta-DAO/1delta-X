@@ -12,7 +12,8 @@ import {FillRecovery} from "@solvers/aggregator/FillRecovery.sol";
 import {MockERC20} from "@coretest/shared/MockSettlementBase.t.sol";
 import {AggregatorFillSolverTest, MockRouter} from "./AggregatorFillSolver.t.sol";
 import {RecoveringSolver} from "./FillRecovery.t.sol";
-import {newAgg} from "./shared/AggDeploy.sol";
+import {newAgg, noGuard} from "./shared/AggDeploy.sol";
+import {MULTI_ROUTE} from "@solvers/aggregator/RouteSandbox.sol";
 
 /// @dev Pays TWO output tokens from one input — a multicall-shaped route, the
 ///      only way one router call can fund an order whose output legs span tokens.
@@ -231,8 +232,12 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
     // ═══════════════════════════ AGG-2 ═══════════════════════════
 
     /// AGG-2: a second input leg in a third token used to be paid here and never
-    /// looked at again. It is measured and split like any other residue now.
-    function test_audit_AGG_2_nonAnchorInputLegIsNotStranded() public {
+    /// looked at again; the AGG-2 fix measured it and split it as residue — the maker's
+    /// second currency became filler spread. Since 2026-10-18 (review S-3) it is
+    /// ROUTED instead: {executeFill} (which routes the anchor alone) refuses the shape
+    /// with {MultiInputUnrouted}, and {executeItemFill} with a MULTICALL route pushes tC
+    /// to the sandbox next to tA, where the route sells both.
+    function test_audit_AGG_2_nonAnchorInputLegIsRouted() public {
         uint256 extra = 5e18;
         tC.mint(maker, extra);
         _makerApprove(address(settlement), address(tC), type(uint160).max);
@@ -243,12 +248,30 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
         o.legsIn = PackedEncode.legsIn(legsIn);
         bytes memory sig = _sign(o);
 
+        vm.expectRevert(AggregatorFillSolver.MultiInputUnrouted.selector);
         aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", new Permit2612[](0));
 
-        // Only the self-seeded 1-wei floor stays (a zero snapshot), out of the
-        // filler's residue — deliberate, not stranded.
-        assertEq(tC.balanceOf(address(aggSolver)), 1, "no third-token input stranded on the solver");
-        assertEq(tC.balanceOf(address(this)), extra - 1, "it reached the filler as residue");
+        MockRouter routerC = new MockRouter(address(tC), address(tB));
+        tB.mint(address(routerC), 1_000e18);
+        address[] memory targets = new address[](4);
+        bytes[] memory datas = new bytes[](4);
+        (targets[0], datas[0]) = (address(tA), abi.encodeCall(tA.approve, (address(router), AMOUNT_IN)));
+        (targets[1], datas[1]) = (address(router), abi.encodeCall(MockRouter.swap, (AMOUNT_IN, address(aggSolver))));
+        (targets[2], datas[2]) = (address(tC), abi.encodeCall(tC.approve, (address(routerC), extra)));
+        (targets[3], datas[3]) = (address(routerC), abi.encodeCall(MockRouter.swap, (extra, address(aggSolver))));
+        RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT + extra); // both legs' proceeds
+        p.router = MULTI_ROUTE;
+        p.data = abi.encode(targets, datas);
+        uint256 fillerB = tB.balanceOf(address(this));
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, new Permit2612[](0), noGuard());
+
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
+        assertEq(tC.balanceOf(address(routerC)), extra, "the second currency was SOLD");
+        assertEq(tC.balanceOf(address(aggSolver)), 0, "no tC residue");
+        assertEq(tC.balanceOf(address(this)), 0, "none of it reached the filler as tC");
+        assertEq(
+            tB.balanceOf(address(this)) - fillerB, AMOUNT_IN + extra - AMOUNT_OUT - 1, "spread over both inputs, less the tB floor"
+        );
     }
 
     // ═══════════════════════════ AGG-6 ═══════════════════════════
@@ -272,6 +295,7 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
             router: address(r2),
             minOut: AMOUNT_OUT,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: NO_PATCH,
             amountOutOffset: NO_PATCH,
             minBumpBps: 0,
@@ -317,6 +341,7 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
             router: address(dr),
             minOut: AMOUNT_OUT,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: NO_PATCH,
             amountOutOffset: NO_PATCH,
             minBumpBps: 0,

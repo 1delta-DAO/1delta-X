@@ -49,6 +49,39 @@ const ONE = 10n ** 18n;
 /** USDT0 (6 dec) → 18-dec scale factor. */
 const USDT0_TO_18 = 10n ** 12n;
 
+/**
+ * The ROUTE strategy's shape admissions beyond the plain one-in/one-out order
+ * (§4 of REVIEW-2026-10-18-zero-capital-fills.md) — each behind its own switch
+ * (`ROUTE_ADMIT_*`, config.ts `RouteConfig.admit`); unset = refused. Every one is a
+ * shape the DEPLOYED AggregatorFillSolver (v3) fills with zero capital; the filler
+ * math that each one needs lives in routeFiller.ts `tryFill`:
+ *   • `feeLegs` — extra OUTPUT legs in the input token (an in-kind fee: the solver keeps
+ *     it back from the route, `test_S1_*`) or in the anchor output token (a fee leg the
+ *     core pulls next to the maker's, both under one per-token `maxPay`, `test_S3_*`,
+ *     `test_sentinel_makerSignedFeeLegIsPaid`). PULL only: a direct pool route pays
+ *     `legsOut[0]` alone. A fee leg in a third token is refused (the route is single-output);
+ *   • `proportional` — a balance-relative `legsIn[0]` ("sell my balance", `end` = the cap):
+ *     PULL, item-free, FULL fill only, filled with the `type(uint256).max` sentinel so the
+ *     patched route follows the anchor resolved at inclusion (`AggregatorProportionalSentinelTest`);
+ *   • `validators` — validators / invariants on the item-free path (`executeFill`). The
+ *     filler sends `takerData = 0x`: a validator that needs a cosigned blob reverts in
+ *     the simulation and is never sent. (The item path admitted them already.)
+ *   • `modules` — a `fillModule` / `pricingModule`. The lens previews through the module
+ *     (with `takerData = 0x`) and `previewBump` floors a price module's maker-ward move.
+ *   • `thirdPartyRecipients` — ITEM-FREE orders only: the maker's output leg paid to another address: pull (the
+ *     core delivers to the leg's recipient) and direct (the pool route's last hop pays
+ *     the leg's recipient, `test_direct_payeeIsLeg0Recipient`; native: `test_native_paysLegRecipient`);
+ *   • `sigless` — an order approved on-chain (`approveOrder`), filled with an empty signature.
+ */
+export interface ShapeAdmit {
+  feeLegs?: boolean;
+  proportional?: boolean;
+  validators?: boolean;
+  modules?: boolean;
+  thirdPartyRecipients?: boolean;
+  sigless?: boolean;
+}
+
 /** What {@link plainShape} may admit beyond the plain shape — each off unless given. */
 export interface ShapeExtras {
   hasPermitBatch?: boolean;
@@ -65,6 +98,8 @@ export interface ShapeExtras {
    * capabilities (SDK `classifyItemFill`). Unset = every item refused.
    */
   itemFills?: ItemFillCaps;
+  /** The route's shape admissions ({@link ShapeAdmit}); unset = the plain shape only (the inventory strategy). */
+  admit?: ShapeAdmit;
 }
 
 /** What {@link plainShape} found beyond the plain shape. */
@@ -77,71 +112,135 @@ export interface ShapeInfo {
   nativeBalance?: boolean;
   /** An item fill: `executeItemFill`'s `lateItems` (SDK `classifyItemFill`). */
   itemFill?: { lateItems: bigint };
+  /**
+   * A FLASH-REQUIRED item order (SDK `classifyItemFill` → `needsFlash`: a cycle, e.g. a
+   * fused composite, M-3): no zero-capital schedule exists, only a flash around the
+   * one-order plan (MatchFlashSolver, S-4). Returned only so the route can hand it to
+   * the flash path or refuse it with the classifier's reason.
+   */
+  flash?: { reason: string };
+  /** A balance-relative `legsIn[0]` (admitted by {@link ShapeAdmit.proportional}). */
+  proportional?: boolean;
+  /** More than one output leg (admitted by {@link ShapeAdmit.feeLegs}). */
+  feeLegs?: boolean;
+}
+
+/**
+ * The ANCHOR output token of a one-input order — the token the route must produce: the
+ * first output leg's token that is not the input's (the solver's own anchor rule,
+ * `AggregatorFillSolver._plan`). `undefined` when every output leg is in the input token.
+ */
+export function anchorOutToken(order: Order): Address | undefined {
+  const tin = order.legsIn[0]?.token;
+  const leg = order.legsOut.find((l) => tin === undefined || !eqAddr(l.token, tin));
+  return leg?.token;
 }
 
 /**
  * The plain one-in/one-out shape the beta app signs, minus the delivery-mode and
  * exclusivity checks (which differ per strategy). Every extra feature (items,
  * validators, modules, fee legs, proportional legs, single-signature permits) is a
- * way for the price we preview to differ from what we pay, so in the beta we
- * simply do not take it — except, each behind its own switch in `extras`:
+ * way for the price we preview to differ from what we pay, so the INVENTORY strategy
+ * does not take it. The ROUTE strategy admits more, each behind its own switch:
+ *   • `extras.admit` ({@link ShapeAdmit}): fee legs, proportional inputs, validators /
+ *     invariants, fill / pricing modules, third-party recipients, sigless orders;
  *   • NATIVE delivery (`nativeBalance`): the output leg is the `NativeBalance` view,
- *     DIRECT only, to the maker, no items — returned as `nativeBalance: true`;
+ *     DIRECT only, no items — returned as `nativeBalance: true`;
  *   • ITEM fills (`itemFills`): an item-bearing PULL order the SDK classifier schedules
- *     for `executeItemFill` — returned as `itemFill.lateItems`. Validators and
- *     invariants are admitted on that path (they can only revert, and the fill is
- *     simulated first), and the output leg may go to the module of an item that
- *     consumes it (a pre-funded MAKE, a leg-reference TAKE_FOR);
+ *     for `executeItemFill` — returned as `itemFill.lateItems` — or marks FLASH-REQUIRED
+ *     (`flash`). Validators and invariants are admitted on that path (they can only
+ *     revert, and the fill is simulated first), and the output leg may go to the module
+ *     of an item that consumes it (a pre-funded MAKE, a leg-reference TAKE_FOR);
  *   • the NativeUnwrapModule shape (`nativeUnwrap`) — `nativeOut: true`, routable only
  *     when it is also an item fill (route.ts `classifyRoute`).
- * Shared by the inventory and route strategies (the inventory passes no switches).
+ * A single-signature permit order is always refused: its first fill has no callback
+ * entry (review C-1). Shared by the inventory and route strategies (the inventory
+ * passes no switches).
  */
 export function plainShape(
   order: Order,
   extras: ShapeExtras = {},
 ): Verdict<ShapeInfo> {
+  const admit = extras.admit ?? {};
   if (extras.hasPermitBatch) return { ok: false, reason: "single-signature permit orders not supported" };
-  if (extras.sigless) return { ok: false, reason: "on-chain-approved (sigless) orders not supported" };
-  if (order.legsIn.length !== 1 || order.legsOut.length !== 1) return { ok: false, reason: "not one-in/one-out" };
-  if (order.fillModule !== zeroAddress || order.pricingModule !== zeroAddress) {
+  if (extras.sigless && !admit.sigless) return { ok: false, reason: "on-chain-approved (sigless) orders not supported" };
+  // A further input currency (review 2026-10-18 S-3): solver v4 reverts it
+  // `MultiInputUnrouted` unless it is routed by a MULTI_ROUTE item fill (which this filler
+  // does not build), and v3 split it as residue — refused up front, never simulated.
+  if (order.legsIn.length !== 1) {
+    const tin = order.legsIn[0]?.token;
+    const extra = order.legsIn.slice(1).find((l) => !eqAddr(l.token, tin ?? "") && !order.legsOut.some((o) => eqAddr(o.token, l.token)));
+    return { ok: false, reason: extra ? `not one-in/one-out: a further input currency ${extra.token} (MultiInputUnrouted — needs a MULTI_ROUTE item fill)` : "not one-in/one-out" };
+  }
+  if (order.legsOut.length === 0) return { ok: false, reason: "not one-in/one-out" };
+  if (order.legsOut.length > 1 && !admit.feeLegs) return { ok: false, reason: "not one-in/one-out (fee legs: ROUTE_ADMIT_FEE_LEGS)" };
+  if ((order.fillModule !== zeroAddress || order.pricingModule !== zeroAddress) && !admit.modules) {
     return { ok: false, reason: "fill/pricing modules not supported" };
   }
   const legIn = order.legsIn[0]!;
   const legOut = order.legsOut[0]!;
-  if (isProportional(legIn.start)) return { ok: false, reason: "proportional (balance-relative) leg" };
-  const toMaker = legOut.recipient === zeroAddress || eqAddr(legOut.recipient, order.maker);
+  const proportional = isProportional(legIn.start);
+  if (proportional && !admit.proportional) return { ok: false, reason: "proportional (balance-relative) leg" };
+  const direct = isDeltaVerify(order);
+  const validated = order.validators.length > 0 || order.invariants.length > 0;
+  const toMakerAddr = (to: string) => to === zeroAddress || eqAddr(to, order.maker);
 
   // NATIVE DELIVERY through the NativeBalance view (task 30) — exactly the app's shape.
   const nb = extras.nativeBalance;
-  if (nb && eqAddr(legIn.token, nb.view)) return { ok: false, reason: "NativeBalance as an input leg (a balance view cannot be pulled)" };
+  if (nb && order.legsIn.some((l) => eqAddr(l.token, nb.view))) return { ok: false, reason: "NativeBalance as an input leg (a balance view cannot be pulled)" };
   if (nb && eqAddr(legOut.token, nb.view)) {
     if (order.items.length) return { ok: false, reason: "native (NativeBalance) order with items" };
-    if (order.validators.length || order.invariants.length) return { ok: false, reason: "validators/invariants not supported" };
-    if (!isDeltaVerify(order)) return { ok: false, reason: "a NativeBalance output needs DIRECT delivery (it cannot be pulled)" };
+    if (order.legsOut.length > 1) return { ok: false, reason: "native (NativeBalance) order with fee legs (DIRECT pays leg 0 only)" };
+    if (validated && !admit.validators) return { ok: false, reason: "validators/invariants not supported" };
+    if (!direct) return { ok: false, reason: "a NativeBalance output needs DIRECT delivery (it cannot be pulled)" };
+    if (proportional) return { ok: false, reason: "proportional input needs PULL delivery" };
     if (eqAddr(legIn.token, nb.wrapped)) return { ok: false, reason: "native-out from the wrapped native coin (an unwrap, not a swap)" };
-    if (!toMaker) return { ok: false, reason: "native output goes to a third party" };
+    if (!toMakerAddr(legOut.recipient) && !admit.thirdPartyRecipients) return { ok: false, reason: "native output goes to a third party" };
     return { ok: true, nativeBalance: true };
   }
+  if (nb && order.legsOut.some((l) => eqAddr(l.token, nb.view))) return { ok: false, reason: "NativeBalance on an output leg other than leg 0" };
+
+  // FEE LEGS: every output leg in the input token (in-kind, kept back) or the anchor output token.
+  const anchor = anchorOutToken(order);
+  const feeLegs = order.legsOut.length > 1;
+  if (feeLegs) {
+    if (direct) return { ok: false, reason: "fee legs need PULL delivery (a direct pool route pays legsOut[0] only)" };
+    if (!anchor) return { ok: false, reason: "same-token order" };
+    const bad = order.legsOut.findIndex((l) => !eqAddr(l.token, legIn.token) && !eqAddr(l.token, anchor));
+    if (bad !== -1) return { ok: false, reason: `fee leg ${bad} in a third token (the route is single-output)` };
+  }
+  // The maker's leg: the first one in the anchor output token (legsOut[0] on a plain order).
+  const makerLeg = (anchor && order.legsOut.find((l) => eqAddr(l.token, anchor))) || legOut;
+  const toMaker = toMakerAddr(makerLeg.recipient);
+  const tags: ShapeInfo = { ...(proportional ? { proportional: true } : {}), ...(feeLegs ? { feeLegs: true } : {}) };
+  if (proportional && direct) return { ok: false, reason: "proportional input needs PULL delivery (a direct route pays a fixed output from a moving input)" };
 
   if (order.items.length) {
+    if (proportional) return { ok: false, reason: "proportional input with items (not on the item path)" };
     // The NativeUnwrapModule shape (task 28) is recognised; it routes only as an item fill.
     const module = extras.nativeUnwrap ? nativeOutShape(order, extras.nativeUnwrap.module, extras.nativeUnwrap.wrapped).ok : false;
     if (!extras.itemFills) return module ? { ok: true, nativeOut: true, itemSkip: "item fills are off (ITEM_FILLS)" } : { ok: false, reason: "items not supported" };
     const c = classifyItemFill(order, extras.itemFills);
+    if (c.path === "skip" && c.needsFlash) {
+      if (!toMaker && !order.items.some((it) => eqAddr(it.module, makerLeg.recipient))) return { ok: false, reason: "output goes to a third party" };
+      return { ok: true, flash: { reason: c.reason }, ...tags, ...(module ? { nativeOut: true } : {}) };
+    }
     if (c.path !== "executeItemFill") {
       const why = c.path === "skip" ? c.reason : "no item path";
       return module ? { ok: true, nativeOut: true, itemSkip: why } : { ok: false, reason: `item fill: ${why}` };
     }
-    // The leg may go to the maker, or to the module of an item that consumes it.
+    // The leg may go to the maker, or to the module of an item that consumes it — never
+    // elsewhere on the item path (ROUTE_ADMIT_THIRD_PARTY covers item-free orders only:
+    // a leg parked on a contract no item spends is the stranding shape this guards).
     if (!toMaker) {
-      const sink = order.items.some((it, k) => eqAddr(it.module, legOut.recipient) && (c.roles[k]!.kind === "make-prefund" || c.roles[k]!.kind === "take-for-leg"));
+      const sink = order.items.some((it, k) => eqAddr(it.module, makerLeg.recipient) && (c.roles[k]!.kind === "make-prefund" || c.roles[k]!.kind === "take-for-leg"));
       if (!sink) return { ok: false, reason: "output goes to a third party" };
     }
-    return { ok: true, itemFill: { lateItems: c.lateItems }, ...(module ? { nativeOut: true } : {}) };
+    return { ok: true, itemFill: { lateItems: c.lateItems }, ...tags, ...(module ? { nativeOut: true } : {}) };
   }
-  if (order.validators.length || order.invariants.length) return { ok: false, reason: "validators/invariants not supported" };
-  if (!toMaker) return { ok: false, reason: "output goes to a third party" };
-  return { ok: true };
+  if (validated && !admit.validators) return { ok: false, reason: "validators/invariants not supported" };
+  if (!toMaker && !admit.thirdPartyRecipients) return { ok: false, reason: "output goes to a third party" };
+  return { ok: true, ...tags };
 }
 
 const eqAddr = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();

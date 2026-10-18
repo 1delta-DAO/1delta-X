@@ -96,10 +96,18 @@ directly, outside the atomic on-behalf flow.
   TellerV2 proxy: a loan is opened on the open market 21, then repaid through the
   real Settlement + Permit3 with both repay modules. Uses the public RPC list in
   `CoreSettlementBase` (override with `ETH_RPC_URL`).
+- `test/fork/NettedPreFundFork.t.sol` — the pre-funded Repay on the netted
+  `matchSettle` path against the live TellerV2 proxy (same block and market as
+  above): over-delivery swept to the maker, two makers' repays interleaved on one
+  module, and an item scheduled before its own delivery failing closed.
+- `test/unit/NettedPreFund.t.sol` — the same netted shapes for PoolDeposit and
+  Repay over the real Settlement + Permit3 with mocked venues; the mock pool models
+  the Hypernative check, so an unregistered module reverts the whole plan.
 - `test/security/` — direct-call rejection, no fork.
 
 There is no deposit fork test yet: it needs a live V2/V3 pool address and the
-registration steps above.
+registration steps above. PoolDeposit on the netted path is covered on the mock
+pool only.
 
 ```
 FOUNDRY_PROFILE=modules-teller forge test --root ../../../..

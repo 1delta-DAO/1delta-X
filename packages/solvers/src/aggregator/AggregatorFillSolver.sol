@@ -6,7 +6,8 @@ import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 import {Settlement, Order, CallbackMode, MatchStep} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 import {Batch} from "@core/settlement/Batch.sol";
-import {RouteSandbox} from "./RouteSandbox.sol";
+import {RouteSandbox, MULTI_ROUTE} from "./RouteSandbox.sol";
+import {MatchRaceGuard} from "../base/MatchRaceGuard.sol";
 
 /// @title AggregatorFillSolver
 /// @notice Zero-inventory fills against an off-chain aggregator route: take the
@@ -173,7 +174,10 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///       sweep all measure `balance − balanceBefore`, snapshotted in
 ///       `executeFill` before Settlement moves anything. A balance-based figure
 ///       would let a self-signed 1-wei order approve, deliver or sweep whatever
-///       an unrelated fill left parked here.
+///       an unrelated fill left parked here. The ONE exception is deliberate and
+///       capped: {RoutePlan.inventory} (2026-10-18, see INVENTORY below) — an explicit,
+///       operator-supplied per-call ceiling on what a fill may draw from value held
+///       before it, never a balance-derived figure.
 ///
 ///    3. NO ALLOWANCE OF THIS CONTRACT SURVIVES THE FILL. It approves no router at
 ///       all (the sandbox does, from its own account — see the ⚠ there on why
@@ -245,9 +249,45 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///
 ///  SUPPORTED SHAPES (audit 2026-09-30 AGG-2 / AGG-6): any number of input and
 ///  output legs over at most {MAX_TOKENS} distinct tokens (each measured, approved
-///  and split on its own delta — see {FillRoute}); one route call per fill, no
-///  native value. Only `legsIn[0]`'s token (the anchor) is pushed to the sandbox
-///  and routed; a further input leg's token stays here and is split as residue.
+///  and split on its own delta — see {FillRoute}); one route per fill (one call, or
+///  a {MULTI_ROUTE} sequence), no native value. `legsIn[0]`'s token (the anchor) is
+///  what a route is pushed and patched with. A FURTHER INPUT CURRENCY — an input token
+///  no output leg is paid in — is ROUTED on {executeItemFill} with a {MULTI_ROUTE}
+///  (pushed to the sandbox at its delta, {_pushExtras}) and REFUSED everywhere else
+///  ({MultiInputUnrouted}; review 2026-10-18 S-3 — it used to stay here and be split
+///  as filler residue, the maker's second token silently becoming spread). A
+///  non-anchor input token that is also an output token nets in place against its
+///  output legs, as before. Zero input legs (an NFT sale) and zero output legs are
+///  admitted since 2026-10-18; both empty is {NoLegs}.
+///
+///  INVENTORY (2026-10-18, review S-1) — it can only improve a fill
+///  ───────────────────────────────────────────────────────────────
+///  {RoutePlan.inventory} lets ONE fill draw up to that much of the anchor output token
+///  from this contract's own pre-fill balance, on top of the route's proceeds: a route
+///  shortfall is covered, or the route is left out entirely (an EMPTY route, `router =
+///  POOL_ROUTE`, `data = ""` — the maker's input then stays here as residue). PULL: the
+///  Settlement approval is `proceeds + min(inventory, held)`; NETTED: that much is
+///  pushed and the pool sweeps the unused part back; DIRECT: the leg-0 recipient's
+///  measured shortfall against the core's live price is sent ({_topUp}), at most the
+///  cap — so a DIRECT order naming this solver, the app's default, is servable from
+///  inventory too; NATIVE: the unwrap may use WNATIVE inventory. `maxPay` still caps
+///  the total. It reopens none of the three invariants above: no call target is
+///  added, no allowance survives the fill, and the one non-delta amount is bounded by
+///  an explicit per-call cap that only an OPERATOR can set (only operators start fills,
+///  and the operators can {sweep} the same balance anyway — the cap bounds what one
+///  mis-priced call may spend; it grants nothing). `0` = the delta-only behaviour.
+///
+///  RACES (2026-10-18, review S-5)
+///  ──────────────────────────────
+///  {executeFill}: pass the core's remainder sentinel `fillAmount = type(uint256).max`
+///  with a PATCHED input (`amountInOffset` set) and a competitor's partial fill no
+///  longer reverts this one `OverFill`: the core fills what is left, the route swaps
+///  exactly that, and `minOut` is scaled pro rata to what was routed against the
+///  quoted amount ({_minOut}) — a price floor, so the smaller remainder still clears
+///  it; `minBumpBps` (the core's) stays the price protection. {executeItemFill}: the
+///  {ItemFillGuard} runs {MatchRaceGuard}'s `filled` check (and, for a fill-once order,
+///  the nonce check) before the permits, the plan build and `matchSettle`, so a lost
+///  race costs a few thousand gas — {MatchRaceGuard.OrderTaken} / `NonceTaken`.
 ///
 ///  AN OUTPUT LEG IN THE ANCHOR TOKEN (an in-kind sourcing fee: `legsOut[j].token
 ///  == legsIn[0].token`) IS KEPT BACK, NOT ROUTED, ON BOTH ENTRIES. {executeItemFill}:
@@ -279,7 +319,8 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///      borrow needs this fill's own delivery deposited first — `BatchNotWhole` /
 ///      `LegUnfunded`): those stay with the flash family (`BaseFlashSolver`) or an
 ///      inventory filler. `minBumpBps` / `amountOutOffset` cannot take effect there and
-///      are refused ({ItemFillUnsupported}).
+///      are refused ({ItemFillUnsupported}); the price floor there is the plan's
+///      ABSOLUTE `minOut` with `maxPay` (S-6, see {executeItemFill}).
 ///    • MULTI-OUTPUT routes: an opaque route may produce several output tokens; every
 ///      output token's proceeds of the fill are approved (pull) / pushed (netted)
 ///      at their own delta, so one route can fund an order with two output legs in
@@ -287,23 +328,35 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///      in the anchor output token, so a second output token gets no proceeds and
 ///      the fill fails closed.
 ///    • SETTLE RECEIPTS on {executeItemFill}: a SETTLE item pays its asset to THIS
-///      contract (`matchSettle`'s caller). Only `legsIn[0]`'s token is routed, so a
-///      receipt is SOLD by the route only if it is that token AND the item is flagged
-///      early (it lands before the route; the routed amount is the measured delta, so
-///      the delta-only rule covers it). A receipt in any OTHER token — a
-///      `ProportionalSweepModule` sweep of a second token, an NFT from a sale module —
-///      is neither routed nor split: it stays here as retained value, unreachable by
-///      later fills (every amount is a delta) and moved out by the operators with
-///      {sweep}. The legs must therefore be fundable from `legsIn[0]` alone; selling a
-///      foreign receipt in the same fill needs a multi-input route (the sandbox pushes
-///      and approves one token) and is not supported. An `OcoGroupModule` claim moves
-///      nothing and fills early or late.
+///      contract (`matchSettle`'s caller). Flag it EARLY (it lands before the route)
+///      and it can be SOLD in the same fill (review 2026-10-18 S-2):
+///        – in `legsIn[0]`'s token: it is part of the routed anchor delta, as before;
+///        – in a FOREIGN ERC-20 (a `ProportionalSweepModule` sweep of a second token):
+///          list it in {ItemFillGuard.receipts} — snapshotted with the order's tokens,
+///          pushed to the sandbox on a {MULTI_ROUTE}, swept back and split like any
+///          residue; unlisted, it stays here as retained value (unreachable by later
+///          fills, every amount being a delta) for the operators' {sweep};
+///        – an ERC-721 / ERC-1155 (`NftSettlementModule`, `Erc1155SettlementModule`):
+///          the receiver hook ({fallback}) accepts it only inside an armed item fill
+///          before its route and forwards it straight to the sandbox, where a
+///          {MULTI_ROUTE} sells it (e.g. `[collection.setApprovalForAll(market), market
+///          .buy(…, payTo = this solver)]`); the sale proceeds then pay the maker — an
+///          NFT sale with ZERO filler capital. An order with no input legs (the sale's
+///          shape) is admitted. A LATE NFT SETTLE is refused (nothing could sell it), and
+///          an NFT the route does not sell stays in the sandbox, recoverable by an
+///          operator route (`target = collection, data = transferFrom(sandbox, …)`).
+///      An `OcoGroupModule` claim moves nothing and fills early or late.
 ///    • Single-signature PermitBatchWitness orders: their FIRST fill has no
 ///      callback entry (`fillWithPermit` passes no callback, and `fillWithCallback`
 ///      / `matchSettle` verify only an Order signature), so it needs capital up
-///      front — the flash family takes such an order through its permit envelope
-///      ({BaseFlashSolver.PERMIT_ENVELOPE}). Every LATER slice is fillable here:
-///      the settler skips signature verification once `filled != 0`.
+///      front. The flash family can take it through its permit envelope
+///      ({BaseFlashSolver.PERMIT_ENVELOPE}) — but ONLY where a flash provider exists
+///      (Balancer / Aave / Euler / Morpho / Midnight): on Rootstock there is none, so
+///      there the first fill needs a filler holding the output (corrected 2026-10-18,
+///      review §5; this note used to say the flash family "takes such an order",
+///      unconditionally). The structural fix is core-side (review C-1: callback
+///      arguments on `fillWithPermit`). Every LATER slice is fillable here: the
+///      settler skips signature verification once `filled != 0`.
 ///
 ///  What it changes otherwise is WHO Settlement sees as the filler. The exclusivity
 ///  gate compares `order.exclusiveFiller` to `msg.sender` of the fill, which is
@@ -402,6 +455,26 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///        down to them for the same reason. Together with `minOut` this pins the
 ///        spread: the fill can only succeed if `proceeds >= minOut` and the maker
 ///        takes at most `maxPay`, so profit >= `minOut - maxPay` by construction
+///        (with {inventory} drawn: `>= minOut - maxPay` still, the draw counting as
+///        paid). Below 2^128 ({AmountTooLarge}).
+/// @param inventory the most of the ANCHOR OUTPUT token this fill may draw from the
+///        solver's OWN balance — value held BEFORE the fill — on top of the route's
+///        proceeds (review 2026-10-18 S-1). `0` = none: every amount is this fill's delta,
+///        exactly as before. Set, it covers a route shortfall or replaces the route
+///        outright (an EMPTY route: `router = POOL_ROUTE`, `data = ""`), so inventory can
+///        only ever ADD to what a fill can pay — never be required by it. Bounded three
+///        ways: by this cap, by the pre-fill balance, and by what the order demands —
+///        PULL: Settlement is approved `proceeds + min(inventory, held)` (it pulls the
+///        priced legs, the rest of the approval is zeroed); NETTED: that much is pushed
+///        and the pool sweeps the unused part straight back; DIRECT: the leg-0 recipient's
+///        measured shortfall against the core's live price is sent, at most `inventory`
+///        ({InsufficientOutput} past it); NATIVE: the unwrap may use it. `maxPay` still
+///        caps the total. Only an operator can start a fill, and only a fill an operator
+///        started can draw — the operators can {AggregatorFillSolver.sweep} the same
+///        balance anyway, so the cap grants no authority they lack; it bounds what one
+///        mis-priced call can spend. The maker's input a draw pays for is residue, split
+///        by the {SurplusPolicy} like any (retain mode keeps it here as the new
+///        inventory). Below 2^128 ({AmountTooLarge}). BREAKING (2026-10-18): new field.
 /// @param amountInOffset byte offset within `data` of the 32-byte input amount to
 ///        REWRITE with the amount actually routed — this fill's input delta less the
 ///        output legs it owes in that same token (see {AggregatorFillSolver.onSettlementFill}),
@@ -452,6 +525,7 @@ struct RoutePlan {
     address router;
     uint256 minOut;
     uint256 maxPay;
+    uint256 inventory;
     uint256 amountInOffset;
     uint256 amountOutOffset;
     uint256 minBumpBps;
@@ -569,6 +643,37 @@ struct Permit2612 {
     bytes32 s;
 }
 
+/// @notice {AggregatorFillSolver.executeItemFill}'s race guard and foreign receipts (review
+///         2026-10-18 S-5 / S-2), checked by the solver before anything moves. (The item
+///         path's PRICE floor is the plan's absolute `minOut` with `maxPay` — see
+///         {AggregatorFillSolver.executeItemFill}, S-6.)
+/// @param orderHash / expectedFilled {MatchRaceGuard}'s `filled` check for this one order
+///        ({MatchRaceGuard._requireUntouched}'s rule, EXACT equality — see there why):
+///        `filled[orderHash]` must still read `expectedFilled`, the value the plan was
+///        simulated against — ONE `SLOAD` before the permits, the plan build and
+///        `matchSettle`, so a lost race reverts {MatchRaceGuard.OrderTaken} for a few
+///        thousand gas instead of the full approach. `orderHash == 0` = no check. The
+///        hash is the caller's (off-chain / `SettlementLens.hashOrder`), never
+///        recomputed here — that is the point; a WRONG hash only makes the guard read
+///        another slot (it can refuse a good fill, never admit a bad one: the core
+///        gates the order itself)
+/// @param liveNonce also require the ORDER'S OWN `(maker, nonce)` to be live —
+///        {MatchRaceGuard.NonceTaken} — for a FILL-ONCE order (an OCO bracket leg) or one
+///        cancelled by nonce, which `filled` cannot show ({MatchRaceGuard}'s ⚠). The
+///        one-order form of {MatchRaceGuard._requireNoncesLive}: the pair is read from
+///        the order rather than passed twice. One more `SLOAD` (two on a bitmap nonce)
+/// @param receipts FOREIGN tokens a SETTLE item pays the solver (a second-token sweep —
+///        anything no leg names): snapshotted with the order's own tokens, pushed to the
+///        sandbox on a {MULTI_ROUTE} so the route can sell them, swept back and split like
+///        any residue. Without this entry such a receipt is retained (see "SETTLE
+///        RECEIPTS"). An NFT needs no entry: the receiver hook forwards it.
+struct ItemFillGuard {
+    bytes32 orderHash;
+    uint256 expectedFilled;
+    bool liveNonce;
+    address[] receipts;
+}
+
 /// @dev The pool interface a pool route calls — Uniswap v3's, which SushiSwap v3 and
 ///      Oku share (one callback name, `uniswapV3SwapCallback`).
 interface IUniswapV3PoolSwap {
@@ -586,17 +691,24 @@ interface IUniswapV3PoolSwap {
 ///
 ///         THE TOKEN SET (audit 2026-09-30 AGG-2 / AGG-6). Every DISTINCT token the
 ///         order's legs name, input legs first — so `tokens[0]` is always
-///         `legsIn[0]`'s token, the anchor the route swaps. `inMask` / `outMask`
+///         `legsIn[0]`'s token, the anchor the route swaps (with NO input leg, the
+///         first output token), then on {AggregatorFillSolver.executeItemFill} the
+///         {ItemFillGuard.receipts} (flagged in neither mask). `inMask` / `outMask`
 ///         flag which of them an input / output leg pays (a token can be both: a
 ///         same-token order, a fee leg in the input token). Each is measured
 ///         against its own pre-fill snapshot in `before`, so a second input leg in a
-///         third token has its residue split (since {RouteSandbox} only the anchor
-///         `tokens[0]` is pushed to the route; the others stay here) — it used to be paid here and never looked at again — and
+///         third token is measured on its own delta (routed on a netted {MULTI_ROUTE},
+///         refused otherwise — S-3; it used to be paid here and never looked at
+///         again, then split as residue), and
 ///         every output token is approved to Settlement at ITS OWN measured
 ///         proceeds, so the pull path is no longer limited to one output token.
 struct FillRoute {
     address router;
     uint256 minOut;
+    /// @dev TWO plan figures in one word (2026-10-18): bits [0, 128) = {RoutePlan.maxPay},
+    ///      bits [128, 256) = {RoutePlan.inventory} — both refused at or above 2^128
+    ///      ({AggregatorFillSolver.AmountTooLarge}). Packed for the reason {legs} is: a
+    ///      new word travels solver → Settlement → EXECUTOR → solver on every fill.
     uint256 maxPay;
     uint256 amountInOffset;
     uint256 amountOutOffset;
@@ -667,8 +779,9 @@ interface IWNative {
     function withdraw(uint256 amount) external;
 }
 
-contract AggregatorFillSolver {
-    Settlement public immutable SETTLEMENT;
+contract AggregatorFillSolver is MatchRaceGuard {
+    // `SETTLEMENT` (public immutable) is {MatchRaceGuard}'s — the settler whose
+    // `filled` book {executeItemFill}'s race guard reads is the one every fill uses.
     /// @dev The allowance-less trampoline that makes every callback. Read once at
     ///      construction: it is an immutable of Settlement and never changes.
     address public immutable EXECUTOR;
@@ -860,6 +973,13 @@ contract AggregatorFillSolver {
     error NativeSendFailed(address to);
     /// @dev Native coin from anything but {WNATIVE}'s `withdraw`.
     error NotWNative();
+    /// @dev {RoutePlan.maxPay} or {RoutePlan.inventory} at or above 2^128 — they share
+    ///      one word of {FillRoute}.
+    error AmountTooLarge();
+    /// @dev An input token that is neither `legsIn[0]`'s nor an output token, on a
+    ///      route other than a {MULTI_ROUTE} — the maker's second currency would be
+    ///      split here as residue instead of routed (review 2026-10-18 S-3).
+    error MultiInputUnrouted();
 
     /// @param operators who may call `executeFill`: 1..{MAX_SET} non-zero addresses.
     ///        EMPTY REVERTS ({NoOperators}) — see the trust-model note.
@@ -883,7 +1003,7 @@ contract AggregatorFillSolver {
         PoolVenue[] memory venues,
         address nativeBalance,
         address wnative
-    ) {
+    ) MatchRaceGuard(settlement) {
         if ((nativeBalance == address(0)) != (wnative == address(0)) || (wnative != address(0) && nativeBalance == wnative))
         {
             revert BadNative();
@@ -911,7 +1031,6 @@ contract AggregatorFillSolver {
         PROTOCOL_SURPLUS_PPM = policy.protocolPpm;
         PROTOCOL_RECIPIENT = policy.protocolRecipient;
         SEED_INPUT = policy.makerPpm == 0 && policy.protocolPpm == 0;
-        SETTLEMENT = Settlement(payable(settlement));
         address executor = address(Settlement(payable(settlement)).EXECUTOR());
         EXECUTOR = executor;
         SANDBOX = new RouteSandbox(settlement, address(Settlement(payable(settlement)).PERMIT3()), executor);
@@ -1050,6 +1169,12 @@ contract AggregatorFillSolver {
         // anything pre-fill — and reused afterwards for the sweep, so the callback
         // and the sweep can never disagree about what this fill created.
         FillRoute memory route = _plan(order, plan);
+        // MULTI-INPUT (review 2026-10-18 S-3): an input token that is neither the
+        // anchor nor an output token is the maker's payment in a second currency. It
+        // must be ROUTED, never silently split here as filler residue — and this entry
+        // routes the anchor alone, so it refuses the shape; {executeItemFill} with a
+        // {MULTI_ROUTE} routes it. (A non-anchor token that is ALSO an output nets in
+        // place against its output legs, as before.)
         _active = 2;
         fillAmountsOut = SETTLEMENT.fillWithCallback(
             order, sig, fillAmount, address(this), _callback(route), _mode(route), takerData, plan.minBumpBps
@@ -1163,6 +1288,21 @@ contract AggregatorFillSolver {
     ///  (Before B-1 the excess reached the route and the refund found an empty pool —
     ///  `TransferFailed`; review 2026-10-05.) Pinned in
     ///  `test/AggregatorAmountMismatch.t.sol`.
+    /// @param plan as {executeFill}'s, with the netted path's PRICE FLOOR in it (review
+    ///        2026-10-18 S-6). `matchSettle` carries no bump floor (`minBumpBps` is refused
+    ///        here), so the floor is the solver's own: `minOut` is ABSOLUTE on this entry
+    ///        (never scaled pro rata, unlike {executeFill}) and `maxPay` caps the push of
+    ///        the anchor output — together `spread >= minOut − maxPay`, whichever side of
+    ///        the order moves maker-ward between quote and inclusion: a SELL whose output
+    ///        tick rose needs more than `maxPay` and the pool comes up short
+    ///        (`BatchNotWhole`); a BUY whose input tick fell routes less and an
+    ///        exact-input route misses `minOut` ({InsufficientOutput}). Set both to the
+    ///        quote's figures (the beta filler's `minOut = owed + cost, maxPay = owed`).
+    ///        ⚠ An EXACT-OUTPUT quote on this path (fixed output word, input as the
+    ///        ceiling) keeps its spread as input residue, which no floor sees: quote item
+    ///        fills exact-input when the floor matters. (A separate input floor — a
+    ///        `minIn` on the guard — was built and measured at +331 B, which the deployed
+    ///        size budget did not have; see the 2026-10-18 report.)
     /// @param lateItems bit `k` set = item `k` runs AFTER delivery (step 6), clear =
     ///        before the input is pulled (step 1). Bits past the item count revert
     ///        {BadItemSchedule}. ⚠ Never flag a TAKE that produces an INPUT-leg token
@@ -1173,6 +1313,9 @@ contract AggregatorFillSolver {
     ///        proceeds are not an input-leg token (borrow after the deposit) is fine:
     ///        the core refunds them to the maker.
     /// @param permits as {executeFill}'s (BREAKING 2026-10-12, new last argument).
+    /// @param guard the race guard and the foreign receipts — see
+    ///        {ItemFillGuard}. BREAKING (2026-10-18): new last argument (all-empty = the
+    ///        previous behaviour).
     /// @return fillAmountsOut the delivered amount per output leg (`matchSettle`'s
     ///         `outs[0]`).
     function executeItemFill(
@@ -1182,20 +1325,101 @@ contract AggregatorFillSolver {
         RoutePlan calldata plan,
         bytes calldata takerData,
         uint256 lateItems,
-        Permit2612[] calldata permits
+        Permit2612[] calldata permits,
+        ItemFillGuard calldata guard
     ) external returns (uint256[] memory fillAmountsOut) {
         if (!isOperator(msg.sender)) revert NotOperator(msg.sender);
         if (_active != 1) revert Reentrancy();
+        // S-5: the race guard FIRST — before the permits, the plan build and the
+        // order hash `matchSettle` computes — so a competitor that landed first costs
+        // this call its SLOADs and nothing else ({MatchRaceGuard}, reused as is).
+        _raceGuard(guard, order.maker, order.nonce);
         // Task 17: neither field can take effect on the netted path, so a set one is
         // an operator expecting protection it would not get — refuse, never ignore.
+        // The netted path's price floor is the plan's ABSOLUTE `minOut` with `maxPay`
+        // (S-6, see the `plan` parameter note).
         if (plan.minBumpBps != 0 || plan.amountOutOffset < NO_PATCH) revert ItemFillUnsupported();
         // The netted path's PULL step draws through the same `Base._pullViaPermit3`
         // fallback as {executeFill}'s, so a maker permit funds it identically.
         if (permits.length != 0) _permits(permits, order.maker);
+        return _executeItemFill(order, sig, fillAmount, plan, takerData, lateItems, guard);
+    }
+
+    /// @dev {executeItemFill}'s race guard ({ItemFillGuard}): {MatchRaceGuard}'s two
+    ///      checks for ONE order, with its errors and its settler. Not its array helpers
+    ///      on purpose — measured on the deployed profile, `_requireUntouched` /
+    ///      `_requireNoncesLive` over one-element calldata arrays cost 758 B of runtime
+    ///      (the array walk, two high-level calls and their decoders), the same two checks
+    ///      as Solidity ~400 B; these are two raw `staticcall`s with the errors encoded by
+    ///      hand. EQUIVALENT SOLIDITY:
+    ///
+    ///          if (g.orderHash != 0 && SETTLEMENT.filled(g.orderHash) != g.expectedFilled)
+    ///              revert OrderTaken(0, g.expectedFilled, <actual>);
+    ///          if (g.liveNonce && SETTLEMENT.isNonceCancelled(maker, nonce))
+    ///              revert NonceTaken(0, maker, nonce);
+    ///
+    ///      A failed or short read fails CLOSED (it reads as taken / cancelled).
+    function _raceGuard(ItemFillGuard calldata g, address maker, uint256 nonce) private view {
+        address s = address(SETTLEMENT);
+        bytes4 taken = OrderTaken.selector;
+        bytes4 nonceTaken = NonceTaken.selector;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let h := calldataload(g) //                      g.orderHash
+            if h {
+                let expected := calldataload(add(g, 0x20)) // g.expectedFilled
+                mstore(0x00, 0x288cdc91) //                    filled(bytes32)
+                mstore(0x20, h)
+                let ok := and(gt(returndatasize(), 0x1f), staticcall(gas(), s, 0x1c, 0x24, 0x00, 0x20))
+                let actual := mload(0x00)
+                if or(iszero(ok), iszero(eq(actual, expected))) {
+                    let m := mload(0x40)
+                    mstore(m, taken) //                        OrderTaken(0, expected, actual)
+                    mstore(add(m, 0x04), 0)
+                    mstore(add(m, 0x24), expected)
+                    mstore(add(m, 0x44), actual)
+                    revert(m, 0x64)
+                }
+            }
+            // g.liveNonce
+            if calldataload(add(g, 0x40)) {
+                let m := mload(0x40)
+                mstore(m, 0x5b8a7d48) //                       isNonceCancelled(address,uint256)
+                mstore(add(m, 0x20), maker)
+                mstore(add(m, 0x40), nonce)
+                let ok := and(gt(returndatasize(), 0x1f), staticcall(gas(), s, add(m, 0x1c), 0x44, 0x00, 0x20))
+                if or(iszero(ok), mload(0x00)) {
+                    mstore(m, nonceTaken) //                   NonceTaken(0, maker, nonce)
+                    mstore(add(m, 0x04), 0)
+                    mstore(add(m, 0x24), maker)
+                    mstore(add(m, 0x44), nonce)
+                    revert(m, 0x64)
+                }
+            }
+        }
+    }
+
+    /// @dev {executeItemFill}'s body, in its own frame (legacy-profile stack).
+    function _executeItemFill(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        RoutePlan calldata plan,
+        bytes calldata takerData,
+        uint256 lateItems,
+        ItemFillGuard calldata guard
+    ) private returns (uint256[] memory fillAmountsOut) {
+        // Armed BEFORE the plan build (2026-10-18): {_plan} admits a multi-input order
+        // only on this entry and only for a {MULTI_ROUTE} (S-3; {onMatchRoute} pushes
+        // the further input currencies to the sandbox), and reads the entry from this
+        // state. Nothing between here and `matchSettle` makes a state-changing call
+        // (the plan build and the receipt snapshots are `balanceOf` staticcalls), so
+        // the NFT hooks, which accept in this state, cannot be reached before the plan.
+        _active = 4;
         FillRoute memory route = _plan(order, plan);
         if (route.direct) revert DirectNotMatchable();
+        if (guard.receipts.length != 0) _addReceipts(route, guard.receipts);
         bytes memory cd = _matchCalldata(order, sig, fillAmount, takerData, route, lateItems);
-        _active = 4;
         fillAmountsOut = _callMatch(cd);
         // Same reasoning as {executeFill}: a plan whose CALL never reached
         // {onMatchRoute} delivered out of something other than this fill's route.
@@ -1567,9 +1791,20 @@ contract AggregatorFillSolver {
     }
 
     /// @dev `token.allowance(owner, spender)`; a failed or short read counts as zero.
+    ///      EQUIVALENT SOLIDITY (the pre-2026-10-18 body, −~100 B as assembly):
+    ///      `(bool ok, bytes memory ret) = token.staticcall(abi.encodeWithSelector(
+    ///      0xdd62ed3e, owner, spender)); if (ok && ret.length >= 32) a = abi.decode(ret,
+    ///      (uint256));` — the same call; the return data is read from scratch space.
     function _allowance(address token, address owner, address spender) private view returns (uint256 a) {
-        (bool ok, bytes memory ret) = token.staticcall(abi.encodeWithSelector(0xdd62ed3e, owner, spender));
-        if (ok && ret.length >= 32) a = abi.decode(ret, (uint256));
+        /// @solidity memory-safe-assembly
+        assembly {
+            let m := mload(0x40)
+            mstore(m, 0xdd62ed3e00000000000000000000000000000000000000000000000000000000) // allowance(address,address)
+            mstore(add(m, 0x04), owner)
+            mstore(add(m, 0x24), spender)
+            // Arguments evaluate right to left: the call runs before `mload(0)` is read.
+            a := mul(mload(0x00), and(gt(returndatasize(), 0x1f), staticcall(gas(), token, m, 0x44, 0x00, 0x20)))
+        }
     }
 
     /// @dev Split this fill's INCREASE in `token` — the spread, in whichever
@@ -1639,6 +1874,37 @@ contract AggregatorFillSolver {
         }
     }
 
+    /// @dev {ItemFillGuard.receipts}: append each foreign receipt token after the
+    ///      order's own (so Settlement's universe indices — PRESEND — are unchanged) and
+    ///      snapshot it with them, before anything moves. From then on it is one more
+    ///      route token: pushed to the sandbox on a {MULTI_ROUTE} ({_pushExtras}), swept
+    ///      back, split. Item path only (never direct: every order token is snapshotted).
+    ///      `r.tokens` is {_plan}'s `new address[](MAX_TOKENS)` shrunk to its count, so it
+    ///      is grown IN PLACE back to that capacity (no copy), slotted ({TooManyTokens}
+    ///      past it), and shrunk again; `before` is reallocated.
+    function _addReceipts(FillRoute memory r, address[] calldata extra) private view {
+        address[] memory toks = r.tokens;
+        uint256 n = toks.length;
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(toks, MAX_TOKENS) // the capacity {_plan} allocated
+        }
+        uint256 m = n;
+        for (uint256 i; i < extra.length; ++i) {
+            (, m) = _slot(toks, m, extra[i]);
+        }
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(toks, m)
+        }
+        uint256[] memory bef = new uint256[](m);
+        uint256[] memory old = r.before;
+        for (uint256 k; k < m; ++k) {
+            bef[k] = k < n ? old[k] : SafeTransferLib.balanceOf(toks[k], address(this));
+        }
+        r.before = bef;
+    }
+
     /// @dev Resolve the route against the order, in its OWN frame: the two decoded
     ///      token addresses and the two snapshots push {executeFill} past the stack
     ///      limit under the legacy (non-via-IR) profile this package compiles with
@@ -1648,8 +1914,14 @@ contract AggregatorFillSolver {
     ///      {PackedArrays} reads a leg without consulting the blob's count byte,
     ///      and {PackedArrays.validateFixed} tolerates trailing bytes — so a
     ///      `legsOut` of `0x00 ‖ <104 bytes>` settles as ZERO output legs (the
-    ///      caller owes the maker nothing) while still naming a token here. Reject
-    ///      the empty blob and that shape cannot be built.
+    ///      caller owes the maker nothing) while still naming a token here. Every
+    ///      leg read below is bounded by those counts (the loops; {_payee} and
+    ///      {_nativeLeg} read leg 0 only with `nOut != 0`), so a zero-leg side names
+    ///      nothing. ZERO INPUT LEGS (an NFT sale: the asset is a SETTLE receipt) and
+    ///      ZERO OUTPUT LEGS (nothing to deliver — a route-less fill) are admitted
+    ///      since 2026-10-18 (review S-2 / S-7); only both empty is {NoLegs}. With no
+    ///      input leg `tokens[0]` is the first OUTPUT token: nothing is pre-sent, the
+    ///      route has no anchor delta to push (zero).
     function _plan(Order calldata order, RoutePlan calldata plan) private view returns (FillRoute memory r) {
         // Read in place from CALLDATA (2026-10-12; was a memory copy of each blob via
         // {PackedArraysMem} — the same validation and the same unchecked readers).
@@ -1657,7 +1929,10 @@ contract AggregatorFillSolver {
         bytes calldata legsOut = order.legsOut;
         uint256 nIn = PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE);
         uint256 nOut = PackedArrays.validateFixed(legsOut, PackedArrays.LEG_OUT_STRIDE);
-        if (nIn == 0 || nOut == 0) revert NoLegs();
+        if (nIn + nOut == 0) revert NoLegs();
+        // Both share {FillRoute.maxPay}'s word (low / high 128 bits — packed, not a new
+        // field: a word costs every fill ~300 gas through the callback round trip).
+        if ((plan.maxPay | plan.inventory) >> 128 != 0) revert AmountTooLarge();
         // The originator's share is the caller's to give, but only out of its own
         // remainder: the maker's and the protocol's shares are fixed, so the three
         // together may not exceed the whole. Checked here so a bad plan fails
@@ -1709,9 +1984,22 @@ contract AggregatorFillSolver {
             // a leg past index 126 is masked off rather than tested for: −17 gas).
             if (k == 0) r.legs |= (1 << j) & LEGS_SAME;
             if (!anchored) {
-                anchored = r.inMask & bit == 0;
+                // A NATIVE leg 0 anchors at once: its WNATIVE slot is the one the unwrap
+                // measures, also when the maker pays WNATIVE in (S-7).
+                anchored = r.inMask & bit == 0 || r.legs & LEGS_NATIVE != 0;
                 if (j == 0 || anchored) r.outAnchor = k;
             }
+        }
+        // MULTI-INPUT (review 2026-10-18 S-3): an input token that is neither the anchor
+        // nor an output token is the maker's payment in a second currency. It must be
+        // ROUTED, never silently split here as filler residue — and only the netted entry
+        // with a {MULTI_ROUTE} routes it ({onMatchRoute} pushes it to the sandbox; the
+        // entry is told apart by `_active`, which {executeItemFill} arms to 4 before this
+        // runs and {executeFill} leaves at 1). Everything else refuses the shape. A
+        // non-anchor token that is ALSO an output nets in place against its output legs.
+        // One check site, not one per entry: measured −240 B on the deployed profile.
+        if (r.inMask & ~r.outMask & ~uint256(1) != 0 && (plan.router != MULTI_ROUTE || _active != 4)) {
+            revert MultiInputUnrouted();
         }
         /// @solidity memory-safe-assembly
         assembly {
@@ -1726,16 +2014,26 @@ contract AggregatorFillSolver {
         }
         // A native order's `payee` is the native recipient, set by {_nativeLeg}; its
         // pool route pays HERE ({_poolRoute}). Every other pool route's last hop pays
-        // `legsOut[0]`'s recipient (direct) or this contract (pull).
-        if (plan.router == POOL_ROUTE && r.legs & LEGS_NATIVE == 0) {
+        // `legsOut[0]`'s recipient (direct) or this contract (pull) — and a DIRECT
+        // inventory draw tops up that same recipient ({_topUp}). (An EMPTY pool route
+        // pays nobody; resolving its payee anyway costs one leg read, and on a direct
+        // order with no output leg — nothing to deliver — it refuses {NoLegs}.)
+        if ((plan.router == POOL_ROUTE || (plan.inventory != 0 && r.direct)) && r.legs & LEGS_NATIVE == 0) {
             r.payee = _payee(order, legsOut, toks[r.outAnchor], r.direct);
         }
-        if (plan.amountOutOffset < NO_PATCH) {
-            r.legs |= r.direct ? 1 << LEGS_OUT_SHIFT : _outLegs(legsOut, nOut, toks[r.outAnchor]);
+        // The out-leg mask. DIRECT: leg 0 alone, also whenever the callback needs that
+        // leg's live price without patching it — a native unwrap or a direct inventory
+        // top-up (both TYPED; the mask is what hands `pricedOut[0]` to {_onFill}).
+        if (r.direct) {
+            if (plan.amountOutOffset < NO_PATCH || plan.inventory != 0 || r.legs & LEGS_NATIVE != 0) {
+                r.legs |= 1 << LEGS_OUT_SHIFT;
+            }
+        } else if (plan.amountOutOffset < NO_PATCH) {
+            r.legs |= _outLegs(legsOut, nOut, toks[r.outAnchor]);
         }
         r.router = plan.router;
         r.minOut = plan.minOut;
-        r.maxPay = plan.maxPay;
+        r.maxPay = plan.maxPay | plan.inventory << 128;
         r.amountInOffset = plan.amountInOffset;
         r.amountOutOffset = plan.amountOutOffset;
         r.data = plan.data;
@@ -1758,22 +2056,34 @@ contract AggregatorFillSolver {
     ///      flag the WNATIVE slot in `inMask` — "paid to this contract during the
     ///      fill" — which is exactly what makes the snapshot, the {RouteOverspent}
     ///      check and the split include it with no extra test on the hot path (a
-    ///      direct order skips only tokens outside `inMask`). Its pre-route inflow is
-    ///      zero, so {_floor} stays `minOut`. {NativeLegShape} unless:
+    ///      direct order skips only tokens outside `inMask`). {NativeLegShape} unless:
     ///        • the order is DIRECT — on the pull path the core would `transferFrom`
     ///          the view token and revert after the route ran; refuse before it;
-    ///        • no other leg, input or output, names WNATIVE or NATIVE_BALANCE — the
-    ///          WNATIVE delta here must be the route's output for THIS leg alone
-    ///          (another WNATIVE leg would share the slot; another NATIVE_BALANCE leg
-    ///          is a native delivery this contract does not make);
+    ///        • no other leg, input or output, names NATIVE_BALANCE — a second native
+    ///          delivery this contract does not make;
     ///        • no other OUTPUT leg pays the same recipient — one native send must not
     ///          satisfy a second native view's delta check (review L-1).
+    ///      WNATIVE ITSELF IS ADMITTED next to the native leg since 2026-10-18 (review
+    ///      S-7; it used to be refused):
+    ///        • as an INPUT (the maker pays WRBTC, alone or beside another token): it
+    ///          lands in the native slot before the route. As `legsIn[0]` its priced
+    ///          leg-0 amount is KEPT BACK ({LEGS_SAME} — a pure unwrap needs no route at
+    ///          all: an empty route sends `pricedOut[0]` out of the maker's own WRBTC);
+    ///          as a later input it is the slot's pre-route inflow, netted out of the
+    ///          `minOut` test ({_inflow}) and spendable by the unwrap;
+    ///        • as a further OUTPUT leg (a relayer / originator fee in WRBTC): the core
+    ///          delta-verifies it at its recipient. Paid to THIS contract (the filler's
+    ///          own fee) it is simply what the route produced beyond the unwrapped
+    ///          `pricedOut[0]` — any route works; paid to a third party, the route must
+    ///          pay it there itself (an opaque / {MULTI_ROUTE}; a pool route's last hop
+    ///          pays only here, and the core then fails it `DeltaTooLow`, closed). The
+    ///          core's own `DeltaVerifySameToken` refuses a WRBTC fee leg next to a WRBTC
+    ///          input.
     ///      The recipient comes from the ORDER (`address(0)` = the maker), never a
     ///      plan field: a route cannot redirect the coin. Runs only on native orders.
     function _nativeLeg(Order calldata order, FillRoute memory r) private view {
         bytes calldata legsIn = order.legsIn;
         bytes calldata legsOut = order.legsOut;
-        address w = WNATIVE;
         address nb = NATIVE_BALANCE;
         // `nb == 0` (native delivery off) reaches here only for a leg naming token
         // `address(0)`, which no path can settle: refuse it the same way.
@@ -1781,7 +2091,7 @@ contract AggregatorFillSolver {
         uint256 nIn = PackedArrays.countUnchecked(legsIn); // validated by the caller
         for (uint256 i; i < nIn; ++i) {
             address t = PackedArrays.legInToken(legsIn, i);
-            if (t == w || t == nb) revert NativeLegShape();
+            if (t == nb) revert NativeLegShape();
         }
         (,,, address to) = PackedArrays.legOut(legsOut, 0);
         address payee = to == address(0) ? order.maker : to;
@@ -1793,7 +2103,7 @@ contract AggregatorFillSolver {
             // `balanceOf` reads `a.balance` — would be satisfied by this one send,
             // because the core's duplicate-leg guard compares token ADDRESSES. A
             // fee leg to someone else is unaffected.
-            if (t == w || t == nb || (rj == address(0) ? order.maker : rj) == payee) revert NativeLegShape();
+            if (t == nb || (rj == address(0) ? order.maker : rj) == payee) revert NativeLegShape();
         }
         r.payee = payee;
         r.inMask |= 1 << r.outAnchor;
@@ -1830,6 +2140,7 @@ contract AggregatorFillSolver {
         returns (address to)
     {
         if (!direct) return address(this);
+        if (PackedArrays.countUnchecked(legsOut) == 0) revert NoLegs(); // leg 0 is read below (validated count)
         address token;
         (token,,, to) = PackedArrays.legOut(legsOut, 0);
         if (token != anchorOut) revert BadPoolRoute();
@@ -1970,7 +2281,12 @@ contract AggregatorFillSolver {
         // Leg 0 alone (every direct order, every single-output pull order) is read
         // straight: the loop's one iteration measured ~320 gas more on the deployed
         // typed direct fill.
-        _onFill(
+        // A DIRECT inventory top-up (S-1) measures what the route paid leg 0's
+        // recipient, so read that balance before the route runs.
+        bool topUp = r.direct && r.maxPay >> 128 != 0 && legs & LEGS_NATIVE == 0;
+        uint256 pre;
+        if (topUp) pre = SafeTransferLib.balanceOf(r.tokens[r.outAnchor], r.payee);
+        uint256 floor = _onFill(
             r,
             _sumLegs(legs & LEGS_SAME, pricedOut),
             r.amountOutOffset,
@@ -1978,7 +2294,8 @@ contract AggregatorFillSolver {
         );
         // NATIVE DELIVERY: the route left WNATIVE here; unwrap exactly the priced leg
         // and send it on. The core measures the recipient's native balance next.
-        if (legs & LEGS_NATIVE != 0) _payNative(r, pricedOut[0]);
+        if (legs & LEGS_NATIVE != 0) _payNative(r, pricedOut[0], floor);
+        else if (topUp) _topUp(r, pricedOut[0], pre);
     }
 
     /// @dev Pay a native order's leg 0 (task 30): `amount` = the core's `pricedOut[0]`,
@@ -1987,10 +2304,13 @@ contract AggregatorFillSolver {
     ///      {SurplusPolicy} after the fill, like any output surplus.
     ///
     ///      `minOut` and `maxPay` keep their pull-path meaning, measured in WNATIVE
-    ///      (the anchor output token for such an order): the route's WNATIVE delta must
-    ///      reach `minOut` ({InsufficientOutput}), and the amount sent may not exceed
-    ///      `maxPay` (non-zero) nor the delta itself — never the contract's balance, so
-    ///      a retained WNATIVE floor or another fill's residue cannot fund a send.
+    ///      (the anchor output token for such an order): the route's WNATIVE proceeds
+    ///      must reach `floor` — the (pro-rata, {_minOut}) `minOut` plus any WNATIVE the
+    ///      maker paid in before the route ({_inflow}, S-7) — ({InsufficientOutput}), and
+    ///      the amount sent may not exceed `maxPay` (non-zero) nor the delta itself plus
+    ///      the plan's {RoutePlan.inventory} draw (bounded by the pre-fill WNATIVE) —
+    ///      never the contract's balance, so a retained WNATIVE floor or another fill's
+    ///      residue cannot fund a send the operator did not cap.
     ///
     ///      The send is a full-gas `call` to a recipient taken from the ORDER (smart
     ///      accounts work; a reverting `receive()` kills the fill — {NativeSendFailed},
@@ -2003,13 +2323,8 @@ contract AggregatorFillSolver {
     ///      GAS (unit bench, `AggregatorNativeTest`): the withdraw plus the value call.
     ///      A recipient account that is EMPTY (no balance, nonce or code — a fresh
     ///      gasless maker) costs the EVM's +25k new-account charge on top.
-    function _payNative(FillRoute calldata r, uint256 amount) private {
-        uint256 k = r.outAnchor;
-        uint256 out = SafeTransferLib.balanceOf(WNATIVE, address(this)) - r.before[k];
-        uint256 minOut = r.minOut;
-        if (out < minOut) revert InsufficientOutput(out, minOut);
-        uint256 maxPay = r.maxPay;
-        uint256 cap = maxPay != 0 && maxPay < out ? maxPay : out;
+    function _payNative(FillRoute calldata r, uint256 amount, uint256 floor) private {
+        uint256 cap = _cap(r, WNATIVE, r.before[r.outAnchor], floor);
         if (amount > cap) revert InsufficientOutput(cap, amount);
         IWNative(WNATIVE).withdraw(amount);
         address to = r.payee;
@@ -2017,16 +2332,44 @@ contract AggregatorFillSolver {
         if (!ok) revert NativeSendFailed(to);
     }
 
+    /// @dev DIRECT inventory top-up (review 2026-10-18 S-1): the route has paid leg 0's
+    ///      recipient (`payee`, from the ORDER) whatever it paid; send the SHORTFALL
+    ///      against the core's live `pricedOut[0]` (`owed`) out of this contract's own
+    ///      balance, at most {RoutePlan.inventory}. `pre` is the recipient's balance at
+    ///      callback entry — the same figure the core snapshotted (a direct order's
+    ///      output tokens are never input tokens, `DeltaVerifySameToken`), so the
+    ///      shortfall is exactly what the core's delta check would miss. Never more:
+    ///      a route that already paid in full draws nothing.
+    function _topUp(FillRoute calldata r, uint256 owed, uint256 pre) private {
+        address t = r.tokens[r.outAnchor];
+        address to = r.payee;
+        uint256 got = SafeTransferLib.balanceOf(t, to) - pre;
+        if (got >= owed) return;
+        uint256 need;
+        unchecked {
+            need = owed - got;
+        }
+        uint256 inv = r.maxPay >> 128;
+        // Past the cap the core's own delta check fails the fill (`DeltaTooLow`).
+        SafeTransferLib.safeTransfer(t, to, need < inv ? need : inv);
+    }
+
     /// @dev The body of both {executeFill} callbacks — see {_route} for `kept`,
     ///      `outOffset` and `amountOut`.
-    function _onFill(FillRoute calldata r, uint256 kept, uint256 outOffset, uint256 amountOut) private {
-        // Read BEFORE the route: the pre-route inflow is part of it, see {_floor}.
-        uint256 floor = _floor(r);
-        _route(r, kept, outOffset, amountOut);
+    ///      Returns the anchor output's floor ({_cap}) — for {onSettlementFill}'s native
+    ///      unwrap on a direct order, which {_onFill} itself never pays.
+    function _onFill(FillRoute calldata r, uint256 kept, uint256 outOffset, uint256 amountOut)
+        private
+        returns (uint256 floor)
+    {
+        // Read BEFORE the route: the pre-route inflow is part of the floor, see {_inflow}.
+        floor = _inflow(r);
+        floor += _minOut(r, _route(r, kept, outOffset, amountOut));
 
         // Direct delivery: the route paid the maker, the core verifies the delta,
-        // and this contract has nothing to measure and nothing to approve.
-        if (r.direct) return;
+        // and this contract has nothing to measure and nothing to approve here (the
+        // typed callback then pays a NATIVE leg or an inventory top-up).
+        if (r.direct) return floor;
 
         // Settlement pulls every output leg next, through the direct-approval path.
         // Approve each output token at ITS OWN proceeds of this fill — never the
@@ -2036,11 +2379,11 @@ contract AggregatorFillSolver {
         //   • the surplus is never approved, so the spread stays this contract's
         //     and no allowance survives the fill over it.
         // `maxPay == 0` means "no cap", and the cap it then takes is THIS FILL's
-        // proceeds — the maker's signed band is still the hard bound, so the worst
-        // case is the price the solver evaluated when it bid. A `maxPay` above the
-        // proceeds is clamped for the same reason: an over-stated cap must not
-        // reach into residue.
-        _approveOutputs(r.tokens, r.before, r.outMask, r.outAnchor, floor, r.maxPay);
+        // proceeds (plus the capped inventory draw) — the maker's signed band is still
+        // the hard bound, so the worst case is the price the solver evaluated when it
+        // bid. A `maxPay` above that is clamped for the same reason: an over-stated cap
+        // must not reach into residue.
+        _payOutputs(r, floor, false);
     }
 
     /// @dev Σ `pricedOut[j]` over the output legs flagged in `mask`. With `sameOut`:
@@ -2053,24 +2396,22 @@ contract AggregatorFillSolver {
         }
     }
 
-    /// @dev The floor the anchor output token's whole-fill delta must reach:
-    ///      `minOut` plus what this fill paid INTO this contract in that token BEFORE
-    ///      the route ran. That inflow is non-zero only when the anchor output is also
-    ///      a (non-anchor) input token (every output token is; see {_plan}) — the
-    ///      maker's own input leg on the pull path, the PRESEND on the netted path —
-    ///      and without it the delta {_approveOutputs} measures would count that
-    ///      inflow as route proceeds, so the maker's input could satisfy the solver's
-    ///      `minOut` by itself (review 2026-10-05). Read at callback entry: inputs
-    ///      have landed, nothing has been routed. `minOut` alone for `tokens[0]` even
-    ///      when it is an output (a same-token order): {_route} pushes that inflow
-    ///      INTO the route, so the post-route delta is already "what the route left
-    ///      or produced". Folded into the floor rather than passed down, so the
-    ///      common shape pays one mask test and no extra stack word.
-    function _floor(FillRoute calldata r) private view returns (uint256 floor) {
-        floor = r.minOut;
+    /// @dev What this fill paid INTO this contract in the anchor output token BEFORE
+    ///      the route ran — added to `minOut` to form the floor the anchor output's
+    ///      whole-fill delta must reach. Non-zero only when the anchor output is also a
+    ///      (non-anchor) input token (every output token is; see {_plan}) — the maker's
+    ///      own input leg on the pull path, the PRESEND on the netted path, a NATIVE
+    ///      order's WNATIVE input (S-7) — and without it the delta measured afterwards
+    ///      would count that inflow as route proceeds, so the maker's input could
+    ///      satisfy the solver's `minOut` by itself (review 2026-10-05). Read at callback
+    ///      entry: inputs have landed, nothing has been routed. Zero for `tokens[0]` even
+    ///      when it is an output (a same-token order): {_route} pushes that inflow INTO
+    ///      the route, so the post-route delta is already "what the route left or
+    ///      produced".
+    function _inflow(FillRoute calldata r) private view returns (uint256 x) {
         uint256 k = r.outAnchor;
         if (k != 0 && r.inMask & (1 << k) != 0) {
-            floor += SafeTransferLib.balanceOf(r.tokens[k], address(this)) - r.before[k];
+            x = SafeTransferLib.balanceOf(r.tokens[k], address(this)) - r.before[k];
         }
     }
 
@@ -2082,22 +2423,30 @@ contract AggregatorFillSolver {
     ///         measurement after. The only difference is delivery: `matchSettle`
     ///         delivers from the POOL, so every output token's proceeds of this fill
     ///         are pushed to Settlement instead of approved, and the pool's surplus
-    ///         comes back in the sweep.
+    ///         comes back in the sweep. Two differences more since 2026-10-18: on a
+    ///         {MULTI_ROUTE} every further input currency and listed receipt is pushed
+    ///         to the sandbox too ({_pushExtras}, S-2 / S-3), and `minOut` stays ABSOLUTE
+    ///         here — never scaled by {_minOut} — so `minOut` with `maxPay` remains a
+    ///         hard floor on the item path's spread (S-6).
     function onMatchRoute(FillRoute calldata r) external {
         if (msg.sender != EXECUTOR) revert OnlyExecutor();
         if (_active != 4) revert NotArmed();
         _active = 5;
 
-        uint256 floor = _floor(r);
+        // A MULTICALL route spends the order's further input currencies and the listed
+        // receipts too (S-2 / S-3): push their deltas next to the anchor's.
+        if (r.router == MULTI_ROUTE) _pushExtras(r.tokens, r.before, r.outMask);
+        uint256 floor = _inflow(r);
         // Nothing kept back, nothing patched on the output side: PRESEND already
         // netted the pool's outstanding obligations, and no priced amount reaches a
-        // `CALL` step (`amountOutOffset` is ignored here, see {RoutePlan}).
+        // `CALL` step (`amountOutOffset` is refused on this entry).
         _route(r, 0, NO_PATCH, 0);
-        _pushOutputs(r.tokens, r.before, r.outMask, r.outAnchor, floor, r.maxPay);
+        _payOutputs(r, floor + r.minOut, true);
     }
 
     /// @dev Run the route in {SANDBOX}: PUSH this fill's anchor input there, have it
-    ///      call the target, take everything back, and check the bound.
+    ///      call the target, take everything back, and check the bound. Returns the
+    ///      amount ROUTED (the anchor delta pushed / budgeted) — {_minOut}'s input.
     ///
     ///      THE PUSHED AMOUNT IS A DELTA of `tokens[0]` against its pre-fill
     ///      snapshot — never a balance and never a caller-declared figure: what the
@@ -2105,7 +2454,10 @@ contract AggregatorFillSolver {
     ///      would make any figure passed here wrong, while the raw balance would hand
     ///      the route whatever an earlier fill left parked here. Under-flowing is the
     ///      correct failure: it means the input never arrived. The same delta is
-    ///      what the route's calldata is patched with.
+    ///      what the route's calldata is patched with. On a {MULTI_ROUTE} every other
+    ///      non-output token's delta — a multi-input order's second currency, a listed
+    ///      SETTLE receipt — is pushed with it ({_pushExtras}); NFT receipts are already
+    ///      there ({onERC721Received}).
     ///
     ///      ⚠ PUSH, NEVER APPROVE. The sandbox calls an arbitrary target, and the
     ///      target may be a token: a solver→sandbox allowance would let
@@ -2124,10 +2476,17 @@ contract AggregatorFillSolver {
     ///      this fill's own input), and a `kept` above the delta means the core's
     ///      pull of those legs fails anyway. `amountOut` is written at `outOffset`
     ///      ({NO_PATCH} = untouched).
-    function _route(FillRoute calldata r, uint256 kept, uint256 outOffset, uint256 amountOut) private {
+    ///
+    ///      AN EMPTY ROUTE (`router == POOL_ROUTE`, `data == ""`, review 2026-10-18 S-1)
+    ///      calls nothing: the input stays here as residue and the outputs come from
+    ///      {RoutePlan.inventory} — an inventory fill.
+    function _route(FillRoute calldata r, uint256 kept, uint256 outOffset, uint256 amountOut)
+        private
+        returns (uint256 amountIn)
+    {
         address tokenIn = r.tokens[0];
         uint256 before0 = r.before[0];
-        uint256 amountIn = SafeTransferLib.balanceOf(tokenIn, address(this)) - before0;
+        amountIn = SafeTransferLib.balanceOf(tokenIn, address(this)) - before0;
         unchecked {
             amountIn = amountIn > kept ? amountIn - kept : 0;
         }
@@ -2135,8 +2494,8 @@ contract AggregatorFillSolver {
         if (r.router == POOL_ROUTE) {
             // DIRECT POOL ROUTE: no push, no sandbox, no sweep — the pools are paid
             // from here inside their callbacks, bounded by `amountIn` (the same delta
-            // the sandbox would have been pushed).
-            _poolRoute(r, amountIn, outOffset, amountOut);
+            // the sandbox would have been pushed). An empty one is no route at all.
+            if (r.data.length != 0) _poolRoute(r, amountIn, outOffset, amountOut);
         } else {
             if (amountIn != 0) SafeTransferLib.safeTransfer(tokenIn, address(SANDBOX), amountIn);
             SANDBOX.exec(
@@ -2147,6 +2506,56 @@ contract AggregatorFillSolver {
             );
         }
         _checkInputs(r.tokens, r.before, r.inMask);
+    }
+
+    /// @dev The anchor output floor for a route that swaps `routed`: `minOut`, scaled
+    ///      DOWN pro rata when the route follows the fill (`amountInOffset` set) and
+    ///      routes less than the amount its calldata was quoted for (review 2026-10-18
+    ///      S-5). `minOut` then reads as a PRICE floor (`minOut / quoted` per unit of
+    ///      input) rather than an absolute one, which is what makes the core's
+    ///      remainder sentinel usable: a filler passes `fillAmount = type(uint256).max`
+    ///      and, when a competitor filled part of the order first, settles the smaller
+    ///      remainder at the quoted price instead of reverting `OverFill` (or
+    ///      {InsufficientOutput} on the absolute floor). Never scaled UP, and never
+    ///      without a patched input (the route then swaps its quoted figure, or fails).
+    ///      The quoted figure is the word at `amountInOffset` as the operator sent it —
+    ///      an unquoted placeholder (0 or below the routed amount) leaves `minOut` as is.
+    ///      The maker is untouched (the core's band binds every fill); the operator's
+    ///      price protection on {executeFill} is `minBumpBps`, which the core checks.
+    ///      {executeFill} ONLY: the netted path ({onMatchRoute}) keeps `minOut` absolute
+    ///      — it has no core bump floor, so `minOut − maxPay` is its spread floor (S-6),
+    ///      and its races are answered by the {ItemFillGuard} instead of a clamp.
+    function _minOut(FillRoute calldata r, uint256 routed) private pure returns (uint256 m) {
+        m = r.minOut;
+        uint256 off = r.amountInOffset;
+        if (m != 0 && off < NO_PATCH) {
+            bytes calldata d = r.data;
+            uint256 quoted;
+            // Unchecked read: an offset past the blob reads foreign calldata, and that
+            // fill reverts anyway — {PatchOutOfBounds} on an opaque route, {BadPoolRoute}
+            // / a short pool path on a pool route — before any floor is compared. (An
+            // EMPTY route has no word to patch; it only lowers the operator's own floor.)
+            /// @solidity memory-safe-assembly
+            assembly {
+                quoted := calldataload(add(d.offset, off))
+            }
+            // Rounded UP: never below the exact proportion (one withheld seed wei of a
+            // 1e20 input leaves a 99e6 floor at 99e6, not 98,999,999).
+            if (routed < quoted) m = (m * routed + quoted - 1) / quoted;
+        }
+    }
+
+    /// @dev {MULTI_ROUTE}: push every token but `tokens[0]` that no output leg is paid
+    ///      in — a multi-input order's further currencies (S-3), listed SETTLE receipts
+    ///      (S-2) — to the sandbox, each at THIS FILL's delta against its pre-fill
+    ///      snapshot (never a balance; the delta rule of {_route}). Output tokens stay:
+    ///      they hold the spread, or net against their own legs.
+    function _pushExtras(address[] calldata toks, uint256[] calldata bef, uint256 outMask) private {
+        for (uint256 k = 1; k < toks.length; ++k) {
+            if (outMask & (1 << k) != 0) continue;
+            uint256 d = SafeTransferLib.balanceOf(toks[k], address(this)) - bef[k];
+            if (d != 0) SafeTransferLib.safeTransfer(toks[k], address(SANDBOX), d);
+        }
     }
 
     /// @dev Execute a POOL ROUTE (see {POOL_ROUTE} for the `data` layout and the
@@ -2490,56 +2899,126 @@ contract AggregatorFillSolver {
         }
     }
 
-    /// @dev {_approveOutputs} for the netted path: the same per-token delta, floor
-    ///      and cap, TRANSFERRED to Settlement's pool rather than approved.
-    function _pushOutputs(
-        address[] calldata toks,
-        uint256[] calldata bef,
-        uint256 outMask,
-        uint256 outAnchor,
-        uint256 minOut,
-        uint256 maxPay
-    ) private {
-        uint256 n = toks.length;
-        for (uint256 k; k < n; ++k) {
+    /// @dev The output pass: every output token's proceeds of this fill, APPROVED to
+    ///      Settlement on {executeFill}'s pull path (`push == false` — the core pulls
+    ///      the priced legs next; the rest of the allowance is zeroed after the fill) or
+    ///      TRANSFERRED to its pool on {executeItemFill} (`push`, the pool sweeps the
+    ///      unused part back). Each token at ITS OWN delta of this fill, never a balance;
+    ///      the anchor output at {_cap} (floored, inventory, `maxPay`). The calldata
+    ///      arrays are resolved ONCE (re-resolving `r.tokens[k]` through the struct on
+    ///      every access is measurable on the hot path). One body for both entries
+    ///      (2026-10-18; was `_approveOutputs` / `_pushOutputs`, identical but for the
+    ///      final call).
+    function _payOutputs(FillRoute calldata r, uint256 floor, bool push) private {
+        address[] calldata toks = r.tokens;
+        uint256[] calldata bef = r.before;
+        uint256 outMask = r.outMask;
+        uint256 outAnchor = r.outAnchor;
+        for (uint256 k; k < toks.length; ++k) {
             if (outMask & (1 << k) == 0) continue;
             address t = toks[k];
-            uint256 out = SafeTransferLib.balanceOf(t, address(this)) - bef[k];
-            uint256 cap = out;
-            if (k == outAnchor) {
-                // `minOut` arrives as {_floor}: the route's floor plus any pre-route
-                // inflow of this token, so the whole-fill delta is compared against it.
-                if (out < minOut) revert InsufficientOutput(out, minOut);
-                if (maxPay != 0 && maxPay < out) cap = maxPay;
-            }
-            if (cap != 0) SafeTransferLib.safeTransfer(t, address(SETTLEMENT), cap);
+            uint256 cap =
+                k == outAnchor ? _cap(r, t, bef[k], floor) : SafeTransferLib.balanceOf(t, address(this)) - bef[k];
+            if (!push) SafeTransferLib.forceApprove(t, address(SETTLEMENT), cap);
+            else if (cap != 0) SafeTransferLib.safeTransfer(t, address(SETTLEMENT), cap);
         }
     }
 
-    /// @dev The output pass of {onSettlementFill}, over the route's calldata arrays resolved
-    ///      ONCE (re-resolving `r.tokens[k]` through the struct on every access is
-    ///      measurable on the hot path).
-    function _approveOutputs(
-        address[] calldata toks,
-        uint256[] calldata bef,
-        uint256 outMask,
-        uint256 outAnchor,
-        uint256 minOut,
-        uint256 maxPay
-    ) private {
-        uint256 n = toks.length;
-        for (uint256 k; k < n; ++k) {
-            if (outMask & (1 << k) == 0) continue;
-            address t = toks[k];
-            uint256 out = SafeTransferLib.balanceOf(t, address(this)) - bef[k];
-            uint256 cap = out;
-            if (k == outAnchor) {
-                // `minOut` arrives as {_floor}: the route's floor plus any pre-route
-                // inflow of this token, so the whole-fill delta is compared against it.
-                if (out < minOut) revert InsufficientOutput(out, minOut);
-                if (maxPay != 0 && maxPay < out) cap = maxPay;
+    /// @dev What the ANCHOR output token `t` may pay this fill (`b` = its pre-fill
+    ///      balance; token and snapshot passed in, already resolved): its delta `out`
+    ///      — which must reach `floor` ({InsufficientOutput}): the pro-rata `minOut`
+    ///      ({_minOut}) plus any pre-route inflow ({_inflow}), so the whole-fill delta
+    ///      is compared against it — plus the {RoutePlan.inventory} draw, bounded by
+    ///      the pre-fill balance `before[k]` (inventory is value held BEFORE the fill;
+    ///      with a zero draw this is exactly the old delta-only cap), all capped at a
+    ///      non-zero `maxPay`. Both live in {FillRoute.maxPay}'s word (high / low 128).
+    function _cap(FillRoute calldata r, address t, uint256 b, uint256 floor) private view returns (uint256 cap) {
+        uint256 out = SafeTransferLib.balanceOf(t, address(this)) - b;
+        if (out < floor) revert InsufficientOutput(out, floor);
+        uint256 mp = r.maxPay;
+        uint256 inv = mp >> 128;
+        mp = uint128(mp);
+        cap = out + (inv < b ? inv : b);
+        if (mp != 0 && mp < cap) cap = mp;
+    }
+
+    // ── NFT receipts (review 2026-10-18 S-2) ────────────────────────────────────────
+
+    /// @notice The ERC-721 / ERC-1155 receiver hooks, as one FALLBACK:
+    ///         `onERC721Received(address,address,uint256,bytes)` (0x150b7a02) and
+    ///         `onERC1155Received(address,address,uint256,uint256,bytes)` (0xf23a6e61).
+    ///         Accepts a token ONLY while an {executeItemFill} plan is armed and its route
+    ///         has not run yet (`_active == 4`) — the window in which an EARLY SETTLE item
+    ///         (`NftSettlementModule` / `Erc1155SettlementModule`: maker → filler) pays this
+    ///         contract — and forwards it at once to {SANDBOX}, where a {MULTI_ROUTE}
+    ///         sells it ({RouteSandbox}'s own hooks accept only this contract's forward).
+    ///         Everywhere else, and for every other selector, it reverts — so no transfer
+    ///         can park an NFT here, which matters because this contract has no way to move
+    ///         one out later ({sweep} is ERC-20). No batch hook: a batch transfer reverts.
+    /// @dev    WHY THE FORWARD IS SAFE. It moves exactly the token that just arrived (a
+    ///         collection records the new owner before calling back) to the authority-less
+    ///         sandbox: the delta rule holds by construction. The caller is NOT
+    ///         authenticated — maker-chosen module code runs in this window — but the
+    ///         forward is a `safeTransferFrom` called ON THE CALLER, so a forged
+    ///         "collection" only makes this contract call the forger's own code (every
+    ///         entry is closed at `_active == 4`: executeFill / sweep revert {Reentrancy},
+    ///         both fill callbacks and the pool callback {NotArmed}, and {onMatchRoute}
+    ///         needs the EXECUTOR), and the forwarded selector (0x42842e0e / 0xf242432a)
+    ///         is one no ERC-20 implements: a token contract that relays arbitrary calls
+    ///         cannot be made to move this contract's ERC-20 balance, as a plain
+    ///         `transferFrom(this, sandbox, id)` would on a WETH9-style token that skips
+    ///         the allowance for `src == msg.sender`. A LATE SETTLE (after the route) is
+    ///         refused: nothing could sell the NFT any more.
+    ///
+    ///         ASSEMBLY, BY MEASUREMENT (2026-10-18): the two Solidity hooks (ABI-decoded
+    ///         `bytes calldata`, an encoded external call each) cost ~730 B of runtime on
+    ///         the deployed profile; this body reads the two words it needs and never
+    ///         decodes the rest. EQUIVALENT SOLIDITY:
+    ///
+    ///             function onERC721Received(address, address, uint256 id, bytes calldata)
+    ///                 external returns (bytes4) {
+    ///                 if (_active != 4) revert NotArmed();
+    ///                 IERC721(msg.sender).safeTransferFrom(address(this), address(SANDBOX), id);
+    ///                 return this.onERC721Received.selector;
+    ///             }
+    ///             function onERC1155Received(address, address, uint256 id, uint256 v, bytes calldata)
+    ///                 external returns (bytes4) {
+    ///                 if (_active != 4) revert NotArmed();
+    ///                 IERC1155(msg.sender).safeTransferFrom(address(this), address(SANDBOX), id, v, "");
+    ///                 return this.onERC1155Received.selector;
+    ///             }
+    fallback() external {
+        address sandbox = address(SANDBOX);
+        /// @solidity memory-safe-assembly
+        assembly {
+            // Not inside an armed item fill → refuse (empty revert data; `NotArmed` in
+            // spirit — a collection reports it as "non-receiver").
+            if iszero(eq(sload(_active.slot), 4)) { revert(0, 0) }
+            let sel := shr(224, calldataload(0))
+            let m := mload(0x40)
+            let len := 0x64
+            // The selector word FIRST: its 28 zero bytes would clobber the `from` word.
+            switch sel
+            case 0x150b7a02 {
+                mstore(m, shl(224, 0x42842e0e)) // safeTransferFrom(address,address,uint256)
             }
-            SafeTransferLib.forceApprove(t, address(SETTLEMENT), cap);
+            case 0xf23a6e61 {
+                mstore(m, shl(224, 0xf242432a)) // safeTransferFrom(address,address,uint256,uint256,bytes)
+                mstore(add(m, 0x64), calldataload(0x64)) // value
+                mstore(add(m, 0x84), 0xa0) // offset of `data`
+                mstore(add(m, 0xa4), 0) // `data` = ""
+                len := 0xc4
+            }
+            default { revert(0, 0) }
+            mstore(add(m, 0x04), address())
+            mstore(add(m, 0x24), sandbox)
+            mstore(add(m, 0x44), calldataload(0x44)) // id
+            if iszero(call(gas(), caller(), 0, m, len, 0, 0)) {
+                returndatacopy(m, 0, returndatasize())
+                revert(m, returndatasize())
+            }
+            mstore(0, shl(224, sel))
+            return(0, 0x20)
         }
     }
 }

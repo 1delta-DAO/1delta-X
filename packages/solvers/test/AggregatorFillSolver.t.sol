@@ -151,6 +151,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
             router: address(router),
             minOut: minOut,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: offset,
             amountOutOffset: NO_PATCH,
             minBumpBps: 0,
@@ -348,6 +349,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
             router: address(router),
             minOut: 1,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: NO_PATCH,
             amountOutOffset: NO_PATCH,
             minBumpBps: 0,
@@ -568,6 +570,7 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
             router: address(router),
             minOut: 0,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: NO_PATCH,
             amountOutOffset: NO_PATCH,
             minBumpBps: 0,
@@ -633,16 +636,37 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
     /// @dev A `legsOut` blob declaring ZERO legs still has readable bytes behind it
     ///      — {PackedArraysMem} does not consult the count and
     ///      {PackedArrays.validateFixed} tolerates the trailing bytes, so the fill
-    ///      itself delivers nothing while the token read here is whatever the
-    ///      attacker wrote. Rejecting the empty blob is what closes that seam.
-    function test_agg_zeroLegBlobIsRejected() public {
+    ///      itself delivers nothing while a token read there would be whatever the
+    ///      attacker wrote. Until 2026-10-18 the empty blob was refused (`NoLegs`).
+    ///      Zero-output orders are a legitimate route-less shape now (review S-7), so the
+    ///      seam is closed by the READS instead: every leg read is bounded by the count,
+    ///      and the trailing element naming tB is never seen — tB residue held here is
+    ///      neither approved to Settlement nor swept, and only the 1 wei of tA moves.
+    function test_agg_zeroLegBlobNamesNoToken() public {
         (Order memory o, bytes memory sig) = _eveOrder(44, address(tA), address(tB), 1, 0);
-        // count byte 0, then a well-formed element naming tC.
+        // count byte 0, then a well-formed element naming tB.
         bytes memory legs = o.legsOut;
         legs[0] = 0x00;
         o.legsOut = legs;
         sig = _signWith(o, evePk);
+        tB.mint(address(aggSolver), 7e18); // residue the trailing bytes would like to reach
 
+        RoutePlan memory p = _evePlan(eve, "");
+        p.router = address(0); // POOL_ROUTE with empty data = no route at all
+        vm.prank(eve);
+        aggSolver.executeFill(o, sig, 1, p, "", new Permit2612[](0));
+
+        assertEq(tB.balanceOf(address(aggSolver)), 7e18, "tB untouched");
+        assertEq(tB.allowance(address(aggSolver), address(settlement)), 0, "no tB approval was ever set");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "eve's 1 wei is a residue on a zero snapshot: the floor");
+    }
+
+    /// The other half of the seam: both sides empty is still refused.
+    function test_agg_bothSidesEmptyIsRejected() public {
+        (Order memory o, bytes memory sig) = _eveOrder(46, address(tA), address(tB), 1, 0);
+        o.legsIn = hex"00";
+        o.legsOut = hex"00";
+        sig = _signWith(o, evePk);
         vm.prank(eve);
         vm.expectRevert(AggregatorFillSolver.NoLegs.selector);
         aggSolver.executeFill(o, sig, 1, _evePlan(eve, ""), "", new Permit2612[](0));

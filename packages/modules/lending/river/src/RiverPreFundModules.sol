@@ -8,8 +8,11 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
+import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
 import {IRiverXApp, IRiverTroveManager} from "./interfaces/IRiver.sol";
+import {RiverProceeds} from "./RiverModules.sol";
 
 // ──────────────── River (Satoshi Protocol) PRE-FUNDED one-sided modules ────────────────
 //
@@ -71,6 +74,35 @@ import {IRiverXApp, IRiverTroveManager} from "./interfaces/IRiver.sol";
 // `data = abi.encode(forDesc, xapp, troveManager, collateralToken, upperHint,
 // lowerHint)` — descriptor word FIRST; 192 bytes. (The repay sibling swaps
 // `collateralToken` for `debtToken` at the same offset.)
+//
+//  THE PRE-FUNDED OPEN (op 2, `TAKE_FOR`) — River's side leg (review 2026-10-18 M-5)
+//  ─────────────────────────────────────────────────────────────────────────
+//  {RiverOpenModule} pulls the trove's collateral (`sideAmount`) from the maker's
+//  wallet through a Permit3 token allowance. On a zero-capital "sell X, open a trove
+//  on the collateral" order that is a grant for a token the maker never held. The
+//  pre-funded open instead takes the collateral from a DELIVERED leg: the maker
+//  signs that leg with `recipient = this module` and a `TAKE_FOR` item whose
+//  leg-reference descriptor points at it, so the core sizes `forAmount` (the
+//  collateral) to exactly what was delivered, and `amount` (the satUSD minted,
+//  bounded by the maker's taker allowance) is the value-out side, settled to
+//  `receiver` direction-agnostically ({RiverProceeds}).
+//
+//  It lives HERE, not on {RiverOpenModule}, because it consumes the same standing
+//  grant this contract already needs — the diamond-wide delegate boolean — and
+//  merging by grant is the rule ([credit-module-grant-merge]). The seams stay
+//  disjoint: `makeOnBehalf` rejects op 2, `takeForOnBehalf` rejects ops 0/1, and
+//  the descriptor is inside `ref = keccak256(data)`, so no taker grant can be
+//  replayed across ops. Only the PRE-FUND descriptor is accepted
+//  ({PreFundGuard.requireLegRef}); the pull form is {RiverOpenModule}.
+//
+//  FULL-FILL ONLY: a trove opens once (≤1 per user per TroveManager), so a second
+//  slice would revert inside `openTrove` — {FullFillGuard} says so up front.
+//
+//  `data = abi.encode(OpenData{forDesc, xapp, tm, collateralToken, debtToken,
+//  maxFeePercentage, upperHint, lowerHint, totalAmount})` — nine static words;
+//  forDesc@0 (op 2 in bits [244,252), funding token = collateralToken), xapp@32,
+//  tm@64, collateralToken@96, debtToken@128 (pinned to `tm.debtToken()`),
+//  maxFee@160, upper@192, lower@224, totalAmount@256 (MANDATORY).
 
 
 /// @notice ONE contract for every pre-funded one-sided op on River.
@@ -81,10 +113,25 @@ import {IRiverXApp, IRiverTroveManager} from "./interfaces/IRiver.sol";
 ///         inside the maker's ORDER signature: an item signed for one op cannot be
 ///         executed as another. Each op keeps its own decode, so the
 ///         per-op `data` layouts are unchanged apart from the descriptor bits.
-contract RiverPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
+contract RiverPreFundModule is PreFundModuleBase, IMakerModule, ITakerForModule, IFundingSource {
     enum Op {
-        AddColl,
-        Repay
+        AddColl, // 0 — MAKE
+        Repay, //   1 — MAKE
+        Open //     2 — TAKE_FOR (collateral pre-funded, satUSD out)
+    }
+
+    /// @dev The op-2 blob. All-static, so byte-identical to the flat tuple.
+    struct OpenData {
+        uint256 forDesc;
+        address xapp;
+        address tm;
+        address collateralToken;
+        address debtToken;
+        uint256 maxFeePercentage;
+        address upperHint;
+        address lowerHint;
+        /// @dev The item's FULL maker-signed amount — {FullFillGuard}.
+        uint256 totalAmount;
     }
 
     /// @dev The descriptor named an op this module does not implement.
@@ -187,6 +234,62 @@ contract RiverPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     }
 
 
+    /// @notice The pre-funded trove open: supply the delivered collateral, mint
+    ///         `amount` satUSD, settle it to `receiver`.
+    /// @param spender    the Permit3 caller — must be this module's Settlement.
+    /// @param onBehalfOf the maker — the trove's owner.
+    /// @param amount     satUSD to mint (the value-out leg, taker-allowance gated).
+    /// @param forAmount  this fill's delivered collateral, core-sized.
+    function takeForOnBehalf(
+        address spender,
+        address onBehalfOf,
+        uint256 amount,
+        uint256 forAmount,
+        address receiver,
+        bytes calldata data
+    ) external override {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+        // `Permit3.takeFor` is permissionless: without this pin `forAmount` is the
+        // caller's own argument and the floor below proves nothing (F27/C-1).
+        PreFundGuard.requireSettlement(spender, settlement);
+        // PRE-FUND descriptor only — the pull form of the open is {RiverOpenModule}.
+        PreFundGuard.requireLegRef(data);
+        uint256 op = _preFundOp(data);
+        if (op != uint256(Op.Open)) revert BadOp(op);
+        _open(onBehalfOf, amount, forAmount, receiver, data);
+    }
+
+    /// @dev Its own frame: the nine-word decode plus the measured settle is too much
+    ///      for one optimizer-less stack.
+    function _open(address onBehalfOf, uint256 amount, uint256 forAmount, address receiver, bytes calldata data)
+        private
+    {
+        OpenData memory p = abi.decode(data, (OpenData));
+        // A trove opens once; a sliced fill would re-run `openTrove` and revert.
+        FullFillGuard.requireFullFill(amount, p.totalAmount);
+        // The measured value-out token is the TroveManager's own (rule 16 / the
+        // repay sibling's 2026-09-12 finding-6 pin): a maker-named token that is
+        // not satUSD would measure zero and fail late, or measure the wrong asset.
+        if (p.debtToken != IRiverTroveManager(p.tm).debtToken()) {
+            revert DebtTokenMismatch(p.debtToken, IRiverTroveManager(p.tm).debtToken());
+        }
+        // The collateral must have landed HERE, in THIS token; the floor bounds the
+        // sweep below to this fill's own delivery.
+        uint256 floor = PreFundGuard.floorOf(data, p.collateralToken, forAmount);
+        // Scoped approve + CLEAR: `xapp` is maker-data-choosable on a singleton.
+        SafeTransferLib.forceApprove(p.collateralToken, p.xapp, forAmount);
+        RiverProceeds.Snap memory s = RiverProceeds.snapshot(p.debtToken, onBehalfOf);
+        IRiverXApp(p.xapp)
+            .openTrove(p.tm, onBehalfOf, p.maxFeePercentage, forAmount, amount, p.upperHint, p.lowerHint);
+        // Exactly `amount` to `receiver` from wherever the deployment landed it;
+        // reverts {RiverProceeds.InsufficientProceeds} on a short mint.
+        RiverProceeds.settle(permit3, p.debtToken, onBehalfOf, receiver, amount, s);
+        SafeTransferLib.forceApprove(p.collateralToken, p.xapp, 0);
+        // Collateral the diamond did not take (none on an honest open) goes back
+        // to the maker, never to a later caller.
+        PreFundGuard.sweepSurplus(p.collateralToken, onBehalfOf, floor);
+    }
+
     /// @inheritdoc IFundingSource
     /// @dev Funded by the fill's OWN delivery — a wallet/allowance read would
     ///      preview a self-funding order as short.
@@ -196,6 +299,7 @@ contract RiverPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
         override
         returns (address asset, uint256 available)
     {
+        // Word 3 on every op: collateralToken (AddColl, Open) or debtToken (Repay).
         (,,, asset) = abi.decode(data, (uint256, address, address, address));
         available = type(uint256).max;
     }

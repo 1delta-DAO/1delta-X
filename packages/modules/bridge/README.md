@@ -87,9 +87,11 @@ inventory. Nothing in the settlement core changes.
 chain X                                    chain Y
 ───────                                    ───────
 order 1 settles normally
-  legsOut → maker (bridgeable token)
+  legsOut → BridgeOut module (pre-funded)
+            or the maker (pull form)
   item    → BridgeOut module
-              ├─ pulls it back via Permit3
+              ├─ spends that delivery (pre-funded)
+              │  or pulls it back via Permit3 (pull)
               └─ bridges to the inbox, carrying
                  a 64-byte commitment = hash(order 2)
                                        ─────────────▶
@@ -104,6 +106,75 @@ order 1 settles normally
 The end user needs **no allowance, no balance, and no prior interaction** with the
 destination chain. That is the whole point, and it is why the inbox — not the
 user — is the maker of the destination order.
+
+## Source-side funding: pre-funded or pull
+
+All three out-modules (`AcrossBridgeOutModule`, `LzOftBridgeOutModule`,
+`CctpBridgeOutModule`) accept two funding forms, chosen by word 0 of the item's
+`data` (`BridgeOutBase`, review 2026-10-18 M-5):
+
+| | pre-funded (preferred) | pull |
+|---|---|---|
+| `data` | `abi.encode(forLegPreFund(j, inputToken), spec)` | `abi.encode(spec)` |
+| `legsOut[j].recipient` | the module | the maker (or `0`) |
+| bridged amount | the core's delivery-ledger figure for leg `j`; `item.amount` unread | the pro-rated `item.amount` |
+| maker grant to the module | **none** | Permit3 token allowance for `inputToken` |
+| item op | `MAKE` only | `MAKE`, or `SETTLE` (LayerZero sponsored sends) |
+| `totalAmount` (when set / required) | a floor: delivery `>=` it | the slice must equal it |
+
+The pre-funded form is admitted by the `_gatePreFundMake` pair — `msg.sender ==
+Settlement` and `PreFundGuard.requireLegRef` — and then `PreFundGuard.floorOf`
+binds the descriptor's signed token to the spec's `inputToken` and proves the
+delivery landed on the module. The module bridges exactly that amount and returns
+anything the venue left unconsumed above the pre-delivery floor to the maker, so
+residue and another order's in-flight delivery (parked between a netted plan's
+DELIVER and ITEM steps) are never spent. It needs no receive-side approval for a
+token the maker never held, and it is the zero-capital form on `matchSettle`: a CoW
+counter-order sells the bridged token, and the solver fronts nothing
+(`NettedPreFundBridgeOut.t.sol`). The pull form is unchanged and still works.
+
+`totalAmount` is a floor on the pre-funded form because the slice there is the
+leg's actual delivery, which a decaying output leg prices anywhere in
+`[end, start]`; the property the gate protects — one message carries at least the
+whole-order figure the anchor and the per-message fee were authored against — is
+exactly `>=`. A partial fill below it still reverts `PartialFillUnsupported`.
+
+### LayerZero fee from the fill's legs
+
+The LayerZero messaging fee is native, and `makeOnBehalf` is not payable, so the
+fee is paid from the per-payer `nativeCredit` ledger. Without help that ledger is a
+float someone parks before the fill (a maker `topUpFor`, or a sponsor's credit the
+auction never prices — review 2026-10-18 M-4). The pre-funded `OP_FEE_CREDIT` op
+removes the float: the order carries a wrapped-native output leg addressed to the
+module and a first item that unwraps exactly that delivery into
+`nativeCredit[maker]`; the pre-funded send then pays the quote from it as an
+ordinary self-paid send.
+
+```
+legsOut[0] = (inputToken,     amount,    recipient = lzOut)
+legsOut[1] = (WRAPPED_NATIVE, feeBudget, recipient = lzOut)
+items[0]   = MAKE lzOut, data = abi.encode(forLegPreFund(1, WRAPPED_NATIVE) | OP_FEE_CREDIT << 244)
+items[1]   = MAKE lzOut, data = abi.encode(forLegPreFund(0, inputToken), LzSpec{feePayer: maker, …})
+```
+
+Two items, because the core binds and consumes one leg per item (the descriptor in
+word 0); a second leg reference inside one item would be sized by nothing but a
+balance floor against an `oft`-quoted (maker-chosen) fee. The unused part of
+`feeBudget` stays the maker's credit (spent by its next send, or `withdrawNative`).
+On `matchSettle` a schedule that runs the send before the credit simply finds no
+credit and reverts `InsufficientNativeCredit`. The op needs the module deployed
+with a `wrappedNative` (`WRAPPED_NATIVE` env); with `address(0)` it reverts
+`NoWrappedNative`. `receive()` accepts native only from that token's `withdraw`.
+
+A pre-funded blob on the `SETTLE` seam reverts `PreFundNeedsMake`: the core sizes a
+pre-funded slice from its ledger only for `MAKE`, so on `SETTLE` the delivery would
+be unbound. Sponsored sends therefore stay pull-funded; fee-from-legs is the
+zero-float alternative to a sponsorship (the filler still prices the fee, but
+delivers it as an output leg).
+
+`FeeTransferModule` (`packages/modules/maker`) deliberately has no pre-funded form:
+any delivery that could fund it can be a fee output leg addressed to the fee
+recipient directly, and an outputless order has no delivery to pre-fund from.
 
 ## Why the inbox is the maker
 
@@ -184,7 +255,7 @@ every delivery carrying it accumulates in one row.
 | source module | `AcrossBridgeOutModule` | `LzOftBridgeOutModule` | `LzOftBridgeOutModule` | `CctpBridgeOutModule` |
 | arrival | atomic (relayer's fill tx) | two txs (`lzReceive`, then `lzCompose`) | two txs | mint after Circle attestation |
 | destination hook | `handleV3AcrossMessage` | `lzCompose` | `lzCompose` | **none — plain mint** |
-| native messaging fee | none | yes → `nativeCredit` ledger | yes | none |
+| native messaging fee | none | yes → `nativeCredit` ledger (`topUpFor`, a sponsor, or a wrapped-native leg via `OP_FEE_CREDIT`) | yes | none |
 | delivery floor | `outputAmount`, exact | `minAmountLD` | `minAmountLD` (dust only) | `amount − maxFee` (V2; `amount` itself at `maxFeeBps = 0`, Standard) |
 | destination host | inbox or funnel | inbox or funnel | inbox or funnel | **funnel only** |
 | **revert posture** | **must revert on bad input** | **must never revert** | **must never revert** | n/a — nothing to handle |
@@ -312,9 +383,11 @@ identity, a sponsored spec reverts `SponsoredSendNeedsSettle`; a self-paid spec
 (`feePayer == maker`) works on either seam. **BREAKING:** sponsored orders signed
 as `MAKE` items no longer fill. The SDK's `assertLzSponsorshipSafe` (hard lifelong
 `exclusiveFiller` = sponsor, full-fill only) is now a liveness preflight — a
-stranger's fill reverts instead of charging the sponsor. `SETTLE` items are not
-admitted by `matchSettle`, so sponsored sends fill through the single-order and
-batch entrypoints only.
+stranger's fill reverts instead of charging the sponsor. Since task 31
+`matchSettle` admits `SETTLE` items, and on that path the filler is the plan's
+caller, so the binding means the same thing there (`NettedLzOftSettle.t.sol`). A
+sponsored send is PULL-funded only — see "LayerZero fee from the fill's legs" for
+the float-free alternative.
 
 ### Recovery order for a LayerZero delivery that hasn't credited
 
@@ -401,7 +474,7 @@ Two guards sit on top of that, and one deliberate omission:
 
 `script/Deploy.s.sol` deploys everything through CREATE2 with a fixed salt. This is a fund-safety property, not a convenience: funnel addresses are derived from the factory address and its init code, so a factory that lands somewhere else on one chain invalidates every funnel address predicted for it — including ones tokens have already been bridged to.
 
-The factory's constructor args (`permit3`, `settlement`, `lens`, `grantModule`) are inside its init code, so **those four must already be at identical addresses on every chain** or the factory diverges silently. `FunnelGrantModule` is deployed by the same script through CREATE2 with `settlement` as its only constructor arg, so it lands identically wherever Settlement does — but it is an input to every funnel address all the same. The optional `CctpBridgeOutModule` (CCTP V2) is deployed when `CCTP_TOKEN_MESSENGER_V2` is set. `saltFor` and `initCodeHashFor` are exposed so an off-chain implementation can reproduce the derivation and be checked against a published registry rather than trusted; `test_addressDerivationIsReproducible` pins the formula.
+The factory's constructor args (`permit3`, `settlement`, `lens`, `grantModule`) are inside its init code, so **those four must already be at identical addresses on every chain** or the factory diverges silently. `FunnelGrantModule` is deployed by the same script through CREATE2 with `settlement` as its only constructor arg, so it lands identically wherever Settlement does — but it is an input to every funnel address all the same. The optional `CctpBridgeOutModule` (CCTP V2) is deployed when `CCTP_TOKEN_MESSENGER_V2` is set. `LzOftBridgeOutModule` takes the chain's wrapped native (`WRAPPED_NATIVE`, zero = no `OP_FEE_CREDIT`) as a constructor argument, so its CREATE2 address depends on it — **BREAKING** for any address predicted before 2026-10-18. `saltFor` and `initCodeHashFor` are exposed so an off-chain implementation can reproduce the derivation and be checked against a published registry rather than trusted; `test_addressDerivationIsReproducible` pins the formula.
 
 ## Not done yet
 

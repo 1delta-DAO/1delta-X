@@ -24,6 +24,42 @@ to the user). `Full` is the **tagged** word `0xB0DE0001`
 (`DustHandler.encodeMode(Full)`) followed by the mandatory `totalAmount`; a bare
 `1` reverts `InvalidModeWord`. The native modules take `abi.encode(cEther[, ...])`.
 
+## Pre-funded modules (`src/CompoundV2PreFundModules.sol`)
+
+"Deposit / repay whatever the conversion delivered": the maker routes the signed
+output leg to the module (`recipient = module`) and signs a pre-funded `MAKE` item
+whose leg-reference descriptor points at it; the core sizes `forAmount` to exactly
+that delivery and the module spends it from its own balance (floor + sweep). The
+delivered asset needs no ERC20 approval, no Permit3 allowance and no venue grant
+(`mint` and `repayBorrowBehalf` are permissionless on behalf).
+
+| Module | Op (descriptor bits [244,252)) | Compound v2 call | `data` |
+| --- | --- | --- | --- |
+| `CompoundV2PreFundModule` | 0 Deposit / 1 Repay | `mint(forAmount)` → forward cToken receipt / `repayBorrowBehalf(min(forAmount, debt))` → sweep the rest | `abi.encode(forDesc, cToken, underlying)` |
+| `CompoundV2NativePreFundModule` | 0 Deposit / 1 Repay | `weth.withdraw` → `cEther.mint{value}` → forward receipt / `cEther.repayBorrowBehalf{value: min(forAmount, debt)}` → unused WETH swept back, still wrapped | `abi.encode(forDesc, cEther)` — funding token must be the immutable `weth` |
+
+The native one (review 2026-10-18 M-5) replaces the WETH pull of
+`CompoundV2NativeDepositModule` / `CompoundV2NativeRepayModule` — a Permit3 grant
+on a token a "sell X, deposit/repay ETH" maker never held — with a delivered WETH
+leg unwrapped inside the item. It unwraps EXACTLY `forAmount` (or the debt-capped
+part), never "whatever WETH is here": on `matchSettle` two makers' deliveries can
+park on the singleton at once (the `NativeUnwrapModule` rule). The size comes
+from the core's delivery ledger, not a pro-rated `item.amount`, so the SELL-leg
+per-fill-ceil vs item cumulative-floor gap does not arise (the extra wei of a
+partial fill is minted for the maker). ETH and WETH sweeps are floored at their
+pre-call balances.
+
+`test/netted/NettedPreFund.t.sol` (mock cTokens + a WETH9-shaped mock, real
+Settlement + Permit3) drives both modules on the netted path with WETH, ETH and
+underlying residue on the singletons: two native items parked side by side,
+a hostile zero-debt sweep, an item hoisted ahead of its own DELIVER failing closed
+(`ForLegInvalid`), the ERC20 pair interleaved, the acyclic CLOSE at zero capital
+(`CompoundV2WithdrawModule` TAKE early → sell → native pre-funded repay late),
+partial forward fills, and the gates. `test/native/NativePreFundSettlement.t.sol`
+runs the native module against live mainnet cETH + WETH9 with no WETH grant at
+all. (No acyclic OPEN with a borrow: vanilla Compound v2 has no on-behalf borrow;
+the open here is swap-and-deposit.)
+
 ### Notes
 
 - **No borrow.** Vanilla Compound v2 cannot record debt on a third party. If you

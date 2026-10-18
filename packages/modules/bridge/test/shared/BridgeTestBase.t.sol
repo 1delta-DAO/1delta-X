@@ -11,7 +11,7 @@ import {CommitmentCodec} from "../../src/CommitmentCodec.sol";
 import {AcrossBridgeOutModule} from "../../src/out/AcrossBridgeOutModule.sol";
 import {LzOftBridgeOutModule} from "../../src/out/LzOftBridgeOutModule.sol";
 
-import {MockSpokePool, MockLzEndpoint, MockOFT} from "./Mocks.t.sol";
+import {MockSpokePool, MockLzEndpoint, MockOFT, MockWETH9} from "./Mocks.t.sol";
 
 /// @title BridgeTestBase
 /// @notice Shared harness for the cross-chain package. Both "chains" live in one
@@ -30,6 +30,8 @@ abstract contract BridgeTestBase is MockSettlementBase {
     MockOFT oft;
     AcrossBridgeOutModule acrossOut;
     LzOftBridgeOutModule lzOut;
+    /// @dev The wrapped native the LayerZero module's fee-credit op unwraps.
+    MockWETH9 weth;
 
     address endUser = address(0xE9D0);
     address beneficiary = address(0xBE9E);
@@ -68,7 +70,8 @@ abstract contract BridgeTestBase is MockSettlementBase {
             address(permit3), address(settlement), address(spokePool), address(lzEndpoint), inboxOwner
         );
         acrossOut = new AcrossBridgeOutModule(address(permit3), address(settlement), address(spokePool));
-        lzOut = new LzOftBridgeOutModule(address(permit3), address(settlement));
+        weth = new MockWETH9();
+        lzOut = new LzOftBridgeOutModule(address(permit3), address(settlement), address(weth));
 
         vm.prank(inboxOwner);
         inbox.enableToken(address(tA));

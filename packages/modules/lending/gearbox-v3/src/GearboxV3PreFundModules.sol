@@ -7,7 +7,15 @@ import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 
-import {IGearboxPoolV3} from "./interfaces/IGearboxV3.sol";
+import {
+    IGearboxPoolV3,
+    IGearboxCreditFacadeV3,
+    IGearboxCreditFacadeV3Multicall,
+    ICreditManagerV3,
+    IGearboxBot,
+    MultiCall
+} from "./interfaces/IGearboxV3.sol";
+import {GearboxCreditAuth} from "./GearboxV3Modules.sol";
 
 // ──────────────── Gearbox V3 PRE-FUNDED one-sided module ────────────────
 //
@@ -24,19 +32,29 @@ import {IGearboxPoolV3} from "./interfaces/IGearboxV3.sol";
 // `deposit(assets, receiver)` is PERMISSIONLESS on someone else's behalf, so the
 // receive side is empty end to end.
 //
-//  ⚠ POOL SIDE ONLY — the credit-account surface is deliberately SKIPPED.
-//  ─────────────────────────────────────────────────────────────────────
-//  The credit-account modules in {GearboxV3Modules} run through `botMulticall`
-//  under the bot-permission model. Their fund-flow IS fork-validated
-//  (`test/fork/CreditFlow.t.sol`), but it carries venue rules a core-sized
-//  delivery cannot respect blind — the once-per-block debt-update rule, the
-//  suite's `debtLimits` (minDebt on every non-closing state), quota handling for
-//  non-underlying collateral, and the forced-`Recycle` repay cap. A pre-fund
-//  composite whose funding number is core-enforced deserves a venue op with none
-//  of those edges, so no pre-funded add-collateral / credit-repay variant ships here. If the
-//  credit side ever graduates, mirror {GearboxCreditAddCollateralModule}'s
-//  CA-rooted auth chain ({GearboxCreditAuth.authorize}) verbatim — the borrower
-//  check is what keeps a shared bot singleton from acting on a victim's account.
+//  The credit-account surface: {GearboxCreditPreFundModule}, below
+//  ──────────────────────────────────────────────────────────────────
+//  This section used to read "POOL SIDE ONLY — the credit-account surface is
+//  deliberately SKIPPED", for four venue rules a core-sized delivery cannot respect
+//  blind. Review 2026-10-18 M-1 graduated the credit side, because each of the four
+//  turns out to FAIL CLOSED or to stay on the maker's own account, never to strand
+//  value on the singleton or hand it to a filler:
+//    • once-per-block debt update — only `Repay` touches debt, once; a shape that
+//      also borrows on the same account in the same block reverts in Gearbox;
+//    • `debtLimits` — a repay whose delivery leaves a residual debt in (0, minDebt)
+//      reverts `BorrowAmountOutOfLimitsException` (a delivery AT or ABOVE the total
+//      debt closes it to zero, the one sub-minDebt state Gearbox accepts);
+//    • quotas — adding a quoted token without a quota does not revert, it simply
+//      does not count as collateral until the maker quotas it; the tokens are on the
+//      maker's own account either way;
+//    • the forced-`Recycle` repay cap — `decreaseDebt` caps at the total debt, and
+//      the uncapped part of the delivery, already moved in by `addCollateral`,
+//      stays on the maker's account as underlying collateral (exactly the pull
+//      sibling's {GearboxCreditRepayModule} posture). Nothing reaches this module's
+//      sweep, nothing reaches the filler.
+//  It mirrors {GearboxCreditAddCollateralModule}'s CA-rooted auth chain
+//  ({GearboxCreditAuth.authorize}) verbatim — the borrower check is what keeps a
+//  shared bot singleton from acting on a victim's account.
 //
 //  Why these ride the MAKE seam
 //  ────────────────────────────
@@ -122,6 +140,124 @@ contract GearboxPoolPreFundDepositModule is PreFundModuleBase, IMakerModule, IFu
     /// @inheritdoc IFundingSource
     /// @dev Funded by the fill's OWN delivery — a wallet/allowance read would
     ///      preview a self-funding order as short.
+    function fundingSource(address, bytes calldata data)
+        external
+        pure
+        override
+        returns (address asset, uint256 available)
+    {
+        (,, asset) = abi.decode(data, (uint256, address, address));
+        available = type(uint256).max;
+    }
+}
+
+// ──────────────── Gearbox V3 PRE-FUNDED credit-account module ────────────────
+//
+// The credit-account twin of the pool module above: add the delivered collateral to,
+// or repay debt on, the maker's credit account from this module's own balance, with
+// ZERO receive-side approvals (no Permit3 token allowance to the module, no ERC20
+// approve of the delivered token). Closes review 2026-10-18 M-1 for Gearbox credit,
+// whose add-collateral and repay makers were pull-only — so a zero-capital netted
+// fill needed the maker to approve the module for a token they never held.
+//
+// Two ops, one STANDING GRANT — merged by the grant a maker hands over, the
+// credit-module rule (`credit-module-grant-merge`): both are value-IN only and both
+// fit inside ONE bot mask, `ADD_COLLATERAL | DECREASE_DEBT` (0x05). The op rides in
+// descriptor bits [244,252), inside the signed order, so a delivery signed for
+// "add collateral" cannot be retired as debt.
+//
+//   • AddCollateral (0): `botMulticall([addCollateral(token, forAmount)])`.
+//   • Repay (1):         `botMulticall([addCollateral(underlying, forAmount),
+//                                       decreaseDebt(forAmount)])` — fund the account
+//                        and burn that much debt in one atomic multicall. Gearbox caps
+//                        `decreaseDebt` at the TOTAL debt (principal + accrued
+//                        interest + fees), so a delivery signed with headroom is a full
+//                        close: the over-delivery stays on the account as collateral
+//                        (forced `Recycle`, see the header). `token` must be the suite's
+//                        `underlying` — `decreaseDebt` burns the underlying, and with any
+//                        other token the multicall would retire debt out of the maker's
+//                        EXISTING underlying while parking the delivery as collateral.
+//
+// The acyclic deleverage / close this unlocks: {GearboxCreditWithdrawModule} TAKE early
+// (headroom carries the debt for one step), convert, deliver the underlying here, `Repay`
+// late. The acyclic open: {GearboxCreditBorrowModule} TAKE early against existing
+// collateral, convert, deliver the collateral here, `AddCollateral` late.
+//
+// Grant: `facade.multicall(ca, [setBotPermissions(module, 0x05)])` — once per account.
+// Approval goes to the CREDIT MANAGER (it runs `addCollateral`'s `transferFrom` with this
+// module as payer), scoped to `forAmount` and cleared after.
+//
+// `data = abi.encode(forDesc, creditAccount, token)` — forDesc@0 (op in bits [244,252)),
+// creditAccount@32, token@64; 96 bytes for both ops.
+contract GearboxCreditPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource, IGearboxBot {
+    enum Op {
+        AddCollateral, // 0
+        Repay // 1
+    }
+
+    /// @dev The descriptor named an op this module does not implement.
+    error BadOp(uint256 op);
+    /// @dev A `Repay` named a token other than the suite's debt asset.
+    error NotUnderlying(address token, address underlying);
+
+    constructor(address _permit3, address _settlement) PreFundModuleBase(_permit3, _settlement) {}
+
+    /// @inheritdoc IGearboxBot
+    /// @dev Value-IN only — no borrow bit, no collateral-out bit. Gearbox enforces the
+    ///      exact match, so this grant can never be widened by accident.
+    function requiredPermissions() external pure override returns (uint192) {
+        return GearboxCreditAuth.ADD_COLLATERAL_PERMISSION | GearboxCreditAuth.DECREASE_DEBT_PERMISSION;
+    }
+
+    /// @param onBehalfOf the maker — the credit account's borrower.
+    /// @param forAmount  this fill's delivered output leg, core-sized; spent from this
+    ///                   module's own balance. `item.amount` is not read on this seam.
+    function makeOnBehalf(address onBehalfOf, uint256 forAmount, bytes calldata data) external override {
+        _gatePreFundMake(data);
+        uint256 op = _preFundOp(data);
+        if (op > uint256(Op.Repay)) revert BadOp(op);
+        // A dust slice can floor the funding leg to zero; skip — it accumulates
+        // exactly across fills.
+        if (forAmount == 0) return;
+
+        (, address creditAccount, address token) = abi.decode(data, (uint256, address, address));
+        // The borrower check: a shared bot singleton is registered on EVERY onboarded
+        // account, so without it an order could name a victim's account.
+        (address creditManager, address facade) = GearboxCreditAuth.authorize(creditAccount, onBehalfOf);
+        // The delivery must have landed HERE, in THIS token (descriptor-bound by
+        // {PreFundGuard.floorOf}); sound because `msg.sender == settlement` pins
+        // `forAmount`. KEPT: on the netted path another order's delivery may be parked
+        // on this singleton, and the floor is what keeps it out of this sweep.
+        uint256 floor = PreFundGuard.floorOf(data, token, forAmount);
+
+        MultiCall[] memory calls;
+        if (op == uint256(Op.AddCollateral)) {
+            calls = new MultiCall[](1);
+        } else {
+            address underlying = ICreditManagerV3(creditManager).underlying();
+            if (token != underlying) revert NotUnderlying(token, underlying);
+            calls = new MultiCall[](2);
+            calls[1] = MultiCall({
+                target: facade, callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.decreaseDebt, (forAmount))
+            });
+        }
+        calls[0] = MultiCall({
+            target: facade, callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.addCollateral, (token, forAmount))
+        });
+
+        // Scoped approve + CLEAR to the manager derived from the account (never from
+        // `data`).
+        SafeTransferLib.forceApprove(token, creditManager, forAmount);
+        IGearboxCreditFacadeV3(facade).botMulticall(creditAccount, calls);
+        SafeTransferLib.forceApprove(token, creditManager, 0);
+        // The manager pulls exactly `forAmount`, so on an honest venue this sweeps
+        // nothing; measured against the pre-delivery floor all the same (F27/C-3).
+        PreFundGuard.sweepSurplus(token, onBehalfOf, floor);
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev Funded by the fill's OWN delivery — a wallet/allowance read would preview a
+    ///      self-funding order as short.
     function fundingSource(address, bytes calldata data)
         external
         pure

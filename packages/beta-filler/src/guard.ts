@@ -16,7 +16,9 @@ export const GAS = "gas" as Address;
  *  • An ON-CHAIN revert (a tx we paid for) is a STRIKE and blocks the order for
  *    EVERY strategy: 1 min, 4 min, 16 min, 1 h (capped); the 5th strike blacklists
  *    it until the order's own expiry. Dispatch never falls through to the next
- *    strategy on an order whose tx just reverted.
+ *    strategy on an order whose tx just reverted. EXCEPT a LOST RACE (review S-5,
+ *    {@link RaceProbe}): another filler's fill moved the order's on-chain progress
+ *    first — no strike, no block, and the next look fills the on-chain remainder.
  *  • A failure BEFORE sending (simulation revert, gas above MAX_ROUTE_GAS, RPC
  *    error) blocks only that strategy, briefly: 30 s doubling to 5 min. The other
  *    strategy may still try (e.g. inventory short of balance → route).
@@ -74,7 +76,7 @@ export interface SimBackoffEntry {
 }
 
 /** What a sent tx was for. */
-export type TxKind = "fill" | "approve" | "redeem" | "sell-rif" | "mint" | "refill" | "drain";
+export type TxKind = "fill" | "approve" | "redeem" | "sell-rif" | "mint" | "refill" | "drain" | "sweep";
 /** Who sent it. */
 export type TxStrategy = "inventory" | "route" | "rebalance";
 
@@ -138,8 +140,46 @@ export interface PendingTx {
   reserved?: { budget: string; token: string; amount: string };
   /** Fills: the shape and `eth_estimateGas` at send, learned from once the receipt is read (gasRatio.ts). */
   gasMeter?: GasMeter;
+  /** Fills: how to tell a LOST RACE from a genuine failure if this tx reverts ({@link RaceProbe}). */
+  race?: RaceProbe;
   info?: TxInfo;
 }
+
+/**
+ * What a reverted fill is checked against before it earns a strike (review S-5): the
+ * on-chain fill progress the fill was sent on. If another filler's fill moved it
+ * between our simulation and our inclusion, our tx reverted on `OverFill` (or found
+ * the order closed): a LOST RACE — the order still has room (or is done), nothing
+ * about it is wrong, so no strike and no backoff; the next look re-reads the on-chain
+ * remainder ({@link Guard.raced}) and re-quotes THAT, instead of the book's figure,
+ * which lags a fill by ~60–80 s on Rootstock.
+ */
+export interface RaceProbe {
+  /** The Settlement whose `filled(orderHash)` is read. */
+  settlement: Address;
+  /** `filled(orderHash)` read just before the send (decimal). */
+  filledBefore: string;
+  /** A FILL-ONCE order (timing bit 100) never writes `filled`: its fill consumes the nonce instead. */
+  fillOnce?: { maker: Address; nonce: string };
+}
+
+/** Settlement's `filled(bytes32)` and `isNonceCancelled(address,uint256)` (the race probe's two reads). */
+export const RACE_PROBE_ABI = [
+  { type: "function", name: "filled", stateMutability: "view", inputs: [{ name: "orderHash", type: "bytes32" }], outputs: [{ name: "", type: "uint256" }] },
+  {
+    type: "function",
+    name: "isNonceCancelled",
+    stateMutability: "view",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "nonce", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;
+
+/** How long a lost race keeps the order on the on-chain remainder ({@link Guard.raced}), ms: the book's index lag × ~5. */
+export const RACE_HOLD_MS = 5 * 60_000;
 
 export interface GuardState {
   gasSpends?: SpendEntry[];
@@ -147,6 +187,8 @@ export interface GuardState {
   simBackoff?: Record<string, SimBackoffEntry>;
   pending?: PendingTx;
   untracked?: UntrackedInFlight;
+  /** Orders whose last fill LOST A RACE: lower-case hash → when (ms). */
+  raced?: Record<string, number>;
 }
 
 /**
@@ -175,6 +217,7 @@ export class Guard {
   private readonly simBackoff: Record<string, SimBackoffEntry>;
   private pendingTx: PendingTx | undefined;
   private untrackedTx: UntrackedInFlight | undefined;
+  private readonly racedAt: Record<string, number>;
   /** Strategy budgets that sends reserve against (by name), see {@link register}. */
   readonly budgets: Record<string, Budget> = {};
   private readonly commitFn: () => Promise<void>;
@@ -190,6 +233,7 @@ export class Guard {
     this.simBackoff = { ...(state.simBackoff ?? {}) };
     this.pendingTx = state.pending ? { ...state.pending } : undefined;
     this.untrackedTx = state.untracked ? { ...state.untracked } : undefined;
+    this.racedAt = { ...(state.raced ?? {}) };
     this.commitFn = commit ?? (async () => this.persist());
     // A pre-2026-10 state file parked pending txs per order: adopt one as THE
     // pending tx (its charges were already final), keep the rest as a short block.
@@ -314,6 +358,26 @@ export class Guard {
     this.persist();
   }
 
+  /**
+   * A fill reverted because another filler got there first (a LOST RACE, see
+   * {@link RaceProbe}): NO strike and no block — the strike count stays what it was —
+   * and the order is marked {@link raced}, so the next look sizes the fill from the
+   * on-chain remainder rather than the book's lagging figure.
+   */
+  onLostRace(key: string, now: number): void {
+    const k = key.toLowerCase();
+    this.racedAt[k] = now;
+    for (const sk of Object.keys(this.simBackoff)) if (sk.endsWith(`:${k}`)) delete this.simBackoff[sk];
+    this.prune(now);
+    this.persist();
+  }
+
+  /** Whether `key`'s last fill lost a race within {@link RACE_HOLD_MS}: size the next fill from the on-chain remainder. */
+  raced(key: string, now: number): boolean {
+    const at = this.racedAt[key.toLowerCase()];
+    return at !== undefined && now - at < RACE_HOLD_MS;
+  }
+
   /** A sent tx vanished (dropped): keep the strike count, retry after a short block. */
   onDropped(key: string, now: number, expiry: bigint, reason: string): void {
     const k = key.toLowerCase();
@@ -336,6 +400,9 @@ export class Guard {
     }
     for (const [k, e] of Object.entries(this.simBackoff)) {
       if (now - e.until > BACKOFF.forgetMs) delete this.simBackoff[k];
+    }
+    for (const [k, at] of Object.entries(this.racedAt)) {
+      if (now - at >= RACE_HOLD_MS) delete this.racedAt[k];
     }
   }
 
@@ -362,6 +429,7 @@ export class Guard {
       simBackoff: this.simBackoff,
       ...(this.pendingTx ? { pending: this.pendingTx } : {}),
       ...(this.untrackedTx ? { untracked: this.untrackedTx } : {}),
+      ...(Object.keys(this.racedAt).length ? { raced: this.racedAt } : {}),
     };
   }
 }
@@ -383,6 +451,8 @@ export interface SendRequest {
   reserve?: { budget: string; token: Address; amount: bigint };
   /** Fills: learn this shape's receipt/estimate ratio from the receipt (see {@link PendingTx.gasMeter}). */
   gasMeter?: GasMeter;
+  /** Fills: the lost-race probe (see {@link PendingTx.race}). */
+  race?: RaceProbe;
   info?: TxInfo;
 }
 
@@ -456,6 +526,7 @@ export async function broadcast(chain: Chain, guard: Guard, a: SendRequest, now:
     sentAt: now,
     ...(a.reserve ? { reserved: { budget: a.reserve.budget, token: a.reserve.token.toLowerCase(), amount: a.reserve.amount.toString() } } : {}),
     ...(a.gasMeter ? { gasMeter: a.gasMeter } : {}),
+    ...(a.race ? { race: a.race } : {}),
     ...(a.info ? { info: a.info } : {}),
   };
   guard.chargeGas(cost, now, hash);
@@ -526,10 +597,34 @@ export interface Resolution {
   replaced?: boolean;
   /** The raw tx was re-broadcast this call (it was unknown to the node). */
   rebroadcast?: { attempt: number; error?: string };
+  /** `reverted` because another filler's fill landed first ({@link RaceProbe}): no strike was given. */
+  lostRace?: { filledBefore: string; filledAfter?: string; nonceUsed?: boolean };
 }
 
 type ReceiptPub = Pick<Chain["pub"], "getTransactionReceipt" | "getTransaction"> &
-  Partial<Pick<Chain["pub"], "sendRawTransaction" | "getTransactionCount">>;
+  Partial<Pick<Chain["pub"], "sendRawTransaction" | "getTransactionCount" | "readContract">>;
+
+/**
+ * The race probe's verdict on a reverted fill: `filled(orderHash)` moved past what the
+ * fill was sent on, or (fill-once) the order's nonce is now consumed. `undefined` = no
+ * probe, a read failed, or nothing moved — a genuine failure (a strike). Reads at
+ * `latest`, after the revert's block: anything another filler did before it shows.
+ */
+export async function probeLostRace(pub: ReceiptPub, p: PendingTx): Promise<Resolution["lostRace"]> {
+  const r = p.race;
+  if (!r || p.kind !== "fill" || !p.orderHash || !pub.readContract) return undefined;
+  try {
+    const after = (await pub.readContract({ address: r.settlement, abi: RACE_PROBE_ABI, functionName: "filled", args: [p.orderHash] })) as bigint;
+    if (after > BigInt(r.filledBefore)) return { filledBefore: r.filledBefore, filledAfter: after.toString() };
+    if (r.fillOnce) {
+      const used = (await pub.readContract({ address: r.settlement, abi: RACE_PROBE_ABI, functionName: "isNonceCancelled", args: [r.fillOnce.maker, BigInt(r.fillOnce.nonce)] })) as boolean;
+      if (used) return { filledBefore: r.filledBefore, nonceUsed: true };
+    }
+  } catch {
+    // No evidence either way: a genuine failure.
+  }
+  return undefined;
+}
 
 /** viem's `TransactionNotFoundError` anywhere in an error's cause chain (by class or name). */
 export function isTxNotFound(e: unknown): boolean {
@@ -577,7 +672,7 @@ export async function resolvePending(chain: { pub: ReceiptPub; me?: Address }, g
   if (!p) return undefined;
   const key = p.orderHash ?? p.backoffKey;
   let receipt = await readReceipt(chain.pub, p.hash);
-  if (receipt) return applyReceipt(guard, p, receipt, now);
+  if (receipt) return applyReceipt(guard, p, receipt, now, receipt.status === "success" ? undefined : await probeLostRace(chain.pub, p));
   const age = now - p.sentAt;
   // Is the node still holding it? Asked only once it is overdue: a receipt usually
   // comes within a block or two, and a lost broadcast shows here as "not found".
@@ -591,7 +686,7 @@ export async function resolvePending(chain: { pub: ReceiptPub; me?: Address }, g
       const mined = await chain.pub.getTransactionCount({ address: chain.me, blockTag: "latest" }).catch(() => undefined);
       if (mined !== undefined && mined > p.nonce) {
         receipt = await readReceipt(chain.pub, p.hash);
-        if (receipt) return applyReceipt(guard, p, receipt, now);
+        if (receipt) return applyReceipt(guard, p, receipt, now, receipt.status === "success" ? undefined : await probeLostRace(chain.pub, p));
         if (key) guard.onDropped(key, now, BigInt(p.expiry), `tx ${p.hash} replaced (nonce ${p.nonce} used by another tx)`);
         guard.setPending(undefined);
         return { status: "dropped", pending: p, gasCostWei: BigInt(p.gasLimit) * BigInt(p.gasPrice), replaced: true };
@@ -633,7 +728,7 @@ async function readReceipt(pub: ReceiptPub, hash: Hex): Promise<Receipt | undefi
   }
 }
 
-function applyReceipt(guard: Guard, p: PendingTx, receipt: Receipt, now: number): Resolution {
+function applyReceipt(guard: Guard, p: PendingTx, receipt: Receipt, now: number, lostRace?: Resolution["lostRace"]): Resolution {
   const key = p.orderHash ?? p.backoffKey;
   const gasCostWei = receipt.gasUsed * (receipt.effectiveGasPrice ?? BigInt(p.gasPrice));
   // Also after a timeout: the gas paid is known now (review 2026-10-05 §6).
@@ -643,8 +738,10 @@ function applyReceipt(guard: Guard, p: PendingTx, receipt: Receipt, now: number)
     if (key) guard.onSuccess(key);
   } else {
     if (!p.timedOut && p.reserved) guard.budgets[p.reserved.budget]?.settle(p.hash, p.reserved.token as Address, 0n);
-    if (key) guard.onRevert(key, now, BigInt(p.expiry), `tx ${p.hash} reverted`);
+    // A LOST RACE (S-5) is not the order's fault: no strike, re-quote the on-chain remainder.
+    if (key && lostRace) guard.onLostRace(key, now);
+    else if (key) guard.onRevert(key, now, BigInt(p.expiry), `tx ${p.hash} reverted`);
   }
   guard.setPending(undefined);
-  return { status: ok ? "success" : "reverted", pending: p, gasUsed: receipt.gasUsed, gasCostWei };
+  return { status: ok ? "success" : "reverted", pending: p, gasUsed: receipt.gasUsed, gasCostWei, ...(lostRace ? { lostRace } : {}) };
 }

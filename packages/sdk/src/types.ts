@@ -126,14 +126,32 @@ export const PreFundOp = {
   Silo: { Deposit: 0, Repay: 1 },
   Exactly: { Deposit: 0, Repay: 1 },
   MorphoBlue: { Supply: 0, SupplyCollateral: 1, Repay: 2 },
-  MorphoMidnight: { SupplyCollateral: 0, Repay: 1 },
+  MorphoMidnight: { SupplyCollateral: 0, Repay: 1, Lend: 2 },
   LiquityV2: { AddColl: 0, Repay: 1 },
-  River: { AddColl: 0, Repay: 1 },
+  /** RiverPreFundModule — `Open` (2) is a TAKE_FOR (pre-funded collateral in, satUSD out: a fused composite). */
+  River: { AddColl: 0, Repay: 1, Open: 2 },
   Teller: { PoolDeposit: 0, Repay: 1 },
-  Lista: { SupplyCollateral: 0 },
+  /** ListaPreFundModule: Moolah direct, the native provider (WBNB unwrapped), the SmartLP one-coin zap. */
+  Lista: { SupplyCollateral: 0, NativeSupplyCollateral: 1, SmartSupplyCollateral: 2 },
   ListaBroker: { Repay: 0, Borrow: 1 },
+  /** EulerV2PreFundModule (the MAKE sinks); the operator module's TAKE / TAKE_FOR ops are {@link PreFundOp.EulerV2Operator}. */
+  EulerV2: { Deposit: 0, Repay: 1 },
   EulerV2Operator: { Borrow: 0, Withdraw: 1, BatchOpen: 2, BatchClose: 3, Open: 4 },
+  /** DolomiteOperatorModule — one numbering for every seam; Deposit / Repay are its pre-funded MAKE ops. */
   DolomiteOperator: { Borrow: 0, Withdraw: 1, Deposit: 2, Repay: 3, BatchOpen: 4, BatchClose: 5, Open: 6 },
+  /** CompoundV2NativePreFundModule (cEther-style markets: the wrapped-native leg is unwrapped and minted / repaid). */
+  CompoundV2Native: { Deposit: 0, Repay: 1 },
+  /** FluidPreFundModule — `RepayAll` pays ALL live debt with the delivery as the ceiling. */
+  Fluid: { Deposit: 0, Repay: 1, RepayAll: 2 },
+  /** GearboxCreditPreFundModule (credit account, bot-permissioned). */
+  GearboxCredit: { AddCollateral: 0, Repay: 1 },
+  /** GearboxPoolPreFundDepositModule (pool LP deposit). */
+  GearboxPool: { Deposit: 0 },
+  /** AcrossBridgeOutModule / CctpBridgeOutModule: one pre-funded op, the send. */
+  AcrossBridgeOut: { Send: 0 },
+  CctpBridgeOut: { Send: 0 },
+  /** LzOftBridgeOutModule `OP_SEND` / `OP_FEE_CREDIT` (a wrapped-native delivery unwrapped into the maker's fee credit). */
+  LzOftBridgeOut: { Send: 0, FeeCredit: 1 },
 } as const;
 
 /// The funding token a pre-fund descriptor names — bits [16:176). Mirrors

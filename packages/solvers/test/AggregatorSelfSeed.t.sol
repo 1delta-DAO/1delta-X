@@ -8,7 +8,7 @@ import {ItemPolicy} from "@core/settlement/Structs.sol";
 import {AggregatorFillSolver, RoutePlan, SurplusPolicy, NO_PATCH, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 import {AggregatorItemFillTest} from "./AggregatorItemFill.t.sol";
-import {newAgg} from "./shared/AggDeploy.sol";
+import {newAgg, noGuard} from "./shared/AggDeploy.sol";
 
 /// @title AggregatorSelfSeedTest
 /// @notice The SELF-SEEDING 1-wei balance floor (2026-10): a token the solver held
@@ -225,24 +225,30 @@ contract AggregatorSelfSeedTest is AggregatorItemFillTest {
         assertEq(tB.balanceOf(FILLER), fillerB, "FILLER: no payout in retain mode");
     }
 
-    /// The accepted edge: a route quoted at ZERO margin over `minOut` cannot give up
-    /// the wei — on the cold instance it reverts `InsufficientOutput`, the maker's
-    /// funds untouched; the seeded twin fills. One wei of margin is enough.
-    function test_seed_zeroMarginPatchedRoute_revertsOnlyCold() public {
+    /// The edge that USED to revert: a route quoted at ZERO margin over `minOut` could
+    /// not give up the wei — the cold instance reverted `InsufficientOutput(99, 100)`.
+    /// Since 2026-10-18 (review S-5) a patched route's `minOut` is pro rata to what was
+    /// ROUTED against the quoted amount, rounded up ({AggregatorFillSolver._minOut}):
+    /// one withheld wei lowers the floor by exactly its share, so the cold instance fills
+    /// too — the maker gets exactly its price, the floor is seeded. A route that misses
+    /// the scaled floor still reverts (the twin below, quoted one wei too optimistic).
+    function test_seed_zeroMarginPatchedRoute_fillsCold_proRataFloor() public {
         (AggregatorFillSolver cold, AggregatorFillSolver warm) = _twins(_noSplit());
         Order memory o = _plain(cold, 1, false);
         bytes memory sig = _sign(o);
         RoutePlan memory exact = _pullPlan(cold, AMOUNT_IN, AMOUNT_WORD); // 1:1, minOut = the whole output
-        uint256 makerA = tA.balanceOf(maker);
-        vm.expectRevert(
-            _wrapped(abi.encodeWithSelector(AggregatorFillSolver.InsufficientOutput.selector, AMOUNT_IN - 1, AMOUNT_IN))
-        );
+        uint256 makerB = tB.balanceOf(maker);
         cold.executeFill(o, sig, AMOUNT_IN, exact, "", new Permit2612[](0));
-        assertEq(tA.balanceOf(maker), makerA, "maker untouched");
+        assertEq(tB.balanceOf(maker) - makerB, AMOUNT_OUT, "maker: exactly the signed price");
+        assertEq(tA.balanceOf(address(cold)), 1, "the withheld wei is the tA floor");
 
-        _fill(warm, _plain(warm, 2, false), AMOUNT_IN, _pullPlan(warm, AMOUNT_IN, AMOUNT_WORD));
-        _fill(cold, _plain(cold, 3, false), AMOUNT_IN, _pullPlan(cold, AMOUNT_IN - 1, AMOUNT_WORD));
-        _assertFloor(cold, 1, 1);
+        // The scaled floor is still a floor: 100 quoted, 100 routed (seeded twin), but a
+        // route paying 1 wei less than the floor reverts.
+        router.setRate(10_000 - 1);
+        Order memory o2 = _plain(warm, 2, false);
+        bytes memory sig2 = _sign(o2);
+        vm.expectRevert();
+        warm.executeFill(o2, sig2, AMOUNT_IN, _pullPlan(warm, AMOUNT_IN, AMOUNT_WORD), "", new Permit2612[](0));
     }
 
     /// Partial fills, any rate above the maker's price: the maker's received amount
@@ -355,11 +361,11 @@ contract AggregatorSelfSeedTest is AggregatorItemFillTest {
         Order memory o = _itemOrder(nonce, ItemPolicy.ANY);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _pullPlan(s, AMOUNT_OUT, AMOUNT_WORD);
-        s.executeItemFill(o, sig, AMOUNT_IN, p, "", LATE_DEPOSIT, new Permit2612[](0));
+        s.executeItemFill(o, sig, AMOUNT_IN, p, "", LATE_DEPOSIT, new Permit2612[](0), noGuard());
     }
 
     function _netted(AggregatorFillSolver s, Order memory o) internal {
         bytes memory sig = _sign(o);
-        s.executeItemFill(o, sig, AMOUNT_IN, _pullPlan(s, AMOUNT_OUT, AMOUNT_WORD), "", 0, new Permit2612[](0));
+        s.executeItemFill(o, sig, AMOUNT_IN, _pullPlan(s, AMOUNT_OUT, AMOUNT_WORD), "", 0, new Permit2612[](0), noGuard());
     }
 }

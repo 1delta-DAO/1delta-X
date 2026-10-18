@@ -1,26 +1,32 @@
 import {
   AGGREGATOR_FILL_SOLVER_ABI,
+  AGGREGATOR_FILL_SOLVER_V4_ABI,
   ROUTE_SANDBOX_ABI,
   SUSHI_RED_SNWAPPER_ABI,
   decodeAggregatorExecuteFillResult,
+  detectAggregatorVersion,
   encodeAggregatorExecuteFill,
   encodeAggregatorExecuteItemFill,
+  isFillOnce,
+  OrderSide,
   toSolverPermit,
+  type AggregatorVersion,
   type PoolVenue,
   type Erc2612Permit,
   type Order,
   type Permit2612,
   type RoutePlan,
 } from "@1delta-x/sdk";
-import { decodeErrorResult, erc20Abi, type Address, type Hex } from "viem";
+import { decodeErrorResult, erc20Abi, maxUint256, zeroAddress, type Address, type Hex } from "viem";
 
-import { previewBump, previewFill, type Chain } from "./chain";
+import { previewBump, previewFill, remainingOf, type Chain } from "./chain";
 import { VENUE_OKU, VENUE_SUSHI_V3, type Config, type RouteConfig, type RoutePath } from "./config";
 import type { FillOutcome } from "./filler";
 import { gasShape, GasRatios } from "./gasRatio";
 import type { BookEntry } from "./intake";
-import { broadcast, Guard } from "./guard";
+import { broadcast, Guard, RACE_PROBE_ABI, type RaceProbe } from "./guard";
 import { fillOnceBlocker, type Budget, type Verdict } from "./policy";
+import { FlashFiller, flashUnavailable } from "./flash";
 import type { PricedCandidate, QuoteBook } from "./quote";
 import { isAuctionNotStarted, recheckAtMs, scaleUp } from "./recheck";
 import {
@@ -46,6 +52,9 @@ import {
   NO_ROUTE_REASON,
   grossUp,
   haircutBps,
+  isExactInputPlan,
+  isInputPatched,
+  legAmounts,
   nativeToTokenAtQuote,
   nativeToUsdToken,
   liveDecayPerBlock,
@@ -168,6 +177,8 @@ export class RouteFiller {
   private nativeOn: boolean | undefined;
   /** Our share of each fill's surplus after the solver's maker/protocol split, ppm. */
   private keepPpm = PPM;
+  /** The solver's ABI (v3 live / v4 in-tree): AGGREGATOR_SOLVER_VERSION, else detected from its bytecode at {@link init}. */
+  private abiVersion: AggregatorVersion = 3;
   private sushiCalls = 0;
   private nordsternCalls = 0;
   private readonly skipped = new Map<Hex, string>();
@@ -188,6 +199,27 @@ export class RouteFiller {
     if (!cfg.route) throw new Error("RouteFiller: no route config (AGGREGATOR_SOLVER unset)");
     this.rc = cfg.route;
     guard.register("route", budget);
+    if (this.rc.matchFlashSolver) this.flash = new FlashFiller(cfg, this.rc, chain, guard, gasRatios, budget, ROUTE_FILLS, this, log);
+  }
+
+  /** The solver's ABI version (valid after {@link init}). */
+  get version(): AggregatorVersion {
+    return this.abiVersion;
+  }
+
+  /** The flash path for flash-required item orders (MATCH_FLASH_SOLVER), when configured. */
+  readonly flash?: FlashFiller;
+
+  /** Venue `i` of the route solver (factory, init code hash), once {@link init} has checked it. */
+  venue(i: number): PoolVenue | undefined {
+    return this.venueInfo.get(i);
+  }
+
+  /** Every quotable pool path tokenIn → tokenOut over the configured pools and the graph (the flash path's candidates). */
+  async flashPaths(tokenIn: Address, tokenOut: Address): Promise<RoutePath[]> {
+    await this.init();
+    await this.ensureGraph();
+    return this.pathsFor(tokenIn, tokenOut);
   }
 
   /** Seed the pool graph from the persisted filler state (rediscovered if its inputs changed or it is stale). */
@@ -376,6 +408,9 @@ export class RouteFiller {
       pub.readContract({ address: s, abi: AGGREGATOR_FILL_SOLVER_ABI, functionName: functionName as never, args: args as never }) as Promise<T>;
     const code = await pub.getCode({ address: s });
     if (!code || code === "0x") throw new Error(`AGGREGATOR_SOLVER ${s} has no code`);
+    // v3 (live) or v4 (in-tree): the configured override, else the dispatcher's selector.
+    this.abiVersion = this.rc.solverVersion ?? detectAggregatorVersion(code) ?? 3;
+    if (this.abiVersion === 3 && Object.keys(this.rc.inventoryCaps).length) this.log(`⚠ ROUTE_INVENTORY_CAPS ignored: solver ${s} is v3 (no RoutePlan.inventory)`);
     const [settlement, gated, isOp, sandbox, makerPpm, protocolPpm] = await Promise.all([
       read<Address>("SETTLEMENT"),
       read<boolean>("GATED"),
@@ -409,7 +444,7 @@ export class RouteFiller {
       this.log(`⚠ NORDSTERN_EXECUTORS is empty: every Nordstern route will be refused (the pin is strict)`);
     }
     this.log(
-      `route strategy: solver ${s} (${gated ? "gated" : "OPEN"}), sandbox ${sandbox}, surplus split maker ${makerPpm} / protocol ${protocolPpm} ppm (we keep ${keep}), ${this.rc.pools.length} pool(s), ${this.rc.paths.length} path(s), discovery ${this.rc.discovery.enabled ? `on (≤${this.rc.maxHops} hops, ${this.rc.maxCandidates} candidates, ${activePools(this.graph, this.rc.discovery.minLiquidity).length} active pools)` : "off"}, venues ${[...this.quoters.keys()].map(venueName).join("+") || "none"}, sushi ${this.rc.sushi.enabled ? `on (${this.rc.sushi.router}, ≤${this.rc.sushi.maxPerSweep}/sweep)` : "off"}, nordstern ${this.rc.nordstern.enabled ? `on (${this.rc.nordstern.router}, ≤${this.rc.nordstern.maxPerSweep}/sweep, haircut ${this.rc.nordstern.haircutBps} bps)` : "off"}`,
+      `route strategy: solver ${s} v${this.abiVersion} (${gated ? "gated" : "OPEN"}), sandbox ${sandbox}, surplus split maker ${makerPpm} / protocol ${protocolPpm} ppm (we keep ${keep}), ${this.rc.pools.length} pool(s), ${this.rc.paths.length} path(s), discovery ${this.rc.discovery.enabled ? `on (≤${this.rc.maxHops} hops, ${this.rc.maxCandidates} candidates, ${activePools(this.graph, this.rc.discovery.minLiquidity).length} active pools)` : "off"}, venues ${[...this.quoters.keys()].map(venueName).join("+") || "none"}, sushi ${this.rc.sushi.enabled ? `on (${this.rc.sushi.router}, ≤${this.rc.sushi.maxPerSweep}/sweep)` : "off"}, nordstern ${this.rc.nordstern.enabled ? `on (${this.rc.nordstern.router}, ≤${this.rc.nordstern.maxPerSweep}/sweep, haircut ${this.rc.nordstern.haircutBps} bps)` : "off"}`,
     );
   }
 
@@ -551,8 +586,19 @@ export class RouteFiller {
       // Native delivery through the NativeBalance view (task 30) — until init has checked
       // the solver, optimistically (consider() re-checks after init).
       ...(this.rc.nativeBalance && this.nativeOn !== false ? { nativeBalance: { view: this.rc.nativeBalance, wrapped: this.cfg.wrbtc } } : {}),
-      // Item fills (task 31) against this Settlement's netted-path capabilities.
-      ...(this.rc.itemFills ? { itemFills: { nettedDeliveryFundedItems: this.rc.itemFills.nettedDeliveryFundedItems, settlement: this.cfg.settlement } } : {}),
+      // Item fills (task 31) against this Settlement's netted-path capabilities; the
+      // configured fused-composite modules classify flash-required (M-3).
+      ...(this.rc.itemFills
+        ? {
+            itemFills: {
+              nettedDeliveryFundedItems: this.rc.itemFills.nettedDeliveryFundedItems,
+              settlement: this.cfg.settlement,
+              compositeKind: (it: { module: string }) => this.rc.compositeModules[it.module.toLowerCase()],
+            },
+          }
+        : {}),
+      // The shape admissions beyond the plain order (review 2026-10-18 §4, ROUTE_ADMIT_*).
+      admit: this.rc.admit,
     };
   }
 
@@ -592,22 +638,47 @@ export class RouteFiller {
       cls = classifyRoute(order, this.rc, this.extras(entry));
     }
     if (!cls.ok) return this.skip(orderHash, cls.reason, true);
-    const fillable = entry.state?.fillableAmount ?? 0n;
+    let fillable = entry.state?.fillableAmount ?? 0n;
     if (fillable === 0n) return this.skip(orderHash, "nothing fillable", true);
+    // FLASH-REQUIRED (a cycle — SDK needsFlash, M-3 / S-4): never `executeItemFill`; only
+    // the flash path (MatchFlashSolver, ./flash.ts) may take it — a resting skip without one.
+    if (cls.flash && !this.flash) return this.skip(orderHash, flashUnavailable(cls.flash.reason).reason, true);
+    try {
+      const blocked = this.guard.admit(orderHash, "route", Date.now());
+      if (blocked) return { ...this.skip(orderHash, blocked.reason), final: blocked.global };
+      // A LOST RACE (review S-5, guard.ts `RaceProbe`): another filler's fill landed
+      // first and the book's figure lags it by a minute or more — size the fill from the
+      // ON-CHAIN remainder instead (one lens read, only for a raced order).
+      if (this.guard.raced(orderHash, Date.now()) && !cls.proportional) {
+        const left = await remainingOf(this.chain, this.cfg.lens, order);
+        if (left === 0n) return this.skip(orderHash, "filled by another filler (on-chain remainder 0)", true);
+        if (left < fillable) {
+          this.log(`· [route] ${orderHash} lost a race: re-quoting the on-chain remainder ${left} (book ${fillable})`);
+          fillable = left;
+        }
+      }
+    } catch (e) {
+      return this.failed(orderHash, e);
+    }
     // The route fills the book's whole `fillable`; for a FILL-ONCE order that must be
     // the whole order (policy.ts `fillOnceBlocker`), else the fill only reverts.
     const once = fillOnceBlocker(order, fillable);
     if (once) return this.skip(orderHash, once, true);
+    if (cls.flash && this.flash) return this.flash.fill(orderHash, order, entry.announce.sig, fillable);
     try {
-      const blocked = this.guard.admit(orderHash, "route", Date.now());
-      if (blocked) return { ...this.skip(orderHash, blocked.reason), final: blocked.global };
       await this.init();
       await this.ensureGraph();
       if (cls.native && !this.nativeOn) return this.skip(orderHash, "native delivery is off (the solver's nativeDelivery() is not NATIVE_BALANCE / WRBTC)", true);
       // Re-derive the pair's paths over the (possibly just refreshed) graph — to the ROUTED
       // output token (WRBTC for a native order).
       const paths = this.pathsFor(order.legsIn[0]!.token, cls.tokenOut);
-      return await this.tryFill(orderHash, order, entry.announce.sig, fillable, cls, paths, entry.fillPermit);
+      // A PROPORTIONAL ("sell my balance") order is filled WHOLE with the remainder
+      // sentinel: the anchor resolves from the maker's balance at inclusion and the
+      // patched route swaps exactly that (AggregatorProportionalSentinelTest). Everything
+      // else keeps the explicit size: the plan's `minOut` is sized for it, so a remainder
+      // that shrank would only move the revert from a cheap OverFill to after the swap.
+      const fillAmount = cls.proportional ? maxUint256 : fillable;
+      return await this.tryFill(orderHash, order, entry.announce.sig, fillAmount, cls, paths, entry.fillPermit);
     } catch (e) {
       // Nothing was sent (a sent tx is handled inside tryFill).
       return this.failed(orderHash, e);
@@ -635,7 +706,7 @@ export class RouteFiller {
     order: Order,
     sig: Hex,
     fillAmount: bigint,
-    cls: Pick<RouteClass, "direct" | "tokenOut" | "native" | "itemFill">,
+    cls: Pick<RouteClass, "direct" | "tokenOut" | "native" | "itemFill" | "feeLegs" | "proportional">,
     paths: RoutePath[],
     fillPermit?: Erc2612Permit,
   ): Promise<FillOutcome> {
@@ -667,7 +738,10 @@ export class RouteFiller {
     // the pre-simulation estimate; the simulation then measures it for real.
     const permits: Permit2612[] = fillPermit ? [toSolverPermit(order.maker, fillPermit, cfg.settlement)] : [];
     const permitGas = permits.length > 0 ? PERMIT_IN_FILL_GAS : 0n;
-    const earlyGas = rc.gasEstimate + (liveCandidate ? TYPED_CALLBACK_GAS : 0n) + permitGas + nativeGas;
+    // An in-kind fee leg switches the solver to the typed callback (it keeps the leg back);
+    // the simulation measures it, this only floors the pre-simulation estimate.
+    const keptGas = cls.feeLegs && !itemFill ? TYPED_CALLBACK_GAS : 0n;
+    const earlyGas = rc.gasEstimate + (liveCandidate ? TYPED_CALLBACK_GAS : 0n) + permitGas + nativeGas + keptGas;
 
     // 0. Fills per hour, the gas-price ceiling, and a cheap early look at the shared
     //    gas budget (the binding check is against the final gas LIMIT, step 7).
@@ -689,9 +763,13 @@ export class RouteFiller {
     // `executeItemFill` refuses a bump floor (`ItemFillUnsupported`, task 17): matchSettle
     // carries none. The pull plan's `maxPay = owed` still turns a maker-ward move into a revert.
     const minBumpBps = itemFill ? 0n : await previewBump(chain, cfg.lens, order, rc.solver, gasPrice);
-    const received = pv.received[0] ?? 0n;
-    const owed = pv.paid[0] ?? 0n;
+    // FEE LEGS (ROUTE_ADMIT_FEE_LEGS): `owed` = every leg in the anchor output token (one
+    // per-token `maxPay` covers them, `minOut` floors them + our margin); the in-kind legs
+    // (input token) are kept back by the solver, so the route swaps `routeIn` = input − them.
+    // A plain order: owed = paid[0], routeIn = received[0].
+    const { received, owed, kept, routeIn } = legAmounts(order, pv, tokenOut, native);
     if (received === 0n || owed === 0n) return this.skip(orderHash, "zero-sized preview", true);
+    if (routeIn <= 0n) return this.skip(orderHash, `fee legs in the input token (${kept}) take the whole input (${received})`, true);
 
     // 2. Candidates: the pair's pool paths — configured and enumerated over the pool
     //    graph (multi-hop, mixed venues), pruned to ROUTE_MAX_CANDIDATES by the graph's
@@ -712,8 +790,8 @@ export class RouteFiller {
     // A quote we could not GET (an RPC failure, an API per-sweep cap, an API error)
     // says nothing about the order: a skip then is not a resting verdict.
     let transient = false;
-    const poolPaths = direct || rc.okuPull ? this.select(paths.filter((p) => this.quotable(p)), received, tokenOut, gasPrice) : [];
-    const pq = await this.quoteMany(poolPaths, direct ? owed : received, direct ? "out" : "in");
+    const poolPaths = direct || rc.okuPull ? this.select(paths.filter((p) => this.quotable(p)), routeIn, tokenOut, gasPrice) : [];
+    const pq = await this.quoteMany(poolPaths, direct ? owed : routeIn, direct ? "out" : "in");
     poolPaths.forEach((path, i) => {
       const q = pq[i]!;
       if (!q.ok) {
@@ -723,11 +801,11 @@ export class RouteFiller {
       const gasUnits = poolRouteGasUnits(path.fees.length, q.gasUnits);
       // Direct: `q.amount` is the input `owed` needs; express it as the output
       // `received` buys at that rate, so the gate and the ranking read one unit.
-      if (direct) raw.push({ source: "pool", path, out: (owed * received) / q.amount, gasUnits, need: q.amount });
+      if (direct) raw.push({ source: "pool", path, out: (owed * routeIn) / q.amount, gasUnits, need: q.amount });
       else raw.push({ source: "pool", path, out: q.amount, gasUnits });
     });
     if (!direct) {
-      const api = await this.apiRoutes({ tokenIn: order.legsIn[0]!.token, tokenOut, amountIn: received, slippageBps }, orderHash);
+      const api = await this.apiRoutes({ tokenIn: order.legsIn[0]!.token, tokenOut, amountIn: routeIn, slippageBps }, orderHash);
       raw.push(...api.raw);
       if (api.transient) transient = true;
     }
@@ -750,7 +828,7 @@ export class RouteFiller {
     // extra pool hop adds POOL_HOP_GAS), with the typed path's and the in-fill permit's
     // extra gas — only a floor: the plan is re-priced at the simulated figure below.
     const estimateFor = (c: Pick<Candidate, "source"> & { path?: RoutePath }) =>
-      planGasEstimate(rc.gasEstimate, planKind(c)) + (c.source === "pool" && c.path ? extraHopGas(c.path.fees.length) : 0n) + (liveOut && !native ? TYPED_CALLBACK_GAS : 0n) + permitGas + nativeGas;
+      planGasEstimate(rc.gasEstimate, planKind(c)) + (c.source === "pool" && c.path ? extraHopGas(c.path.fees.length) : 0n) + (liveOut && !native ? TYPED_CALLBACK_GAS : 0n) + permitGas + nativeGas + (liveOut ? 0n : keptGas);
     const cands: Candidate[] = [];
     const gasOutOf = new Map<Candidate, bigint>();
     for (const r of raw) {
@@ -765,23 +843,50 @@ export class RouteFiller {
     const gasOutFor = (c: Candidate) => gasOutOf.get(c)!;
     const gate = (c: Candidate, g: bigint) =>
       routeProfitable({ quotedOut: c.out, owed, slippageBps, gasOut: g, minProfitOut: profitOut, keepPpm: this.keepPpm });
-    const build = (c: Candidate, costOut: bigint): Verdict<{ plan: RoutePlan }> => {
+    // SOLVER v4: the inventory cap for the anchor output token (ROUTE_INVENTORY_CAPS, 0 = none).
+    const v4 = this.abiVersion === 4;
+    const inventory = v4 ? rc.inventoryCaps[tokenOut.toLowerCase()] ?? 0n : 0n;
+    const buildRaw = (c: Candidate, costOut: bigint): Verdict<{ plan: RoutePlan }> => {
       if (c.source === "sushi") return buildSushiPlan({ quote: c.quote, owed, costOut, profitRecipient: rc.profitRecipient, minBumpBps });
       if (c.source === "nordstern") return buildNordsternPlan({ quote: c.quote, owed, costOut, profitRecipient: rc.profitRecipient, minBumpBps });
       try {
-        const { plan } = buildPoolPlan({ direct, path: c.path, received, owed, quotedOut: c.out, costOut, profitRecipient: rc.profitRecipient, minBumpBps, liveOut });
+        const { plan } = buildPoolPlan({ direct, path: c.path, received: routeIn, owed, quotedOut: c.out, costOut, profitRecipient: rc.profitRecipient, minBumpBps, liveOut });
         // Decode what we built and check it against the ORDER before anything is signed.
-        return validatePoolPlan(plan, order, { direct, path: c.path, received, owed, routeOut: tokenOut });
+        return validatePoolPlan(plan, order, { direct, path: c.path, received: routeIn, owed, routeOut: tokenOut });
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
       }
     };
+    const build = (c: Candidate, costOut: bigint): Verdict<{ plan: RoutePlan }> => {
+      const b = buildRaw(c, costOut);
+      if (!b.ok) return b;
+      // S-6: the item path carries no bump floor and no priced amount — only an
+      // EXACT-INPUT plan's proceeds are floored there (`minOut` / `maxPay`); an
+      // exact-output plan's spread would sit as unchecked input residue.
+      if (itemFill && !isExactInputPlan(b.plan)) return { ok: false, reason: `${c.source}: an item fill must be quoted exact-input (S-6)` };
+      return inventory > 0n ? { ok: true, plan: { ...b.plan, inventory } } : b;
+    };
+    // SOLVER v4 races (S-5): the fill progress read BEFORE the simulation — the item path's
+    // ItemFillGuard and the remainder sentinel both need it (v3 reads it just before the send).
+    const race0 = v4 ? await this.raceProbe(orderHash, order) : undefined;
+    // The remainder sentinel on an input-patched executeFill plan (v4 scales `minOut` pro
+    // rata to what was routed): a competitor's partial fill no longer reverts ours. Only
+    // when the book's figure IS the on-chain remainder (a maker short of funds would have
+    // the sentinel pull more than they hold), never for a fill module's own units.
+    const total = order.fillTotal !== 0n ? order.fillTotal : order.side === OrderSide.BUY ? order.legsOut[0]?.start ?? 0n : order.legsIn[0]!.start;
+    const sentinelOk = v4 && !itemFill && !direct && order.fillModule === zeroAddress && race0 !== undefined && fillAmount === total - BigInt(race0.filledBefore);
+    const sendAmountFor = (plan: RoutePlan) => (sentinelOk && isInputPatched(plan) ? maxUint256 : fillAmount);
+    const guard = v4 && itemFill && race0
+      ? { orderHash, expectedFilled: BigInt(race0.filledBefore), liveNonce: race0.fillOnce !== undefined, receipts: [] as Address[] }
+      : undefined;
     const simulate = async (plan: RoutePlan): Promise<Simulated> => {
       // An item-bearing order: the one-order matchSettle path, scheduled by the SDK
       // classifier (sources early, sinks late — policy.ts plainShape).
+      const version = this.abiVersion;
+      const amount = sendAmountFor(plan);
       const data = itemFill
-        ? encodeAggregatorExecuteItemFill({ order, sig, fillAmount, plan, permits, lateItems: itemFill.lateItems })
-        : encodeAggregatorExecuteFill({ order, sig, fillAmount, plan, permits });
+        ? encodeAggregatorExecuteItemFill({ order, sig, fillAmount: amount, plan, permits, lateItems: itemFill.lateItems, version, ...(guard ? { guard } : {}) })
+        : encodeAggregatorExecuteFill({ order, sig, fillAmount: amount, plan, permits, version });
       const sim = await chain.pub.call({ account: chain.me, to: rc.solver, data, gasPrice });
       if (!sim.data) throw new Error("simulation returned no data");
       const delivered = decodeAggregatorExecuteFillResult(sim.data);
@@ -815,7 +920,9 @@ export class RouteFiller {
     // order's own clock. Re-quoted then, not a fixed hold later.
     const passesAt = (list: readonly Candidate[], g: (c: Candidate) => bigint) => (pd: bigint, rv: bigint) =>
       list.some((c) => routeProfitable({ quotedOut: scaleUp(c.out, rv, received), owed: pd, slippageBps, gasOut: g(c), minProfitOut: profitOut, keepPpm: this.keepPpm }).ok);
-    const recheck = (passes: (pd: bigint, rv: bigint) => boolean) => recheckAtMs(order, minBumpBps, owed, received, nowSec, passes);
+    // The clock prediction prices legsOut[0] / legsIn[0] alone: with fee legs it would
+    // mis-size `owed`, so such an order keeps the plain resting cadence (no prediction).
+    const recheck = (passes: (pd: bigint, rv: bigint) => boolean) => (cls.feeLegs ? undefined : recheckAtMs(order, minBumpBps, owed, received, nowSec, passes));
     // Every candidate failed the profit gate (or could not be built): the order's price against the pools.
     if (viable.length === 0) {
       return this.skip(orderHash, refusals.join("; "), !transient, transient || buildFailed ? undefined : recheck(passesAt(cands, gasOutFor)));
@@ -901,6 +1008,7 @@ export class RouteFiller {
     //    Profit estimate: the quoted surplus over what is owed, our share of it
     //    (output units, before gas).
     const surplus = best.out > owed ? best.out - owed : 0n;
+    const race = race0 ?? (await this.raceProbe(orderHash, order));
     const r = await broadcast(chain, this.guard, {
       to: rc.solver,
       data: sim.data,
@@ -912,10 +1020,11 @@ export class RouteFiller {
       expiry: order.expiry,
       reserve: { budget: "route", token: ROUTE_FILLS, amount: 1n },
       gasMeter: { shape, estimate: sim.gasUsed.toString() },
+      ...(race ? { race } : {}),
       info: {
         tag: `${tag} (limit ${gasLimit})`,
         payToken: tokenOut,
-        paid: (sim.delivered[0] ?? 0n).toString(),
+        paid: deliveredIn(sim.delivered, order, tokenOut, native).toString(),
         recvToken: order.legsIn[0]!.token,
         received: received.toString(),
         profitEst: ((surplus * this.keepPpm) / PPM).toString(),
@@ -931,6 +1040,24 @@ export class RouteFiller {
         this.onSpend();
         this.log(`→ [route] sent ${itemFill ? "executeItemFill" : "executeFill"} ${tag} tx ${r.tx} (gas limit ${gasLimit} @ ${gasPrice} wei, simulated ${sim.gasUsed}, priced ${priced} at r ${Number(this.gasRatios.ratioPpm(shape)) / 1e6})`);
         return { orderHash, status: "pending", tx: r.tx, paid: sim.delivered[0], received, strategy: "route", final: true };
+    }
+  }
+
+  /**
+   * The lost-race probe for a fill about to be sent (guard.ts `RaceProbe`): Settlement's
+   * `filled(orderHash)` now, and for a fill-once order its (maker, nonce). Best effort —
+   * a failed read sends the fill without a probe (a revert is then a strike, as before).
+   */
+  private async raceProbe(orderHash: Hex, order: Order): Promise<RaceProbe | undefined> {
+    try {
+      const filledBefore = (await this.chain.pub.readContract({ address: this.cfg.settlement, abi: RACE_PROBE_ABI, functionName: "filled", args: [orderHash] })) as bigint;
+      return {
+        settlement: this.cfg.settlement,
+        filledBefore: filledBefore.toString(),
+        ...(isFillOnce(order) ? { fillOnce: { maker: order.maker, nonce: order.nonce.toString() } } : {}),
+      };
+    } catch {
+      return undefined;
     }
   }
 
@@ -1091,6 +1218,19 @@ export class RouteFiller {
     return fromPool > fromUsd ? fromPool : fromUsd;
   }
 
+  /**
+   * `amount` of `token` in RBTC wei (rounded down) — the inverse of {@link nativeToToken},
+   * at its cached reference quote (WRBTC 1:1). `undefined` when the token cannot be priced.
+   * The operator sweep's value gate (./sweep.ts).
+   */
+  async tokenValueWei(token: Address, amount: bigint): Promise<bigint | undefined> {
+    if (amount === 0n) return 0n;
+    if (eqAddr(token, this.cfg.wrbtc)) return amount;
+    const perRef = await this.nativeToToken(NATIVE_REF, token);
+    if (!perRef) return undefined;
+    return (amount * NATIVE_REF) / perRef;
+  }
+
   private async tokenDecimals(token: Address): Promise<number> {
     const k = token.toLowerCase();
     let d = this.decimals.get(k);
@@ -1104,6 +1244,12 @@ export class RouteFiller {
 
 const eqAddr = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
+/** What a fill delivered in the anchor output token (Σ over its legs; leg 0 for a native order) — the P&L record's `paid`. */
+function deliveredIn(delivered: readonly bigint[], order: Order, tokenOut: Address, native?: boolean): bigint {
+  if (native) return delivered[0] ?? 0n;
+  return order.legsOut.reduce((a, l, j) => (eqAddr(l.token, tokenOut) ? a + (delivered[j] ?? 0n) : a), 0n);
+}
+
 /** Whether `p` is the configured path `c`, in either direction. */
 function samePathEitherWay(c: RoutePath, p: RoutePath): boolean {
   const v = pathVenues(c);
@@ -1113,7 +1259,7 @@ function samePathEitherWay(c: RoutePath, p: RoutePath): boolean {
 }
 
 /** Every error ABI a route fill can surface: the solver's, its sandbox's, the executor wrapper, Sushi's. */
-const ERROR_ABI = [...AGGREGATOR_FILL_SOLVER_ABI, ...SUSHI_RED_SNWAPPER_ABI];
+const ERROR_ABI = [...AGGREGATOR_FILL_SOLVER_V4_ABI, ...SUSHI_RED_SNWAPPER_ABI];
 
 /** Decode revert data, unwrapping `CallbackFailed(bytes)` / `RouteFailed(bytes)` layers. */
 export function decodeRevert(data: Hex, depth = 0): string | undefined {

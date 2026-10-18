@@ -75,7 +75,7 @@ export async function fetchOrders(baseUrl: string, doFetch: FetchLike = fetch, o
 }
 
 function toEntry(raw: unknown): BookEntry | undefined {
-  const item = raw as { orderHash?: unknown; order?: unknown; sig?: unknown; state?: unknown; addedAt?: unknown; erc2612Permit?: unknown };
+  const item = raw as { orderHash?: unknown; order?: unknown; sig?: unknown; state?: unknown; addedAt?: unknown; erc2612Permit?: unknown; sigless?: unknown };
   let order: Order;
   try {
     order = orderFromJson(item?.order);
@@ -84,7 +84,11 @@ function toEntry(raw: unknown): BookEntry | undefined {
   }
   const orderHash = hashOrderStruct(order);
   if (typeof item.orderHash !== "string" || item.orderHash.toLowerCase() !== orderHash.toLowerCase()) return undefined;
-  if (typeof item.sig !== "string" || !/^0x(?:[0-9a-fA-F]{2})+$/.test(item.sig)) return undefined;
+  // A SIGLESS order (approved on-chain with `approveOrder`) carries `sigless: true` and an
+  // EMPTY signature; every other order a non-empty one. Whether the route fills a sigless
+  // order is ROUTE_ADMIT_SIGLESS (policy.ts) — the intake only keeps the flag honest.
+  const sigless = item.sigless === true;
+  if (typeof item.sig !== "string" || !(sigless ? item.sig === "0x" : /^0x(?:[0-9a-fA-F]{2})+$/.test(item.sig))) return undefined;
   // The maker's gasless funding permit, if any. Malformed → the whole entry is dropped:
   // carrying a permit we cannot parse is never right, and filling without it fails.
   let erc2612Permit: Erc2612Permit | undefined;
@@ -99,7 +103,7 @@ function toEntry(raw: unknown): BookEntry | undefined {
   if (!s || s.ok !== true || s.validatorsPass !== true || typeof s.fillableAmount !== "string" || !/^\d+$/.test(s.fillableAmount)) return undefined;
   return {
     orderHash,
-    announce: { order, sig: item.sig as Hex, ...(erc2612Permit ? { erc2612Permit } : {}) },
+    announce: { order, sig: item.sig as Hex, ...(sigless ? { sigless: true } : {}), ...(erc2612Permit ? { erc2612Permit } : {}) },
     state: { ok: true, status: String(s.status ?? "Fillable"), fillableAmount: BigInt(s.fillableAmount), validatorsPass: true },
     ...(typeof item.addedAt === "number" && Number.isFinite(item.addedAt) ? { addedAt: item.addedAt } : {}),
   };
@@ -112,16 +116,17 @@ function toEntry(raw: unknown): BookEntry | undefined {
  * (`fillTotal`, else the anchor leg: `legsIn[0]` for SELL, `legsOut[0]` for BUY).
  */
 export function entryFromJson(raw: unknown): BookEntry {
-  const item = raw as { order?: unknown; sig?: unknown; fillAmount?: unknown; erc2612Permit?: unknown };
+  const item = raw as { order?: unknown; sig?: unknown; fillAmount?: unknown; erc2612Permit?: unknown; sigless?: unknown };
   const order = orderFromJson(item?.order);
   const erc2612Permit = item.erc2612Permit !== undefined ? erc2612PermitFromJson(item.erc2612Permit) : undefined;
   if (typeof item.sig !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(item.sig)) throw new Error("sig: expected 0x hex");
+  if (item.sigless === true && item.sig !== "0x") throw new Error("sig: a sigless order carries an empty signature");
   const anchor = order.fillTotal !== 0n ? order.fillTotal : order.side === 0 ? order.legsIn[0]!.start : order.legsOut[0]!.start;
   const fillableAmount =
     typeof item.fillAmount === "string" && /^\d+$/.test(item.fillAmount) ? BigInt(item.fillAmount) : anchor;
   return {
     orderHash: hashOrderStruct(order),
-    announce: { order, sig: item.sig as Hex, ...(erc2612Permit ? { erc2612Permit } : {}) },
+    announce: { order, sig: item.sig as Hex, ...(item.sigless === true ? { sigless: true } : {}), ...(erc2612Permit ? { erc2612Permit } : {}) },
     state: { ok: true, status: "Fillable", fillableAmount, validatorsPass: true },
   };
 }

@@ -2,7 +2,12 @@
 pragma solidity ^0.8.28;
 
 import {Vm} from "forge-std/Vm.sol";
-import {AggregatorFillSolver, SurplusPolicy, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {
+    AggregatorFillSolver,
+    SurplusPolicy,
+    PoolVenue,
+    ItemFillGuard
+} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 Vm constant AGG_VM = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
@@ -36,3 +41,7 @@ function newAggNative(
         payable(AGG_VM.deployCode(artifact, abi.encode(settlement, ops, policy, venues, nativeBalance, wnative)))
     );
 }
+
+/// @dev {AggregatorFillSolver.executeItemFill}'s guard with every check off — the
+///      pre-2026-10-18 behaviour (no race guard, no listed receipts).
+function noGuard() pure returns (ItemFillGuard memory g) {}

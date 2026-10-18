@@ -77,6 +77,10 @@ import {
 //  handed to `takeOnBehalf` reverts rather than doing anything at all.
 //
 //    MAKE           word 0 IS the op. `makeOnBehalf` pins `msg.sender == settlement`.
+//    MAKE (pre-fund) word 0 is a pre-fund leg-reference descriptor (`>> 253 == 5`,
+//                   the core's own discriminator); the op rides bits [244,252)
+//                   like TAKE_FOR. `TAKE_FOR` would accept the descriptor FORM but
+//                   rejects every op but `Open`, so the blob still has one seam.
 //    plain TAKE     word 0 IS the op — small, so `>> 253 == 0`, which is exactly
 //                   what {PreFundGuard.requirePlainTake} demands.
 //    TAKE_FOR       word 0 must be the funding descriptor (the core reads it at
@@ -99,6 +103,9 @@ import {
 //      abi.encode(BatchData{op, …})                                — op is word 0
 //    Op.Open  (TAKE_FOR)
 //      abi.encode(OpenData{forDesc, forCap, …})                    — op in forDesc
+//    Op.Deposit / Repay  PRE-FUNDED (MAKE, descriptor `>> 253 == 5`)
+//      abi.encode(forDesc, dolomite, marketId, token, accountNumber)  base 160
+//        — op (2 / 3) in forDesc bits [244,252); no tail. See "pre-funded MAKE".
 //
 //  ONE VALUE, TWO PLACES — BOUND (2026-09-30 audit G-BYTE_MAP-7). Every layout
 //  names the venue asset twice: a market id (what `operate` actually moves) and a
@@ -199,7 +206,7 @@ contract DolomiteOperatorModule is
     //
     // It cannot, because no path here ever pays out a balance it merely READ: repay
     // disposes `bal - floor`, `Full` withdraw pays `min(received - snapshot, amount)`,
-    // pre-fund open sweeps `bal - floor`, batch reads no balance at all. A caller
+    // pre-fund open and pre-fund MAKE sweep `bal - floor`, batch reads no balance at all. A caller
     // that adds to or drains the shared balance mid-flight changes none of those
     // deltas. `test/audit/ReentrancyWindow.t.sol` runs precisely that interleaving —
     // a hook token re-entering `Permit3.take` → `takeOnBehalf(attacker, Withdraw
@@ -220,6 +227,22 @@ contract DolomiteOperatorModule is
         external
         override
     {
+        // TWO FUNDING SHAPES, one seam, split on word 0 exactly as the CORE splits it
+        // ({Base._runItem}: `>> 253 == 5` ⇒ the slice is the delivery ledger's, else
+        // the pro-rated `item.amount`). A plain blob opens with a small op integer
+        // (`>> 253 == 0`), so the two data spaces are disjoint by construction and a
+        // blob cannot be read as the other shape by either side.
+        if (_fundingShape(data)) {
+            // PRE-FUNDED (review 2026-10-18 M-1): spend this fill's own delivery from
+            // this module's balance. The gate pins `msg.sender == settlement` and the
+            // leg-reference descriptor; the body takes the balance floor.
+            _gatePreFundMake(data);
+            // A dust slice can floor the funding leg to zero; skip — it accumulates
+            // exactly across fills.
+            if (amount == 0) return;
+            _preFundMake(onBehalfOf, amount, data);
+            return;
+        }
         // MAKE is dispatched Settlement → module DIRECTLY, so the pin is `msg.sender`,
         // asserted by the EVM rather than carried in a parameter. There is no
         // permissionless hub in front of this entrypoint.
@@ -326,6 +349,66 @@ contract DolomiteOperatorModule is
         DustHandler.disposeResidual(
             token, residual, floor, onBehalfOf, DustHandler.readAction(data, 160), dolomite, recycleCall
         );
+    }
+
+    // ──────────────────── pre-funded MAKE ────────────────────
+    //
+    // "Deposit whatever the conversion delivered" / "repay whatever the conversion
+    // delivered": the maker signs the converted output leg with `recipient = module`
+    // and a pre-fund leg-reference descriptor; the core sizes `forAmount` to exactly
+    // what the fill delivered here, and this body spends it from its own balance.
+    //
+    // WHY IT LIVES HERE AND NOT IN A `DolomitePreFundModules.sol`. Every other venue
+    // ships its pre-fund ops as a separate contract, because on every other venue
+    // value-IN is permissionless and the pre-fund contract consumes NO standing
+    // grant. Dolomite has no permissionless value-in path: a deposit is an `operate`,
+    // and `operate` admits only a local OPERATOR of the account. A separate contract
+    // would therefore need a SECOND unscoped `setOperators` boolean — the exact
+    // multiplication of one total-control grant the merge above exists to undo. So
+    // the pre-fund ops join the address the maker already made an operator, and the
+    // maker's whole receive side is that one flag: no Permit3 token allowance, no
+    // ERC-20 approval of the delivered token.
+    //
+    // NETTED PATH. Another order's delivery can be parked on this singleton between
+    // its DELIVER and its ITEM. The floor is taken BEFORE `operate` and the sweep
+    // returns only what lies above it, so an item spends exactly its own delivery.
+    // An item scheduled before its own DELIVER fails closed in the core
+    // (`Base.ForLegInvalid`). Pinned by `test/netted/NettedPreFund.t.sol`.
+
+    /// @dev Pre-fund dispatch. The op rides descriptor bits [244,252) — the SAME op
+    ///      table, `Deposit` (2) / `Repay` (3); every other op is `BadOp` here.
+    function _preFundMake(address onBehalfOf, uint256 forAmount, bytes calldata data) private {
+        uint256 op = _preFundOp(data);
+        if (op != uint256(Op.Deposit) && op != uint256(Op.Repay)) revert BadOp(op);
+        (, address dolomite, uint256 marketId, address token, uint256 accountNumber) = _preFundSingle(data);
+        // Both halves of the asset binding: the signed `token` IS the market's token
+        // (G-BYTE_MAP-7), and {PreFundGuard.floorOf} binds it to the descriptor's
+        // funding token, which the core binds to the delivered leg. So the market
+        // `operate` moves, the token approved and measured, and the leg the core
+        // sized `forAmount` from are one value.
+        _requireMarketToken(dolomite, marketId, token);
+        // The delivery must have landed HERE, in THIS token. Underflows if it did not;
+        // sound because `msg.sender == settlement` pins `forAmount` to the core. KEPT
+        // for the sweep (F28: every pre-fund sink sweeps to its floor).
+        uint256 floor = PreFundGuard.floorOf(data, token, forAmount);
+        uint256 spend = forAmount;
+        if (op == uint256(Op.Repay)) {
+            // Clamp to the live debt: a Wei `Deposit` delta past the debt would turn
+            // the surplus into a SUPPLY the maker did not sign for. A zero debt (closed
+            // under us) repays nothing and the whole delivery is swept back.
+            uint256 debt = _debtOf(dolomite, onBehalfOf, accountNumber, marketId);
+            if (debt < spend) spend = debt;
+        }
+        if (spend != 0) {
+            _approveAndOperate(
+                dolomite, onBehalfOf, accountNumber, token, _depositAction(marketId, spend, address(this)), spend
+            );
+        }
+        // Everything above the floor is this fill's unconsumed remainder and belongs to
+        // the maker — MEASURED, never sized from the clamp or a venue return value
+        // (F27/C-3, M-1). `dolomite` is maker-named; a venue that pulls less than
+        // approved returns the rest to the maker here.
+        PreFundGuard.sweepSurplus(token, onBehalfOf, floor);
     }
 
     // ──────────────────── plain TAKE ────────────────────
@@ -570,6 +653,8 @@ contract DolomiteOperatorModule is
     ///                            self-imposed — the interface allows `view`)
     function proceedsAsset(bytes calldata data) external view override returns (address) {
         if (!_isPlainLayout(data)) {
+            // A pre-funded MAKE (Deposit / Repay) delivers nothing.
+            if (_preFundOp(data) != uint256(Op.Open)) return address(0);
             OpenData memory o = abi.decode(data, (OpenData));
             return IDolomiteMargin(o.dolomite).getMarketTokenAddress(o.borrowMarketId);
         }
@@ -600,6 +685,12 @@ contract DolomiteOperatorModule is
         returns (address asset, uint256 available)
     {
         if (!_isPlainLayout(data)) {
+            if (_preFundOp(data) != uint256(Op.Open)) {
+                // Pre-funded MAKE (Deposit / Repay): funded by the fill's OWN delivery,
+                // so a wallet read would preview the order as short.
+                (, address dolomite, uint256 marketId,,) = _preFundSingle(data);
+                return (IDolomiteMargin(dolomite).getMarketTokenAddress(marketId), type(uint256).max);
+            }
             OpenData memory o = abi.decode(data, (OpenData));
             asset = IDolomiteMargin(o.dolomite).getMarketTokenAddress(o.collMarketId);
             available = _fundingShape(data)
@@ -734,6 +825,18 @@ contract DolomiteOperatorModule is
     function _requireSingleToken(bytes calldata data) private view {
         (, address dolomite, uint256 marketId, address token,) = _single(data);
         _requireMarketToken(dolomite, marketId, token);
+    }
+
+    /// @dev The pre-funded MAKE layout: the single-op five fields with word 0 the
+    ///      funding DESCRIPTOR instead of the op (which rides its bits [244,252)).
+    ///      Its own decode because {_single} types word 0 as `uint8`, which a
+    ///      descriptor (bit 255 set) fails.
+    function _preFundSingle(bytes calldata data)
+        private
+        pure
+        returns (uint256 forDesc, address dolomite, uint256 marketId, address token, uint256 accountNumber)
+    {
+        return abi.decode(data, (uint256, address, uint256, address, uint256));
     }
 
     // ──────────────────── discriminators ────────────────────

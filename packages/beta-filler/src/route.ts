@@ -17,7 +17,7 @@ import { zeroAddress, type Address } from "viem";
 
 import type { RouteConfig, RoutePath } from "./config";
 import { enumeratePaths, pathKey, pathVenues, type GraphPool } from "./poolGraph";
-import { exclusivityFor, isDeltaVerify, plainShape, type Verdict } from "./policy";
+import { anchorOutToken, exclusivityFor, isDeltaVerify, plainShape, type ShapeAdmit, type Verdict } from "./policy";
 
 /**
  * Pure decision logic of the ROUTE strategy: zero-inventory fills through the
@@ -278,6 +278,12 @@ export interface RouteClass {
   native?: boolean;
   /** An item fill (`executeItemFill`, task 31) with this schedule; PULL only. */
   itemFill?: { lateItems: bigint };
+  /** A FLASH-REQUIRED item order (a cycle: SDK `needsFlash`): only the flash path may take it (./flash.ts). */
+  flash?: { reason: string };
+  /** A balance-relative `legsIn[0]`: filled whole with the `type(uint256).max` sentinel (PULL). */
+  proportional?: boolean;
+  /** Fee legs: owed = Σ the anchor-token legs, the in-kind legs are kept back from the route (PULL). */
+  feeLegs?: boolean;
 }
 
 /**
@@ -340,6 +346,7 @@ export function classifyRoute(
     nativeUnwrap?: { module: Address; wrapped: Address };
     nativeBalance?: { view: Address; wrapped: Address };
     itemFills?: ItemFillCaps;
+    admit?: ShapeAdmit;
   } = {},
 ): Verdict<RouteClass> {
   const shape = plainShape(order, extras);
@@ -362,8 +369,10 @@ export function classifyRoute(
     if (w.kind === "hard") return { ok: false, reason: "names another exclusive filler (hard window)" };
   }
   const tokenIn = order.legsIn[0]!.token;
-  // A native order routes into the wrapped coin (the solver unwraps it).
-  const tokenOut = shape.nativeBalance ? extras.nativeBalance!.wrapped : order.legsOut[0]!.token;
+  // A native order routes into the wrapped coin (the solver unwraps it); every other
+  // order into its ANCHOR output token — `legsOut[0]`'s on a plain order, the first leg
+  // not in the input token when an in-kind fee leg is listed first (the solver's rule).
+  const tokenOut = shape.nativeBalance ? extras.nativeBalance!.wrapped : anchorOutToken(order) ?? order.legsOut[0]!.token;
   if (eq(tokenIn, tokenOut)) return { ok: false, reason: "same-token order" };
   if (!rc.routeTokens.some((t) => eq(t, tokenIn)) || !rc.routeTokens.some((t) => eq(t, tokenOut))) {
     return { ok: false, reason: "pair outside ROUTE_TOKENS" };
@@ -380,7 +389,42 @@ export function classifyRoute(
     ...(shape.nativeOut ? { nativeOut: true } : {}),
     ...(shape.nativeBalance ? { native: true } : {}),
     ...(shape.itemFill ? { itemFill: shape.itemFill } : {}),
+    ...(shape.flash ? { flash: shape.flash } : {}),
+    ...(shape.proportional ? { proportional: true } : {}),
+    ...(shape.feeLegs ? { feeLegs: true } : {}),
   };
+}
+
+/**
+ * The amounts a fill's route works with, from the lens preview (`received` / `paid` per
+ * leg) — the fee-leg math of {@link ShapeAdmit.feeLegs}:
+ *   • `owed`   — Σ `paid[j]` over the output legs in the ANCHOR output token (`tokenOut`):
+ *                Settlement pulls each of them from the solver, so the route must cover
+ *                them together (the plan's per-token `maxPay`), and `minOut` floors them
+ *                plus our margin. A NATIVE order: leg 0 only.
+ *   • `kept`   — Σ `paid[j]` over the legs in the INPUT token (in-kind fees): the solver keeps
+ *                them back from the input before the route runs (the typed callback /
+ *                PRESEND), so they are not swapped.
+ *   • `routeIn` — `received[0] − kept`: what the route actually swaps (quote it, size the
+ *                pool plan with it). ≤ 0 = the fee legs eat the whole input.
+ */
+export function legAmounts(
+  order: Order,
+  pv: { received: readonly bigint[]; paid: readonly bigint[] },
+  tokenOut: Address,
+  native = false,
+): { received: bigint; owed: bigint; kept: bigint; routeIn: bigint } {
+  const received = pv.received[0] ?? 0n;
+  if (native) return { received, owed: pv.paid[0] ?? 0n, kept: 0n, routeIn: received };
+  const tin = order.legsIn[0]!.token;
+  let owed = 0n;
+  let kept = 0n;
+  order.legsOut.forEach((l, j) => {
+    const v = pv.paid[j] ?? 0n;
+    if (eq(l.token, tokenOut)) owed += v;
+    else if (eq(l.token, tin)) kept += v;
+  });
+  return { received, owed, kept, routeIn: received - kept };
 }
 
 /** `ceil(a * b / c)`. */
@@ -588,6 +632,30 @@ export function validatePoolPlan(
     if (plan.amountOutOffset !== NO_PATCH && plan.amountOutOffset !== POOL_AMOUNT_OUT_OFFSET) return bad("direct plan output offset");
   }
   return { ok: true, plan };
+}
+
+/**
+ * Whether a plan is EXACT-INPUT — what an ITEM fill must be quoted as (review 2026-10-18
+ * S-6): on the netted path no priced amount reaches the route and `minBumpBps` is refused,
+ * so an exact-output plan's spread would sit as INPUT residue no floor checks; an
+ * exact-input plan's whole proceeds are floored by `minOut` (with `maxPay`). A pool plan
+ * is exact-input when its `amountOut` word is 0; an API route (Sushi / Nordstern) is
+ * exact-input by construction, and patches no output word.
+ */
+export function isExactInputPlan(plan: RoutePlan): boolean {
+  if (plan.router === POOL_ROUTE) {
+    try {
+      return decodePoolRoute(plan.data).amountOut === 0n;
+    } catch {
+      return false;
+    }
+  }
+  return plan.amountOutOffset >= NO_PATCH;
+}
+
+/** Whether the route follows the fill's input (`amountInOffset` set) — the v4 remainder sentinel's precondition. */
+export function isInputPatched(plan: RoutePlan): boolean {
+  return plan.amountInOffset < NO_PATCH;
 }
 
 /** One executable route candidate. */

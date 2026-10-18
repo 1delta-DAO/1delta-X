@@ -316,7 +316,7 @@ Findings and dispositions:
 | # | Sev | Finding | Disposition |
 | --- | --- | --- | --- |
 | F1 | Low | Duplicate `legsIn` tokens corrupt `_settleInputsToPool`'s per-leg proceeds delta (over-refunds the maker; backstopped to revert-or-solver-self-harm, never innocent-party loss) | **Fixed** — `_assertItemBatchShape` rejects repeated input tokens (`BatchItemsDuplicateInput`); `test_duplicateInput_reverts` |
-| F2 | Low | `SETTLE` items silently executed despite the doc declaring them out of scope (unenforced scope claim on an untested path) | **Fixed** — `_assertItemBatchShape` rejects SETTLE (`BatchItemsSettleUnsupported`); `test_settleItem_reverts` |
+| F2 | Low | `SETTLE` items silently executed despite the doc declaring them out of scope (unenforced scope claim on an untested path) | **Fixed** — `_assertItemBatchShape` rejects SETTLE (`BatchItemsSettleUnsupported`). *Superseded by task 31:* `matchSettle` admits SETTLE at open (`test_settleItem_admittedAtOpen`) and fills it zero-capital (`test_settleItem_zeroCapital_eitherPosition`) |
 | F3 | Low/Info | A TAKE producing a token that is *not* an input leg routes to the solver, not the maker (maker misconfig; unreachable for well-formed leverage/repay/migrate) | Documented constraint: a TAKE's proceeds token must be an input leg |
 | F4 | Info | Whole-check completeness rests on "item tokens ⊆ leg universe", which holds only because Settlement grants no approvals | Documented; an "asserts-no-approvals" invariant test is a cheap future guard |
 | F5 | Info/gas | `_inputOwed` recomputes `bumpBps()` per auctioned leg (vs the cached single-order compute) — correct, just wasteful | Accepted on this deliberate (non-hot) CoW path |

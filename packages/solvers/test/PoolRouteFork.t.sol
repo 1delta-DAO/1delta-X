@@ -273,6 +273,7 @@ abstract contract PoolRouteForkHarness is UsdrifForkBase {
             router: router,
             minOut: minOut,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: NO_PATCH,
             amountOutOffset: NO_PATCH,
             minBumpBps: 0,

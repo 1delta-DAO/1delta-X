@@ -31,7 +31,8 @@ pre-existing balance.
 | `RiverTakerModule` (op 0) | TAKE | `withdrawDebt` → settle satUSD (module-held, Permit3 fallback) → receiver | `abi.encode(uint8(0), xapp, tm, debtToken, maxFee, upper, lower)` |
 | `RiverTakerModule` (op 1) | TAKE | `withdrawColl` → settle collateral (module-held, Permit3 fallback) → receiver | `abi.encode(uint8(1), xapp, tm, coll, upper, lower)` |
 | `RiverOpenModule` | TAKE (Level B) | pull collateral + `openTrove` → settle satUSD → receiver | `abi.encode(OpenData{...})` |
-| `RiverPreFundModule` | MAKE (pre-funded) | ONE contract, two ops selected by descriptor bits [244,252): `Op.AddColl` — `addColl` the core-delivered leg from the module's own balance; `Op.Repay` — `repayDebt(forAmount)` from its own balance; a delivery that would retire the whole debt reverts `FullCloseNotSupported`. Rides the MAKE seam (Settlement dispatches directly; `forAmount` is core-sized from the descriptor), not `TAKE_FOR` | `abi.encode(forDesc, xapp, troveManager, collateralToken \| debtToken, upperHint, lowerHint)` — descriptor word first, op in its bits |
+| `RiverPreFundModule` | MAKE (pre-funded) | ONE contract, ops selected by descriptor bits [244,252): `Op.AddColl` — `addColl` the core-delivered leg from the module's own balance; `Op.Repay` — `repayDebt(forAmount)` from its own balance; a delivery that would retire the whole debt reverts `FullCloseNotSupported`. Rides the MAKE seam (Settlement dispatches directly; `forAmount` is core-sized from the descriptor), not `TAKE_FOR` | `abi.encode(forDesc, xapp, troveManager, collateralToken \| debtToken, upperHint, lowerHint)` — descriptor word first, op in its bits |
+| `RiverPreFundModule` (`Op.Open`) | TAKE_FOR (pre-funded) | the pre-funded twin of `RiverOpenModule`: `openTrove` with the core-delivered COLLATERAL leg (`forAmount`) and mint `amount` satUSD → settle to receiver. Full-fill only; pre-fund descriptor only (`requireLegRef`); `debtToken` pinned to `tm.debtToken()` | `abi.encode(OpenData{forDesc, xapp, tm, collateralToken, debtToken, maxFeePercentage, upperHint, lowerHint, totalAmount})` |
 
 The pre-fund modules (`RiverPreFundModules.sol`) are the one-sided "add/repay whatever
 the conversion delivered" shape: the maker routes the signed output leg to the
@@ -41,11 +42,38 @@ dispatches a `MAKE` directly) — only the diamond's
 `setDelegateApproval(module, true)` (a venue authorization the deployed diamond
 enforces on value-in ops too) remains.
 
+### The pre-funded open — River's side leg (2026-10-18)
+
+`RiverOpenModule` pulls the trove's collateral (`sideAmount`) from the maker's
+wallet through a Permit3 token allowance — on a zero-capital "sell X, open a
+trove on the collateral" order, a grant for a token the maker never held (review
+2026-10-18 M-5). `RiverPreFundModule` op 2 takes the collateral from a DELIVERED
+leg instead (`recipient = module`, pre-fund descriptor), so the core sizes it to
+exactly what arrived; the satUSD mint is the value-out side, bounded by the
+maker's taker allowance and settled by `RiverProceeds`. It is a `TAKE_FOR` (the
+item both consumes a delivery and produces proceeds) and lives on the pre-fund
+contract because it consumes the same standing grant — the delegate bit — as ops
+0/1. The seams stay disjoint: `makeOnBehalf` rejects op 2, `takeForOnBehalf`
+rejects ops 0/1, and the spender is pinned to Settlement (`Permit3.takeFor` is
+permissionless). On `matchSettle` the open is ACYCLIC against a counter-order
+selling the collateral: `PULL cow → DELIVER open → ITEM open (mint → pool) →
+DELIVER cow`, zero solver capital and zero maker wallet.
+
+`test/netted/NettedPreFund.t.sol` (mock diamond with the fork-validated fund flow,
+real Settlement + Permit3) drives the family on the netted path with collateral
+and satUSD residue on the singleton: two opens parked side by side, an open
+hoisted ahead of its own DELIVER failing closed (`ForLegInvalid`), add-collateral
++ repays interleaved with a hostile zero-debt sweep, the acyclic CLOSE
+(`withdrawColl` TAKE early → sell → pre-funded repay late), the forward path, and
+the open's gates (including a self-granted direct `Permit3.takeFor`).
+`leverage/PreFundOneSided.t.sol` opens a trove through op 2 on the live BSC
+diamond with no Permit3 token allowance to the module.
+
 ## Authorization (per leg)
 
 | Leg | Protocol grant | Permit3 |
 |---|---|---|
-| addColl / open | `xapp.setDelegateApproval(module, true)` | token allowance on collateral (module) |
+| addColl / open | `xapp.setDelegateApproval(module, true)` | token allowance on collateral (module); NONE on the pre-funded forms (`RiverPreFundModule` ops 0 / 2 — op 2 still takes the taker allowance on the mint) |
 | repay | `xapp.setDelegateApproval(module, true)` | token allowance on satUSD (module) |
 | borrow (withdrawDebt) | `xapp.setDelegateApproval(module, true)` | taker allowance (+ satUSD token allowance to the module only on `account`-routing deployments) |
 | withdraw (withdrawColl) | `xapp.setDelegateApproval(module, true)` | taker allowance (+ collateral token allowance to the module only on `account`-routing deployments) |

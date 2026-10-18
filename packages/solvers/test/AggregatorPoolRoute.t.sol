@@ -19,7 +19,7 @@ import {
 
 import {MockERC20} from "@coretest/shared/MockSettlementBase.t.sol";
 import {AggregatorFillSolverTest} from "./AggregatorFillSolver.t.sol";
-import {newAgg} from "./shared/AggDeploy.sol";
+import {newAgg, noGuard} from "./shared/AggDeploy.sol";
 
 interface IV3SwapCallback {
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external;
@@ -305,6 +305,7 @@ contract AggregatorPoolRouteTest is AggregatorFillSolverTest {
             router: POOL_ROUTE,
             minOut: minOut,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: inOff,
             amountOutOffset: outOff,
             minBumpBps: 0,
@@ -495,7 +496,7 @@ contract AggregatorPoolRouteTest is AggregatorFillSolverTest {
         Order memory o = _order(1);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _poolPlan(_hop1(address(tA), F500, 0, address(tB)), 0, 0, 0, NO_PATCH, AMOUNT_OUT);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
         assertGt(tB.balanceOf(TREASURY), 0, "spread split");
     }
@@ -974,7 +975,7 @@ contract AggregatorPoolRouteTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         p = _poolPlan(_hop1(address(pt), F500, 0, address(tB)), 0, 0, 0, NO_PATCH, AMOUNT_OUT);
         Permit2612 memory pm = _signPermit(makerPk, maker, AMOUNT_IN, block.timestamp + 1 hours);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _one(pm));
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _one(pm), noGuard());
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
         assertEq(pt.balanceOf(maker), 0, "pulled with the permit");
     }

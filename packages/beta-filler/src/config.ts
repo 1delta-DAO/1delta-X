@@ -1,9 +1,10 @@
-import { MAX_POOL_HOPS, nativeBalanceOf } from "@1delta-x/sdk";
+import { FUSED_COMPOSITE_KINDS, MAX_POOL_HOPS, nativeBalanceOf, type FusedCompositeKind } from "@1delta-x/sdk";
 import { getAddress, isAddress, type Address, type Hex } from "viem";
 
 import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK, type NordsternConfig } from "./nordstern";
 import { SUSHI_RED_SNWAPPER_ROOTSTOCK, SUSHI_SNWAP_EXECUTOR_ROOTSTOCK, type SushiConfig } from "./sushi";
 import type { IndexerConfig } from "./poolIndexers";
+import type { ShapeAdmit } from "./policy";
 
 /** Rootstock mainnet addresses (chain 30). Verified on-chain — see the repo's MoC notes. */
 export const ROOTSTOCK = {
@@ -259,6 +260,77 @@ export interface RouteConfig {
     /** `ITEM_FILL_GAS` (default 120 000): the `matchSettle` overhead + the items, over a pull route fill. */
     gas: bigint;
   };
+  /**
+   * SHAPE ADMISSIONS beyond the plain one-in/one-out order (policy.ts `ShapeAdmit`,
+   * review 2026-10-18 §4) — each a shape the deployed solver v3 fills zero-capital:
+   *   `ROUTE_ADMIT_FEE_LEGS`      (default ON  — solver tests S1/S3/sentinel fee leg),
+   *   `ROUTE_ADMIT_PROPORTIONAL`  (default ON  — AggregatorProportionalSentinelTest),
+   *   `ROUTE_ADMIT_THIRD_PARTY`   (default ON  — test_direct_payeeIsLeg0Recipient, test_native_paysLegRecipient),
+   *   `ROUTE_ADMIT_VALIDATORS`    (default off — no AggregatorFillSolver test on the executeFill path),
+   *   `ROUTE_ADMIT_MODULES`       (default off — fill/pricing modules; no PostInputs test, review C-incidental),
+   *   `ROUTE_ADMIT_SIGLESS`       (default off — no solver test of an on-chain-approved order).
+   * The legacy instances ({@link legacyRouteConfig}) take the plain shape only.
+   */
+  admit: ShapeAdmit;
+  /**
+   * `COMPOSITE_MODULES` (`kind:address;…`, default none — no composite module is deployed
+   * on the beta chain): modules hosting FUSED COMPOSITE item ops (SDK `FusedCompositeKind`),
+   * which the item classifier marks flash-required (review M-3). Lower-case address → kind.
+   */
+  compositeModules: Record<string, FusedCompositeKind>;
+  /**
+   * `MATCH_FLASH_SOLVER` (default unset): the flash solver for FLASH-REQUIRED item orders
+   * (review S-4 — a flash around the one-order `matchSettle`). Unset = every such order is
+   * skipped as a resting verdict. Set = filled through `MatchFlashSolver.executeMatch`
+   * (./flash.ts `FlashFiller`: a v3 flash / flash swap on the route's pools).
+   */
+  matchFlashSolver?: Address;
+  /**
+   * `MATCH_FLASH_GAS_ESTIMATE` (default 700 000): `eth_estimateGas` units assumed for one
+   * `executeMatch` before it is simulated — the floor of the gas the flash gate prices
+   * (max(this, simulated) × r, as the route's).
+   */
+  matchFlashGas: bigint;
+  /** The operator's periodic sweep of retained solver balances (./sweep.ts); unset = off. */
+  sweep?: SolverSweepConfig;
+  /**
+   * `AGGREGATOR_SOLVER_VERSION` (3 | 4, default: detected from the bytecode — the v4 /
+   * v3 `executeFill` selector; neither = 3): which ABI the PRIMARY solver speaks. Legacy
+   * instances are always detected.
+   */
+  solverVersion?: 3 | 4;
+  /**
+   * `ROUTE_INVENTORY_CAPS` (`token:amount;…` in raw units, default none = 0 = the exact
+   * delta-only behaviour): solver v4 `RoutePlan.inventory` per ANCHOR OUTPUT token — the
+   * most one fill may draw from the solver's own pre-held balance on top of the route's
+   * proceeds (review S-1). Ignored (warned) on a v3 instance. Lower-case token → cap.
+   */
+  inventoryCaps: Record<string, bigint>;
+}
+
+/**
+ * `SOLVER_SWEEP=1`: pay out what the solver(s) RETAIN — the spread in retain mode
+ * (`ROUTE_PROFIT_RECIPIENT` = the solver) and receipts no route sells (review S-2) — with
+ * the operator key, to {@link to}, through `sweepAll(tokens, to, 1)` (solver v3; one
+ * `sweep` per token on an older instance), leaving the 1-wei balance floors.
+ */
+export interface SolverSweepConfig {
+  /** `SOLVER_SWEEP_TO` (default: ROUTE_PROFIT_RECIPIENT unless it is zero or a solver — then required). Never a solver. */
+  to: Address;
+  /** `SOLVER_SWEEP_TOKENS` (default ROUTE_TOKENS ∪ ROUTE_HUB_TOKENS ∪ WRBTC). */
+  tokens: Address[];
+  /** `SOLVER_SWEEP_SECONDS` × 1000 (default 3600 s): the shortest interval between two sweep checks per solver. */
+  intervalMs: number;
+  /**
+   * `SOLVER_SWEEP_MIN_RBTC` (default 0.00005): sweep only when the priced balances above
+   * the floors are worth at least this (RBTC), AND at least `SOLVER_SWEEP_GAS_MULT` × the
+   * sweep tx's own gas cost. A token the filler cannot price counts 0 (it rides along).
+   */
+  minWei: bigint;
+  /** `SOLVER_SWEEP_GAS_MULT` (default 10): the swept value must be ≥ this × the sweep's gas cost. */
+  gasMult: bigint;
+  /** `SOLVER_SWEEP_AFTER_FILL=1` (default on): a successful route fill makes the next check due at once. */
+  afterFill: boolean;
 }
 
 export const USDRIF_DECIMALS = 18;
@@ -684,6 +756,61 @@ function optAddr(env: Env, key: string, fallback: string | undefined): Address |
   return addr(env, key);
 }
 
+/** `COMPOSITE_MODULES`: `kind:address;…` (kinds: SDK `FUSED_COMPOSITE_KINDS`). */
+export function parseCompositeModules(raw: string): Record<string, FusedCompositeKind> {
+  const out: Record<string, FusedCompositeKind> = {};
+  for (const entry of raw.split(";").map((x) => x.trim()).filter(Boolean)) {
+    const i = entry.indexOf(":");
+    const kind = entry.slice(0, i).trim() as FusedCompositeKind;
+    const a = entry.slice(i + 1).trim();
+    if (i < 1 || !FUSED_COMPOSITE_KINDS.includes(kind)) throw new Error(`COMPOSITE_MODULES: bad kind in ${entry} (want one of ${FUSED_COMPOSITE_KINDS.join(", ")})`);
+    if (!isAddress(a, { strict: false })) throw new Error(`COMPOSITE_MODULES: not an address in ${entry}`);
+    out[a.toLowerCase()] = kind;
+  }
+  return out;
+}
+
+/** `AGGREGATOR_SOLVER_VERSION`: unset/"" = detect; "3" / "4" = forced. */
+function solverVersionEnv(env: Env): { solverVersion?: 3 | 4 } {
+  const v = env.AGGREGATOR_SOLVER_VERSION?.trim();
+  if (!v) return {};
+  if (v !== "3" && v !== "4") throw new Error("env AGGREGATOR_SOLVER_VERSION must be 3 or 4");
+  return { solverVersion: Number(v) as 3 | 4 };
+}
+
+/** `ROUTE_INVENTORY_CAPS`: `token:amount;…` (raw units, each below 2^128). */
+export function parseInventoryCaps(raw: string): Record<string, bigint> {
+  const out: Record<string, bigint> = {};
+  for (const entry of raw.split(";").map((x) => x.trim()).filter(Boolean)) {
+    const [t, a] = entry.split(":").map((x) => x.trim());
+    if (!t || !isAddress(t, { strict: false }) || !a || !/^\d+$/.test(a)) throw new Error(`ROUTE_INVENTORY_CAPS: bad entry ${entry} (want token:amount)`);
+    const v = BigInt(a);
+    if (v >= 1n << 128n) throw new Error(`ROUTE_INVENTORY_CAPS: ${entry} is not below 2^128 (AmountTooLarge)`);
+    out[t.toLowerCase()] = v;
+  }
+  return out;
+}
+
+function loadSweep(env: Env, solvers: Address[], profitRecipient: Address, defaultTokens: Address[]): SolverSweepConfig | undefined {
+  if (!flag(env, "SOLVER_SWEEP", false)) return undefined;
+  const isSolver = (a: string) => solvers.some((s) => s.toLowerCase() === a.toLowerCase());
+  const fallback = profitRecipient !== "0x0000000000000000000000000000000000000000" && !isSolver(profitRecipient) ? profitRecipient : undefined;
+  const to = env.SOLVER_SWEEP_TO ? addr(env, "SOLVER_SWEEP_TO") : fallback;
+  if (!to) throw new Error("SOLVER_SWEEP=1 needs SOLVER_SWEEP_TO (ROUTE_PROFIT_RECIPIENT is zero or a solver — retain mode)");
+  if (isSolver(to)) throw new Error("SOLVER_SWEEP_TO must not be a solver");
+  const tokens = addrList(env, "SOLVER_SWEEP_TOKENS", defaultTokens);
+  const uniq = [...new Map(tokens.map((t) => [t.toLowerCase(), t])).values()];
+  if (uniq.length === 0) throw new Error("SOLVER_SWEEP_TOKENS must name at least one token");
+  return {
+    to,
+    tokens: uniq,
+    intervalMs: 1000 * posNum(env, "SOLVER_SWEEP_SECONDS", 3600),
+    minWei: fixed(env, "SOLVER_SWEEP_MIN_RBTC", "0.00005", 18),
+    gasMult: uint(env, "SOLVER_SWEEP_GAS_MULT", 10),
+    afterFill: flag(env, "SOLVER_SWEEP_AFTER_FILL", true),
+  };
+}
+
 function loadRoute(env: Env): RouteConfig | undefined {
   if (!env.AGGREGATOR_SOLVER) return undefined;
   const rbtcUsd = env.RBTC_PRICE_USD ? parseFixed(env.RBTC_PRICE_USD, 18) : undefined;
@@ -692,9 +819,16 @@ function loadRoute(env: Env): RouteConfig | undefined {
   const onRootstock = posNum(env, "CHAIN_ID", ROOTSTOCK.chainId) === ROOTSTOCK.chainId;
   const maxGas = posInt(env, "MAX_ROUTE_GAS", 1_200_000);
   if (gasEstimate > maxGas) throw new Error(`ROUTE_GAS_ESTIMATE ${gasEstimate} exceeds MAX_ROUTE_GAS ${maxGas}`);
+  const solver = addr(env, "AGGREGATOR_SOLVER");
+  const legacySolvers = addrList(env, "AGGREGATOR_SOLVER_LEGACY", []);
+  const routeTokens = addrList(env, "ROUTE_TOKENS", [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif, ROOTSTOCK.rif, ROOTSTOCK.usdt, ROOTSTOCK.usdce, ROOTSTOCK.rifp]);
+  const discovery = loadDiscovery(env, onRootstock);
+  const profitRecipient = addr(env, "ROUTE_PROFIT_RECIPIENT", "0x0000000000000000000000000000000000000000");
+  const sweep = loadSweep(env, [solver, ...legacySolvers], profitRecipient, [...routeTokens, ...discovery.hubTokens, addr(env, "WRBTC", ROOTSTOCK.wrbtc)]);
+  const matchFlashSolver = optAddr(env, "MATCH_FLASH_SOLVER", undefined);
   return {
-    solver: addr(env, "AGGREGATOR_SOLVER"),
-    legacySolvers: addrList(env, "AGGREGATOR_SOLVER_LEGACY", []),
+    solver,
+    legacySolvers,
     pools: env.ROUTE_POOLS !== undefined ? parsePools(env.ROUTE_POOLS) : [...ROOTSTOCK_POOLS],
     paths: parsePaths(env.ROUTE_PATHS ?? ROOTSTOCK_PATHS),
     // Venue 0's quoter is the same QUOTER_V2 the rebalancer uses; venue 1 (SushiSwap v3)
@@ -704,14 +838,14 @@ function loadRoute(env: Env): RouteConfig | undefined {
     stableSlippageBps: bps(env, "ROUTE_STABLE_SLIPPAGE_BPS", 5),
     gasEstimate,
     maxGas,
-    routeTokens: addrList(env, "ROUTE_TOKENS", [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif, ROOTSTOCK.rif, ROOTSTOCK.usdt, ROOTSTOCK.usdce, ROOTSTOCK.rifp]),
+    routeTokens,
     minProfitWei: fixed(env, "MIN_PROFIT_RBTC", "0", 18),
     rbtcUsd,
-    discovery: loadDiscovery(env, onRootstock),
+    discovery,
     maxHops: rangeNum(env, "ROUTE_MAX_HOPS", 3, 1, MAX_POOL_HOPS),
     maxCandidates: rangeNum(env, "ROUTE_MAX_CANDIDATES", 5, 1, 32),
     usdTokens: (env.USD_TOKENS ? env.USD_TOKENS.split(",") : [ROOTSTOCK.usdt0, ROOTSTOCK.usdrif]).map((t) => getAddress(t.trim())),
-    profitRecipient: addr(env, "ROUTE_PROFIT_RECIPIENT", "0x0000000000000000000000000000000000000000"),
+    profitRecipient,
     hourlyFills: uint(env, "ROUTE_HOURLY_FILLS", 60),
     okuPull: flag(env, "ROUTE_OKU_PULL", true),
     ...(nativeUnwrapOf(env) ? { nativeUnwrap: nativeUnwrapOf(env)! } : {}),
@@ -720,6 +854,20 @@ function loadRoute(env: Env): RouteConfig | undefined {
     ...(flag(env, "ITEM_FILLS", false)
       ? { itemFills: { nettedDeliveryFundedItems: flag(env, "NETTED_DELIVERY_FUNDED_ITEMS", false), gas: uint(env, "ITEM_FILL_GAS", 120_000) } }
       : {}),
+    admit: {
+      feeLegs: flag(env, "ROUTE_ADMIT_FEE_LEGS", true),
+      proportional: flag(env, "ROUTE_ADMIT_PROPORTIONAL", true),
+      thirdPartyRecipients: flag(env, "ROUTE_ADMIT_THIRD_PARTY", true),
+      validators: flag(env, "ROUTE_ADMIT_VALIDATORS", false),
+      modules: flag(env, "ROUTE_ADMIT_MODULES", false),
+      sigless: flag(env, "ROUTE_ADMIT_SIGLESS", false),
+    },
+    compositeModules: parseCompositeModules(env.COMPOSITE_MODULES ?? ""),
+    ...(matchFlashSolver ? { matchFlashSolver } : {}),
+    matchFlashGas: posInt(env, "MATCH_FLASH_GAS_ESTIMATE", 700_000),
+    ...solverVersionEnv(env),
+    inventoryCaps: parseInventoryCaps(env.ROUTE_INVENTORY_CAPS ?? ""),
+    ...(sweep ? { sweep } : {}),
     sushi: {
       enabled: flag(env, "SUSHI_ENABLED", true),
       baseUrl: env.SUSHI_API_URL ?? "https://api.sushi.com",
@@ -824,12 +972,17 @@ function loadGas(env: Env): GasPolicy {
  * pointed at `legacy` and restricted to orders that name it. Retain mode follows the solver
  * (a primary `ROUTE_PROFIT_RECIPIENT` equal to the primary solver becomes the legacy solver,
  * so each instance keeps its own spread); any other recipient is kept. Native delivery and
- * item fills stay with the primary: a legacy instance predates them.
+ * item fills stay with the primary: a legacy instance predates them; so do the shape
+ * admissions (`admit`), the flash path and the sweep (./sweep.ts sweeps every instance itself).
  */
 export function legacyRouteConfig(rc: RouteConfig, legacy: Address): RouteConfig {
-  const { nativeBalance: _nb, nativeUnwrap: _nu, itemFills: _if, ...rest } = rc;
+  const { nativeBalance: _nb, nativeUnwrap: _nu, itemFills: _if, matchFlashSolver: _mf, sweep: _sw, solverVersion: _sv, ...rest } = rc;
   return {
     ...rest,
+    // No inventory draw on a legacy instance; its ABI is detected from its own bytecode.
+    inventoryCaps: {},
+    // The plain shape only: a legacy instance predates the shapes the primary admits.
+    admit: {},
     solver: legacy,
     legacySolvers: [],
     onlyNamed: true,

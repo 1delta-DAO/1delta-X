@@ -294,6 +294,11 @@ the state store (`STATE_FILE` for the CLI, Durable Object storage for the Worker
 - **Per-order backoff:**
   - an **on-chain revert** is a strike and blocks the order for **every** strategy:
     1 min, 4 min, 16 min, 1 h; the 5th strike blacklists it until the order's expiry.
+    Except a **lost race** (review 2026-10-18 S-5): every fill records Settlement's
+    `filled(orderHash)` at send (and, fill-once, its maker/nonce); a reverted fill whose
+    `filled` moved since — or whose fill-once nonce is now consumed — lost to another
+    filler: no strike, no backoff, and for 5 min the route sizes that order from the lens
+    `remaining(order)` instead of the book's lagging `fillableAmount`.
     Dispatch never falls through to the route strategy on an order whose inventory tx
     just reverted (and vice versa);
   - a failure **before sending** (simulation revert, `MAX_ROUTE_GAS`, RPC error) blocks
@@ -768,6 +773,24 @@ Route strategy:
 | `ITEM_FILLS` | `0` | route item-bearing PULL orders through `executeItemFill` (task 31), scheduled by the SDK's `classifyItemFill` (sources early, sinks late) |
 | `NETTED_DELIVERY_FUNDED_ITEMS` | `0` | the target Settlement's `matchSettle` also runs pre-funded MAKE, leg-reference TAKE_FOR and SETTLE items (the task-31 Settlement); `0` = the LIVE Rootstock Settlement (pull MAKE and TAKE only) |
 | `ITEM_FILL_GAS` | `120000` | extra gas of an item fill (`matchSettle` + the items) over a pull route fill, until the `+items` gas shape is learned |
+| `ROUTE_ADMIT_FEE_LEGS` | `1` | admit extra output legs in the input token (in-kind fee, kept back by the solver) or the anchor output token (pulled next to the maker's leg); PULL only. owed = Σ the anchor-token legs (`maxPay`), the route swaps input − the in-kind legs (route.ts `legAmounts`) |
+| `ROUTE_ADMIT_PROPORTIONAL` | `1` | admit a balance-relative `legsIn[0]` (PULL, item-free, full fill): previewed and filled with the `type(uint256).max` remainder sentinel |
+| `ROUTE_ADMIT_THIRD_PARTY` | `1` | admit an item-free order whose output leg pays someone other than the maker (pull and direct) |
+| `ROUTE_ADMIT_VALIDATORS` | `0` | admit validators / invariants on `executeFill` (takerData `0x`: one that needs a cosigned blob reverts in the simulation) |
+| `ROUTE_ADMIT_MODULES` | `0` | admit a `fillModule` / `pricingModule` |
+| `ROUTE_ADMIT_SIGLESS` | `0` | admit an on-chain-approved order (book announce `sigless: true`, empty signature) |
+| `COMPOSITE_MODULES` | none | `kind:address;…` — modules hosting FUSED COMPOSITE ops (SDK `FusedCompositeKind`: `aave-v3-credit`, `dolomite-operator`, `euler-v2-operator`, `fluid-take-for`, `fluid-operate`, `river-open`, `river-prefund`); their composite items classify flash-required |
+| `MATCH_FLASH_SOLVER` | unset | `MatchFlashSolver` for flash-required item orders (`src/flash.ts`): a v3 flash swap (UNI_V3_SWAP) or a v3 flash repaid on a different pool (UNI_V3_FLASH) over the route's pools, gated and floored on-chain at gas + `MIN_PROFIT_RBTC`. Unset: such orders rest |
+| `AGGREGATOR_SOLVER_VERSION` | detected | `3` (live Rootstock v3: `executeFill` 0xd828b11a) or `4` (in-tree v4: 0x50358c9e, `RoutePlan.inventory`, the `ItemFillGuard`); unset = read from the solver's bytecode, neither selector = 3. Legacy instances are always detected |
+| `ROUTE_INVENTORY_CAPS` | none | v4 only: `token:amount;…` (raw units, < 2^128) — `RoutePlan.inventory` for fills whose anchor output is that token (the most one fill may draw from the solver's own balance). Unset = 0 = delta-only. On v4 a pull `executeFill` with a patched input is sent with the `type(uint256).max` remainder sentinel when the book's fillable equals the on-chain remainder; item fills carry the `ItemFillGuard` (order hash, `filled`, `liveNonce` for fill-once) and must be exact-input (S-6) |
+| `MATCH_FLASH_GAS_ESTIMATE` | `700000` | `eth_estimateGas` floor of one `executeMatch` before it is simulated |
+| `SOLVER_SWEEP` | `0` | the operator sweep of retained solver balances (`src/sweep.ts`): `sweepAll(tokens, to, 1)` on v3, one `sweep` per tick on older instances, primary and legacy solvers |
+| `SOLVER_SWEEP_TO` | `ROUTE_PROFIT_RECIPIENT` unless zero or a solver (then required) | sweep destination; never a solver |
+| `SOLVER_SWEEP_TOKENS` | `ROUTE_TOKENS` ∪ `ROUTE_HUB_TOKENS` ∪ WRBTC | tokens read and swept |
+| `SOLVER_SWEEP_SECONDS` | `3600` | interval between two checks of one solver |
+| `SOLVER_SWEEP_MIN_RBTC` | `0.00005` | sweep only when the priced retained value reaches this … |
+| `SOLVER_SWEEP_GAS_MULT` | `10` | … and this many times the sweep's own gas cost |
+| `SOLVER_SWEEP_AFTER_FILL` | `1` | a landed route fill makes every solver's check due at the next idle tick |
 | `SUSHI_API_URL` | `https://api.sushi.com` | API base |
 | `SUSHI_ROUTER` | `0xAC4c6e212A361c968F1725b4d055b47E63F80b75` | the pinned RedSnwapper; any other `tx.to` is refused |
 | `SUSHI_TIMEOUT_MS` | `4000` | per-request timeout |

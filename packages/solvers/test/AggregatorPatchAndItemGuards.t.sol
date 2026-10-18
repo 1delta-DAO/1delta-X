@@ -7,6 +7,7 @@ import {Order, LegOut} from "@core/settlement/Settlement.sol";
 import {AggregatorFillSolver, RoutePlan, NO_PATCH, Permit2612} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 import {AggregatorFillSolverTest, MockRouter} from "./AggregatorFillSolver.t.sol";
+import {noGuard} from "./shared/AggDeploy.sol";
 
 /// @title AggregatorPatchAndItemGuardsTest
 /// @notice Solver v3 fixes:
@@ -85,7 +86,7 @@ contract AggregatorPatchAndItemGuardsTest is AggregatorFillSolverTest {
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
         p.minBumpBps = 1;
         vm.expectRevert(AggregatorFillSolver.ItemFillUnsupported.selector);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
     }
 
     function test_task17_itemFillRefusesAmountOutOffset() public {
@@ -94,7 +95,7 @@ contract AggregatorPatchAndItemGuardsTest is AggregatorFillSolverTest {
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
         p.amountOutOffset = 4;
         vm.expectRevert(AggregatorFillSolver.ItemFillUnsupported.selector);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
     }
 
     /// Task 17: the defaults (and any bit-255 "no patch" spelling) still fill.
@@ -103,7 +104,7 @@ contract AggregatorPatchAndItemGuardsTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
         p.amountOutOffset = type(uint256).max; // legacy NO_PATCH spelling
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
         assertEq(tB.balanceOf(maker), AMOUNT_OUT);
     }
 }

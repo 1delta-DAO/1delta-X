@@ -30,7 +30,9 @@ side of a brokered market runs through a **`LendingBroker`**. Depends on `@core`
 | `ListaNativeCollateralTakerModule` | TAKE | `abi.encode(provider, moolah, MarketParams[, BalanceMode])` — provider pays native, wrapped back → receiver |
 | `ListaSmartSupplyCollateralModule` | MAKE | `abi.encode(provider, coin, coinIndex, minLpRateE18, MarketParams[, permit])` — one-sided coin zap into LP collateral |
 | `ListaSmartTakerModule` | TAKE | `abi.encode(provider, moolah, coinIndex, minOutRateE18, MarketParams)` — burn LP units, one coin → receiver. `item.amount` is LP, the leg is coin: sign `minOutRateE18 · amount / 1e18 ≥ legsIn[0].start` (`takeFloored`, checked by `SettlementLens.validateOrder`); `proceedsAsset` reads the coin via `provider.dex().coins(i)` |
-| `ListaPreFundModule` | MAKE (preFund) | `abi.encode(forDesc, moolah, MarketParams)` — supply the core-delivered leg from the module's own balance |
+| `ListaPreFundModule` (op 0) | MAKE (preFund) | `abi.encode(forDesc, moolah, MarketParams)` — supply the core-delivered leg from the module's own balance |
+| `ListaPreFundModule` (op 1) | MAKE (preFund) | `abi.encode(forDesc, provider, MarketParams)` — NATIVE provider: unwrap EXACTLY the delivered wrapped native (`mp.collateralToken`), payable supply |
+| `ListaPreFundModule` (op 2) | MAKE (preFund) | `abi.encode(forDesc, provider, coin, coinIndex, minLpRateE18, MarketParams)` — SmartLP one-coin zap of the delivered coin; LP floor `forAmount · rate / 1e18` |
 
 ### The two files, split by venue
 
@@ -61,6 +63,35 @@ Fork-validated deviation: the DEPLOYED broker rejects `repay(0, …)`
 (`ZeroAmount()`), so both shapes pass a literal amount and rely on the broker's
 repay-up-to-debt/refund-excess behaviour (measured on a BSC fork).
 
+### Pre-funded provider sinks and the netted path (2026-10-18)
+
+Until review 2026-10-18 (M-5) the native and SmartLP supply legs were PULL-only:
+a zero-capital "sell X, supply as collateral" order on those markets needed the
+maker to approve the module for WBNB or the pool coin, a token they never held.
+Both providers' supply is permissionless on behalf, so the pre-funded forms join
+`ListaPreFundModule` as ops 1 and 2 (same grant — none — same address; op-0 blobs
+are byte-for-byte unchanged):
+
+- **op 1, native.** The delivered leg is the wrapped native, which IS
+  `mp.collateralToken` (descriptor token pinned to it). The module unwraps
+  EXACTLY `forAmount` and supplies the measured native — never "whatever WBNB is
+  here": on `matchSettle` two makers' deliveries can sit on the singleton at once
+  (the `NativeUnwrapModule` rule). Because the size is the core's delivery ledger
+  rather than a pro-rated `item.amount`, the SELL-leg per-fill-ceil vs item
+  cumulative-floor gap does not arise; the extra wei reaches the maker as
+  collateral. Native left above the pre-call floor wraps back to the maker.
+- **op 2, SmartLP.** The pull sibling's byte map behind the descriptor word; the
+  LP floor stays rate-scaled, so it follows an auctioned or partial delivery.
+
+`test/netted/NettedPreFund.t.sol` (mock venues, real Settlement + Permit3) drives
+both on the netted path with WBNB, native and coin residue on the singleton: two
+native supplies parked side by side, native + SmartLP against two CoWs, a
+below-rate zap failing closed, an item hoisted ahead of its own DELIVER failing
+closed (`ForLegInvalid`), the acyclic CLOSE at zero capital (native withdraw TAKE
+early → sell → `ListaBrokerModule` pre-funded repay late), and the forward path in
+two partial fills. `fork/ProviderMarkets.t.sol` and `leverage/SmartLp.t.sol` pin
+ops 1 and 2 against the live BSC providers with a parked foreign balance.
+
 ## Collateral-provider coverage
 
 Lista's Moolah gates a market's collateral behind `providers(id,
@@ -72,8 +103,8 @@ unknown provider. All four shapes are fork-covered:
 |---|---|---|---|
 | **none** | 14 of 22 brokered | `ListaSupplyCollateralModule` (venue = Moolah) | `ListaTakerModule` op 1 |
 | **erc20** (slisBNB `0x33f7…`) | 5 | same module, venue = provider (plain forwarder, permissionless supply) | `ListaTakerModule` op 2 (venue = provider, sig-auth vs Moolah) |
-| **native** (WBNB `0x3673…`) | 1 (WBNB/lisUSD) | `ListaNativeSupplyCollateralModule` (payable-only venue: unwrap → `supplyCollateral{value}`) | `ListaNativeCollateralTakerModule` (provider pays native; wrapped back, ERC20 out) |
-| **smart-lp** (`SmartProvider`) | 1 brokered (slisBNB&BNB/WBNB) + non-brokered | `ListaSmartSupplyCollateralModule` (one pool coin in, `minLpRate` floor) | `ListaSmartTakerModule` (`withdrawCollateralOneCoin`, `minOutRate` floor) |
+| **native** (WBNB `0x3673…`) | 1 (WBNB/lisUSD) | `ListaNativeSupplyCollateralModule` (payable-only venue: unwrap → `supplyCollateral{value}`); pre-funded: `ListaPreFundModule` op 1 | `ListaNativeCollateralTakerModule` (provider pays native; wrapped back, ERC20 out) |
+| **smart-lp** (`SmartProvider`) | 1 brokered (slisBNB&BNB/WBNB) + non-brokered | `ListaSmartSupplyCollateralModule` (one pool coin in, `minLpRate` floor); pre-funded: `ListaPreFundModule` op 2 | `ListaSmartTakerModule` (`withdrawCollateralOneCoin`, `minOutRate` floor) |
 
 The debt side is orthogonal: brokered markets use the broker ops above on ANY
 collateral shape (`test/leverage/SmartLp.t.sol` proves SmartLP collateral +

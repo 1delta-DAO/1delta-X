@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {ListaNativeSupplyCollateralModule, ListaNativeCollateralTakerModule} from "../../src/ListaNativeModules.sol";
 import {ListaBrokerModule} from "../../src/ListaBrokerModule.sol";
+import {ListaPreFundModule} from "../../src/ListaPreFundModules.sol";
 import {ListaModulesBase, IMoolahSigViews, IListaBrokerViews} from "../shared/ListaModulesBase.t.sol";
 import {IMoolah, MarketParams, MarketParamsLib} from "../../src/interfaces/ILista.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
@@ -212,6 +213,34 @@ contract ListaProviderMarketsTest is ListaModulesBase {
         assertEq(solver.balance, nativeBefore, "solver saw no raw native");
         assertEq(address(nativeTaker).balance, 0, "no native stranded on the taker module");
         assertEq(_collateral(_mpWbnbColl()), COLLATERAL_IN - out, "collateral reduced exactly");
+    }
+
+    /// @dev The PRE-FUNDED native supply (ListaPreFundModule op 1) against the live
+    ///      native provider and WBNB (whose `withdraw` pays via a 2,300-gas
+    ///      `transfer`): the delivered WBNB sits on the module next to a stranger's
+    ///      parked WBNB, and the module unwraps and supplies exactly the delivery.
+    ///      No token approval of any kind from the maker (review 2026-10-18 M-5).
+    function test_nativeProvider_preFundSupply_unwrapsExactlyTheDelivery() public {
+        ListaPreFundModule preFund = new ListaPreFundModule(address(permit3), address(settlement));
+        uint256 parked = 0.3e18;
+        _give(WBNB, address(preFund), parked + COLLATERAL_IN); // a parked delivery + this one
+        bytes memory data = abi.encode(
+            (uint256(5) << 253) | (uint256(ListaPreFundModule.Op.NativeSupplyCollateral) << 244)
+                | (uint256(uint160(WBNB)) << 16),
+            PROVIDER_NATIVE,
+            _mpWbnbColl()
+        );
+        assertEq(IERC20(WBNB).allowance(maker, address(permit3)), 0, "maker granted nothing");
+
+        uint256 before = _collateral(_mpWbnbColl());
+        uint256 nativeBefore = address(preFund).balance;
+        vm.prank(address(settlement));
+        preFund.makeOnBehalf(maker, COLLATERAL_IN, data);
+
+        assertEq(_collateral(_mpWbnbColl()) - before, COLLATERAL_IN, "the delivery booked as collateral, natively");
+        assertEq(IERC20(WBNB).balanceOf(address(preFund)), parked, "the parked WBNB untouched");
+        assertEq(address(preFund).balance, nativeBefore, "no native stranded");
+        assertEq(IERC20(WBNB).balanceOf(maker), 0, "nothing swept back");
     }
 
     /// @dev Deploy the native pair and seed `amount` WBNB collateral through it.

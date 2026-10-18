@@ -1,0 +1,22 @@
+#!/usr/bin/env sh
+# Deploy freeze: `main` is the branch Cloudflare builds and deploys from (Pages app +
+# the orderbook and filler Workers, docs/deployment-rootstock-beta.md "Git-linked
+# builds"). The pre-audit beta that is live on Rootstock was built from it. Until the
+# audited rollout, every push to `main` is a production redeploy, so refuse it here.
+#
+# Install: `make hooks` (sets core.hooksPath to scripts/git-hooks).
+# Deliberate hotfix to the live beta: ALLOW_MAIN_PUSH=1 git push origin main
+remote="$1"
+protected="main"
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/$protected)
+      if [ "${ALLOW_MAIN_PUSH:-0}" != "1" ]; then
+        echo "pre-push: refusing to push to '$protected' on '$remote' — it auto-deploys the live beta app and workers." >&2
+        echo "pre-push: push a feature branch instead, or for a deliberate hotfix: ALLOW_MAIN_PUSH=1 git push ..." >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+exit 0

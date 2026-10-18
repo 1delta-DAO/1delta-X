@@ -3,6 +3,7 @@ import type { GuardState } from "./guard";
 import type { PoolGraphState } from "./poolGraph";
 import type { QuoteBookState } from "./quote";
 import type { RebalanceState } from "./rebalance";
+import type { SweepState } from "./sweep";
 
 /**
  * Where the filler keeps its durable state: a JSON document store. The Node CLI
@@ -60,6 +61,8 @@ export interface FillerState {
   quotes?: QuoteBookState;
   /** The route strategy's discovered pool graph (poolGraph.ts): survives restarts, refreshed every ROUTE_DISCOVERY_SECONDS. */
   poolGraph?: PoolGraphState;
+  /** The operator sweep's last check per solver (./sweep.ts). */
+  solverSweep?: SweepState;
 }
 
 /** An in-memory store (tests, one-shot runs). */

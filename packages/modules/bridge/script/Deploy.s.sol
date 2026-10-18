@@ -46,7 +46,8 @@ import {BridgedOrderInbox} from "../src/BridgedOrderInbox.sol";
 ///  Required env: PERMIT3, SETTLEMENT, LENS.
 ///  Optional env: ACROSS_SPOKE_POOL, LZ_ENDPOINT, CCTP_TOKEN_MESSENGER_V2 (zero
 ///                disables that path), INBOX_OWNER (omit to skip the shared inbox
-///                entirely).
+///                entirely), WRAPPED_NATIVE (zero deploys the LayerZero module
+///                without its fee-from-legs op).
 contract DeployScript is Script {
     /// @dev PLACEHOLDER — the real preimage is chosen at rollout and is not
     ///      committed here (see `docs/deterministic-deployment.md` §1). Once a
@@ -63,6 +64,11 @@ contract DeployScript is Script {
         address inboxOwner = vm.envOr("INBOX_OWNER", address(0));
         // Circle's CCTP V2 TokenMessenger (V1 is halted 2026-12-01 — see ICctp.sol).
         address cctpMessenger = vm.envOr("CCTP_TOKEN_MESSENGER_V2", address(0));
+        // The chain's WETH9-shaped wrapped native (WETH, WRBTC …). Lets a LayerZero
+        // order pay its messaging fee from a delivered output leg (OP_FEE_CREDIT);
+        // zero deploys the module without that op. ⚠ A constructor argument, so it
+        // is part of the CREATE2 init code: the module's address differs per value.
+        address wrappedNative = vm.envOr("WRAPPED_NATIVE", address(0));
 
         vm.startBroadcast();
 
@@ -88,7 +94,7 @@ contract DeployScript is Script {
 
         // One module serves Stargate and every plain OFT; the pool or token is
         // named per-order in the signed spec, not baked in here.
-        LzOftBridgeOutModule lzOut = new LzOftBridgeOutModule{salt: SALT}(permit3, settlement);
+        LzOftBridgeOutModule lzOut = new LzOftBridgeOutModule{salt: SALT}(permit3, settlement, wrappedNative);
         console.log("LzOftBridgeOutModule ", address(lzOut));
 
         // Funnel-only USDC path; no commitment can ride a CCTP burn.

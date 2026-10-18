@@ -7,12 +7,12 @@ import {Order, LegIn} from "@core/settlement/Settlement.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {AggregatorFillSolver, RoutePlan, SurplusPolicy, NO_PATCH, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
-import {RouteSandbox} from "@solvers/aggregator/RouteSandbox.sol";
+import {RouteSandbox, MULTI_ROUTE} from "@solvers/aggregator/RouteSandbox.sol";
 
 import {MockERC20} from "@coretest/shared/MockSettlementBase.t.sol";
 import {AggregatorFillSolverTest, MockRouter} from "./AggregatorFillSolver.t.sol";
 import {IFill3} from "./RawSwapComparison.t.sol";
-import {newAgg} from "./shared/AggDeploy.sol";
+import {newAgg, noGuard} from "./shared/AggDeploy.sol";
 
 /// @dev A target that pulls whatever it is told to, from whomever it is told to —
 ///      the "route that tries to take more than it was given" class.
@@ -260,6 +260,7 @@ contract RouteSandboxTest is AggregatorFillSolverTest {
             router: target,
             minOut: 0,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: NO_PATCH,
             amountOutOffset: NO_PATCH,
             minBumpBps: 0,
@@ -589,7 +590,7 @@ contract RouteSandboxTest is AggregatorFillSolverTest {
         // …and the item entry is gated the same way.
         vm.prank(mallory);
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, mallory));
-        aggSolver.executeItemFill(o, sig, 1e18, p, "", 0, new Permit2612[](0));
+        aggSolver.executeItemFill(o, sig, 1e18, p, "", 0, new Permit2612[](0), noGuard());
     }
 
     /// @dev PoC 2, step 1 — now impossible: `target = harvester` (any call) used to
@@ -633,6 +634,11 @@ contract RouteSandboxTest is AggregatorFillSolverTest {
     ///      when EVIL is swept, so the hook finds nothing and the filler keeps the
     ///      whole 10 tB spread. (Against the old tokenIn-first order the hook took
     ///      5 tB and the fill still passed.)
+    ///
+    ///      Since 2026-10-18 (review S-3) the bait's SECOND INPUT CURRENCY is no longer
+    ///      silently kept as residue: {executeFill} refuses it ({MultiInputUnrouted}), and
+    ///      the PoC runs where it is routed — {executeItemFill} with a MULTICALL route,
+    ///      which pushes EVIL into the sandbox too. The sweep-order defence is unchanged.
     function test_poc1_outputFirstSweepProtectsTheSpreadFromAHookToken() public {
         ApprovalHarvester h = new ApprovalHarvester();
         vm.prank(address(sandbox));
@@ -643,7 +649,16 @@ contract RouteSandboxTest is AggregatorFillSolverTest {
         (Order memory o, bytes memory sig) = _poc1Bait(evil, 62);
 
         RoutePlan memory p = _plan(address(sandbox), 95e18); // honest route, pays the sandbox
+        vm.expectRevert(AggregatorFillSolver.MultiInputUnrouted.selector);
         aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
+
+        address[] memory targets = new address[](2);
+        bytes[] memory datas = new bytes[](2);
+        (targets[0], datas[0]) = (address(tA), abi.encodeCall(tA.approve, (address(router), AMOUNT_IN)));
+        (targets[1], datas[1]) = (address(router), p.data);
+        p.router = MULTI_ROUTE;
+        p.data = abi.encode(targets, datas);
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, new Permit2612[](0), noGuard());
 
         assertTrue(evil.hookRan(), "the hook ran during the sweep");
         assertEq(tB.balanceOf(address(h)), 0, "the harvester got nothing");

@@ -150,6 +150,7 @@ contract RawSwapComparisonTest is UsdrifForkBase {
             router: SWAP_ROUTER_02,
             minOut: FLOOR_OUT,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: NO_PATCH,
             amountOutOffset: NO_PATCH,
             minBumpBps: 0,

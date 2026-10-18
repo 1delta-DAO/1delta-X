@@ -262,9 +262,18 @@ instead: **any module that forwards native value must not cap the gas.** Modules
 unwrap deliver WETH rather than raw ETH wherever the recipient is not the maker:
 `CompoundV2Native*`, `ListaNative*` and, since 2026-09-30 (L-FSE-3), the Fluid
 custody modules (`FluidCustodyBase._operateOut`) — a native Fluid leg is a WETH leg.
-The native senders that do exist forward all gas: `NativeUnwrapModule` and the
-`AggregatorFillSolver` v3 native delivery
-([native-rbtc-delivery-plan.md](../native-rbtc-delivery-plan.md) §6).
+The native senders that do exist follow one of two postures:
+
+- **Single-order sends forward all gas.** The `AggregatorFillSolver` v3 native delivery
+  and the deployed `NativeUnwrapModule` v1 do this.
+- **Sends that can share a transaction with other makers' fills cap the gas generously
+  and fall back to WETH.** `NativeUnwrapModule` v2 (`SEND_GAS`, `PaidWrapped`;
+  [native-rbtc-delivery-plan.md](../native-rbtc-delivery-plan.md) §8) does this. These
+  sends run in `matchSettle` and `batchFill`.
+
+A cap with a fallback that still pays is not this class: the UniswapX / 1inch findings
+are caps that **refuse** the recipient. So the rule is: **never cap native value
+without a fallback that still pays.**
 
 **The stipend we cannot avoid is inbound.** WETH9 / WRBTC `withdraw` pays the unwrapper
 with `transfer`, so every contract that unwraps must keep its `receive()` inside 2,300

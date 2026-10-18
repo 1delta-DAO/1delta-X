@@ -3,6 +3,12 @@ pragma solidity ^0.8.28;
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
+/// @dev `RoutePlan.router` / {RouteSandbox.exec} `target` sentinel for a MULTICALL route
+///      (2026-10-18): `data = abi.encode(address[] targets, bytes[] datas)`, run in
+///      order from the sandbox. `address(1)` is the ECRECOVER precompile — never a
+///      usable route target, so the sentinel shadows nothing.
+address constant MULTI_ROUTE = address(1);
+
 /// @title RouteSandbox
 /// @notice The identity {AggregatorFillSolver} lends to an aggregator route. The
 ///         solver PUSHES one fill's input here, the sandbox approves the route's
@@ -87,6 +93,24 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 ///  native coin here (an unwrap-to-recipient leg) reverts. Native coin forced in by
 ///  SELFDESTRUCT or a coinbase reward is stranded, never spent: nothing here ever
 ///  forwards value.
+///
+///  MULTICALL ROUTES (2026-10-18, review S-2 / S-3). `target == {MULTI_ROUTE}` makes
+///  `data` an `abi.encode(address[] targets, bytes[] datas)` run as a SEQUENCE of calls
+///  from this identity, each target refused exactly as a single route's is
+///  ({ForbiddenTarget}), then the same unconditional sweep. That is how one route
+///  spends SEVERAL pushed tokens — a multi-input order's second token, a foreign SETTLE
+///  receipt, an NFT a sale module paid the owner — where a single call can only spend
+///  `tokenIn`. NO AUTOMATIC APPROVAL in this mode: the route names its own
+///  `token.approve(router, …)` / `collection.setApprovalForAll(market, true)` calls,
+///  which leave the same standing grants the single-call mode's `ensureApproval` does
+///  (the ⚠ above applies to them unchanged — operator-written routes only).
+///
+///  NFTS. The owner forwards an ERC-721 / ERC-1155 it received INSIDE an item fill to
+///  this sandbox (`safeTransferFrom`, so the receiver hooks below run); both hooks
+///  accept a transfer only when its `operator` is the OWNER, so nobody else can park an
+///  NFT here. The sandbox's sweep is ERC-20 only: an NFT the route does not sell stays
+///  here until an operator recovers it with a route of `target = collection, data =
+///  transferFrom(sandbox, to, id)` — the same recovery as a stranded ERC-20.
 contract RouteSandbox {
     /// @notice The only caller of {exec} — the {AggregatorFillSolver} that deployed
     ///         this sandbox, and the only address its sweeps ever pay.
@@ -126,6 +150,8 @@ contract RouteSandbox {
     error ForbiddenTarget(address target);
     /// @dev The target reverted; its return data, verbatim.
     error RouteFailed(bytes ret);
+    /// @dev A {MULTI_ROUTE} whose `targets` and `datas` differ in length.
+    error BadMulticall();
 
     constructor(address settlement, address permit3, address executor) {
         OWNER = msg.sender;
@@ -148,20 +174,29 @@ contract RouteSandbox {
     ///         back to the owner.
     function exec(address tokenIn, address target, bytes calldata data, address[] calldata sweepTokens) external {
         if (msg.sender != OWNER) revert OnlyOwner();
-        if (
-            target == OWNER || target == SETTLEMENT || target == PERMIT3 || target == EXECUTOR
-                || target == address(this)
-        ) revert ForbiddenTarget(target);
+        if (target == MULTI_ROUTE) {
+            // A MULTICALL route (see the contract note): every call checked like a
+            // single route's target, no automatic approval.
+            (address[] memory targets, bytes[] memory datas) = abi.decode(data, (address[], bytes[]));
+            if (targets.length != datas.length) revert BadMulticall();
+            for (uint256 i; i < targets.length; ++i) {
+                address t = targets[i];
+                _check(t);
+                (bool ok, bytes memory ret) = t.call(datas[i]);
+                if (!ok) revert RouteFailed(ret);
+            }
+        } else {
+            _check(target);
+            // (1) A standing max approval, set once per (token, target). It saves the
+            // router-approval write the solver used to pay on every fill; it is NOT
+            // harmless in general — see the ⚠ in the contract note — and is acceptable
+            // only because the owner admits operator-written routes alone.
+            SafeTransferLib.ensureApproval(tokenIn, target, SafeTransferLib.balanceOf(tokenIn, address(this)));
 
-        // (1) A standing max approval, set once per (token, target). It saves the
-        // router-approval write the solver used to pay on every fill; it is NOT
-        // harmless in general — see the ⚠ in the contract note — and is acceptable
-        // only because the owner admits operator-written routes alone.
-        SafeTransferLib.ensureApproval(tokenIn, target, SafeTransferLib.balanceOf(tokenIn, address(this)));
-
-        // (2) The route.
-        (bool ok, bytes memory ret) = target.call(data);
-        if (!ok) revert RouteFailed(ret);
+            // (2) The route.
+            (bool ok, bytes memory ret) = target.call(data);
+            if (!ok) revert RouteFailed(ret);
+        }
 
         // (3) Unconditional sweep, in the caller's order (outputs first). Never
         // skipped: "ends empty" is what keeps the standing approvals from reaching
@@ -173,6 +208,32 @@ contract RouteSandbox {
             if (t == tokenIn) inSwept = true;
         }
         if (!inSwept) _sweep(tokenIn);
+    }
+
+    /// @dev {ForbiddenTarget} — the owner, Settlement, Permit3, the EXECUTOR, this sandbox.
+    function _check(address target) private view {
+        if (
+            target == OWNER || target == SETTLEMENT || target == PERMIT3 || target == EXECUTOR
+                || target == address(this)
+        ) revert ForbiddenTarget(target);
+    }
+
+    /// @notice ERC-721 receiver — accepts a token only when the OWNER moved it here (the
+    ///         owner's forward of an item fill's NFT receipt; see the contract note).
+    function onERC721Received(address operator, address, uint256, bytes calldata) external view returns (bytes4) {
+        if (operator != OWNER) revert OnlyOwner();
+        return this.onERC721Received.selector;
+    }
+
+    /// @notice ERC-1155 single receiver — the same rule as {onERC721Received}. No batch
+    ///         hook: the owner forwards one id at a time.
+    function onERC1155Received(address operator, address, uint256, uint256, bytes calldata)
+        external
+        view
+        returns (bytes4)
+    {
+        if (operator != OWNER) revert OnlyOwner();
+        return this.onERC1155Received.selector;
     }
 
     function _sweep(address token) private {

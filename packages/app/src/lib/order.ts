@@ -92,7 +92,36 @@ export interface BuildOrderArgs {
    *    recipient, so neither a delta-verify check nor a window carrier would hold).
    */
   nativeOut?: { module: Address } | { nativeBalance: Address };
+  /**
+   * Further ITEMS the ticket carries (none today; the native-out module item is added
+   * by {@link nativeOut}). ANY item makes the order PULL delivery (review 2026-10-18 C-3:
+   * DIRECT + items is unfillable without filler capital — `matchSettle` refuses a
+   * delta-verify order and `PostInputs` refuses items) and signs `ItemPolicy.ORDERED`
+   * (CANONICAL is forward-only: it needs capital too). See {@link ticketDelivery}.
+   */
+  items?: Item[];
   now?: number;
+}
+
+/**
+ * The delivery an order on a market signs, from the market's defaults (C-3, review
+ * 2026-10-18): an ITEM-BEARING ticket is always PULL — no `solver` (DIRECT would make it
+ * unfillable without capital) — and the NativeUnwrapModule shape also carries no window
+ * (its leg is the module's, so no leg could carry the override). Everything else keeps the
+ * market's own solver / window, and `pull` (the filler quoted its inventory) forces pull.
+ */
+export function ticketDelivery(a: {
+  solver?: Address;
+  exclusivity?: { filler: Address; seconds: number; overrideBps: number };
+  /** The ticket carries any item (the native-out module item included). */
+  itemBearing: boolean;
+  /** The NativeUnwrapModule shape: its leg goes to the module, not the maker. */
+  nativeModule?: boolean;
+  pull?: boolean;
+}): { solver: Address; exclusivity?: { filler: Address; seconds: number; overrideBps: number } } {
+  const pull = a.pull || a.itemBearing;
+  const noWindow = a.pull || a.nativeModule;
+  return { solver: pull ? zeroAddress : a.solver ?? zeroAddress, ...(!noWindow && a.exclusivity ? { exclusivity: a.exclusivity } : {}) };
 }
 
 /**
@@ -285,11 +314,14 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
   const direct = solver !== zeroAddress;
   const nativeModule = args.nativeOut && "module" in args.nativeOut ? args.nativeOut.module : undefined;
   const nativeView = args.nativeOut && "nativeBalance" in args.nativeOut ? args.nativeOut.nativeBalance : undefined;
+  const items: Item[] = [...(nativeModule ? [nativeOutItem(nativeModule, recv.address)] : []), ...(args.items ?? [])];
   if (nativeModule) {
     if (direct || args.exclusivity) throw new Error("a native-out order is pull delivery: no solver, no exclusivity window");
     // The leg goes to the module; its item pays the maker the raw coin.
     legsOut = legsOut.map((l) => ({ ...l, recipient: nativeModule }));
   }
+  // C-3: an item-bearing order is PULL delivery — DIRECT + items has no zero-capital fill.
+  if (items.length > 0 && direct) throw new Error("an item-bearing order is pull delivery: DIRECT + items is unfillable without filler capital (sign it without a solver)");
   if (nativeView !== undefined) {
     // The settler measures the maker's native balance through the view; only the named
     // solver can deliver it (and only a delta-verified output can be a view).
@@ -311,7 +343,8 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
   // the input before the delivery and run it late — zero-capital fillable on the task-31
   // Settlement. Its leg reference already makes it fail closed if hoisted ahead of the
   // delivery (the core's delivery ledger). CANONICAL would be forward-only (needs capital).
-  const timing = nativeModule ? withItemPolicy(once, ItemPolicy.ORDERED) : once;
+  // Every item-bearing order signs ORDERED, never CANONICAL.
+  const timing = items.length > 0 ? withItemPolicy(once, ItemPolicy.ORDERED) : once;
 
   const order: Order = {
     maker,
@@ -349,7 +382,7 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     gasBumpBps: 0n,
     gasPriceRef: 0n,
     priorityScale: 0n,
-    items: nativeModule ? [nativeOutItem(nativeModule, recv.address)] : [],
+    items,
     validators: [],
     invariants: [],
     fillModule: zeroAddress,

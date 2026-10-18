@@ -607,8 +607,11 @@ contract FluidOperateModule is ITakerModule, FluidCustodyBase {
 //   • totalAmount                         only read on the `nftId == 0` path
 //
 // Close (payback + withdraw) is mechanically the same call with the signs flipped;
-// it stays on {FluidOperateModule} because its useful mode is repay-ALL, which is a
-// live-debt sentinel plus an over-pull buffer rather than a settler-sized amount.
+// the fused form stays on {FluidOperateModule} because its useful mode is repay-ALL,
+// which is a live-debt sentinel plus an over-pull buffer rather than a settler-sized
+// amount. The UNFUSED, acyclic close — withdraw TAKE early, repay-all of the delivered
+// leg late — is {FluidPreFundModule}'s `RepayAll` (review 2026-10-18 M-3), where the
+// delivery itself is the ceiling.
 //
 contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, FluidCustodyBase {
     /// @dev The ONLY spender allowed to reach this module's PRE-FUND funding.

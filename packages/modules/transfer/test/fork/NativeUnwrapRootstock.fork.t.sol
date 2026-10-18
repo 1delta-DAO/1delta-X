@@ -41,7 +41,7 @@ contract NativeUnwrapRootstockForkTest is Test {
         vm.createSelectFork(url);
         live = true;
         maker = vm.addr(makerPk);
-        module = new NativeUnwrapModule(WRBTC, address(SETTLEMENT));
+        module = new NativeUnwrapModule(WRBTC, address(SETTLEMENT), 100_000);
         vm.startPrank(POOL);
         IERC20(USDT0).transfer(maker, 100e6);
         IERC20(WRBTC).transfer(filler, 0.01 ether);

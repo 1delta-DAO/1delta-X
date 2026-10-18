@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {ListaSmartSupplyCollateralModule, ListaSmartTakerModule} from "../../src/ListaSmartModules.sol";
 import {ListaBrokerModule} from "../../src/ListaBrokerModule.sol";
+import {ListaPreFundModule} from "../../src/ListaPreFundModules.sol";
 import {ListaModulesBase, IMoolahSigViews, IListaBrokerViews} from "../shared/ListaModulesBase.t.sol";
 import {IMoolah, MarketParams, MarketParamsLib} from "../../src/interfaces/ILista.sol";
 
@@ -98,6 +99,34 @@ contract ListaSmartLpTest is ListaModulesBase {
         assertEq(IERC20(SLISBNB).balanceOf(maker), 0, "coin fully consumed");
         assertEq(IERC20(SLISBNB).balanceOf(address(smartSupply)), 0, "module holds nothing");
         assertEq(IERC20(SLISBNB).allowance(address(smartSupply), PROVIDER_SMART), 0, "provider approval cleared");
+    }
+
+    /// @dev The PRE-FUNDED SmartLP zap (ListaPreFundModule op 2) against the live
+    ///      SmartProvider: the delivered slisBNB is zapped from the module's own
+    ///      balance, a parked foreign slisBNB balance is untouched, and the LP floor
+    ///      is the signed rate applied to the delivery (review 2026-10-18 M-5).
+    function test_preFundSmartSupply_zapsExactlyTheDelivery() public {
+        ListaPreFundModule preFund = new ListaPreFundModule(address(permit3), address(settlement));
+        uint256 parked = 0.25e18;
+        _giveSlis(address(preFund), parked + COIN_IN);
+        bytes memory data = abi.encode(
+            (uint256(5) << 253) | (uint256(ListaPreFundModule.Op.SmartSupplyCollateral) << 244)
+                | (uint256(uint160(SLISBNB)) << 16),
+            PROVIDER_SMART,
+            SLISBNB,
+            uint256(0),
+            MIN_LP_RATE,
+            _mpSmart()
+        );
+
+        uint256 before = _collateral();
+        vm.prank(address(settlement));
+        preFund.makeOnBehalf(maker, COIN_IN, data);
+
+        assertGe(_collateral() - before, COIN_IN * MIN_LP_RATE / 1e18, "at least the signed LP floor minted");
+        assertEq(IERC20(SLISBNB).balanceOf(address(preFund)), parked, "the parked coin untouched");
+        assertEq(IERC20(SLISBNB).allowance(address(preFund), PROVIDER_SMART), 0, "provider approval cleared");
+        assertEq(IERC20(SLISBNB).balanceOf(maker), 0, "nothing swept back on an exact zap");
     }
 
     /// @dev A native coin index fails closed: the provider requires the native

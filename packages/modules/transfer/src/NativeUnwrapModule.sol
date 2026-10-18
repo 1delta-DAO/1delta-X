@@ -2,10 +2,12 @@
 pragma solidity ^0.8.28;
 
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {PreFundGuard} from "@lib/PreFundGuard.sol";
 
-interface IWETHWithdraw {
+interface IWrappedNative {
     function withdraw(uint256 amount) external;
+    function deposit() external payable;
 }
 
 /// @title NativeUnwrapModule
@@ -51,26 +53,59 @@ interface IWETHWithdraw {
 ///         module on the pre-fund side of {Batch._assertMatchShape}, where a
 ///         self-funding MAKE belongs.
 ///
-///         Posture — chosen deliberately, the opposite trade to
-///         {WethUnwrapForwarder}: the native send happens INSIDE the fill with
-///         full gas forwarded (smart-account recipients work), so a recipient
-///         whose `receive()` reverts kills the whole fill. That is the
-///         industry-standard stance (CoW settlement's ETH buy-token, 1inch
-///         LOP's unwrap flag): EOA recipients cannot revert at all, and
-///         fillers simulate immediately before executing, so a hostile
-///         receiver costs a simulation, not a transaction. Makers whose
-///         recipient cannot accept native should sign a plain WETH leg — or
-///         use the forwarder, which quarantines the send after settlement.
+///         Posture — BATCH-SAFE native send (2026-10-15, v2). The send runs
+///         INSIDE the fill with a capped but generous gas budget ({SEND_GAS},
+///         set per chain at deploy, sized for smart-account `receive()`s), and
+///         if the recipient cannot take native coin the module pays the same
+///         amount in WETH instead ({PaidWrapped}). Why both halves:
+///           • `matchSettle` is all-or-nothing and (after task 31) pays several
+///             makers through this singleton in ONE plan, and `batchFill` shares
+///             one transaction's gas across orders (63/64 rule). An uncapped
+///             send that reverts or burns gas would let ONE recipient kill or
+///             starve every other order in the transaction. The cap bounds the
+///             burn per recipient; the fallback turns a revert into a payout.
+///           • The cap is NOT a 2,300-gas stipend (failure class C10: CoW's
+///             `transfer` needs driver-side access lists, UniswapX M-02 shut out
+///             smart wallets). A recipient whose `receive()` needs more than
+///             {SEND_GAS} still gets paid — in WETH — never refused.
+///         The caller cannot FORCE the fallback by picking a gas limit: a send
+///         starved below {SEND_GAS} leaves this frame only ~1/64 of its gas
+///         (EIP-150), too little for the re-wrap, and {makeOnBehalf} refuses up
+///         front anyway unless the full budget can reach the recipient
+///         ({InsufficientSendGas}). So a WETH payout means the recipient itself
+///         could not take native coin within the budget. The v1 module
+///         (deployed for the 2026-10 beta Settlement) forwarded all gas and
+///         reverted on failure — the 1inch-LOP unwrap stance; CoW pays its ETH
+///         buy token with a 2,300-gas `transfer`.
 contract NativeUnwrapModule is IMakerModule {
-    IWETHWithdraw public immutable WETH;
+    IWrappedNative public immutable WETH;
     address public immutable SETTLEMENT;
+    /// @notice Gas the native send gives the recipient. Per chain, set at deploy.
+    uint256 public immutable SEND_GAS;
+
+    /// @dev Gas the CALL itself may charge the caller before the callee starts:
+    ///      value transfer (9,000) + new account (25,000) + a cold account read
+    ///      (2,600) on Ethereum's schedule, rounded up. Rootstock prices CALL by its
+    ///      own rules; the headroom is generous, and a live fill confirms it there.
+    uint256 private constant CALL_OVERHEAD = 40_000;
+
+    /// @dev The recipient could not take native coin within {SEND_GAS} (its
+    ///      `receive()` reverted, is missing, or needs more gas); it was paid the
+    ///      same amount in WETH instead.
+    event PaidWrapped(address indexed recipient, uint256 amount);
 
     error OnlySettlement();
-    error NativeSendFailed();
+    error SendGasTooLow();
+    /// @dev Not enough gas left to give the recipient the full {SEND_GAS}: refusing
+    ///      here is what stops a caller from forcing the WETH fallback by
+    ///      under-funding the transaction.
+    error InsufficientSendGas();
 
-    constructor(address weth, address settlement) {
-        WETH = IWETHWithdraw(weth);
+    constructor(address weth, address settlement, uint256 sendGas) {
+        if (sendGas < 2300) revert SendGasTooLow();
+        WETH = IWrappedNative(weth);
         SETTLEMENT = settlement;
+        SEND_GAS = sendGas;
     }
 
     /// @dev WETH9's `withdraw` pays via `transfer` (2300 stipend) — this must
@@ -96,7 +131,16 @@ contract NativeUnwrapModule is IMakerModule {
         (, address recipient) = abi.decode(data, (uint256, address));
         if (recipient == address(0)) recipient = onBehalfOf;
         WETH.withdraw(amount);
-        (bool ok,) = recipient.call{value: amount}("");
-        if (!ok) revert NativeSendFailed();
+        // EIP-150 passes at most 63/64 of what is left after the CALL's own
+        // charges; demand enough that the recipient gets all of {SEND_GAS}.
+        if (gasleft() < SEND_GAS + SEND_GAS / 63 + CALL_OVERHEAD) revert InsufficientSendGas();
+        (bool ok,) = recipient.call{value: amount, gas: SEND_GAS}("");
+        if (!ok) {
+            // Re-wrap exactly `amount` (never a stray native balance) and pay it as
+            // WETH: a plain token transfer, which no recipient can refuse.
+            WETH.deposit{value: amount}();
+            SafeTransferLib.safeTransfer(address(WETH), recipient, amount);
+            emit PaidWrapped(recipient, amount);
+        }
     }
 }

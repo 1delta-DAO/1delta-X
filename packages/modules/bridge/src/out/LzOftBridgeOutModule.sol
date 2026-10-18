@@ -4,9 +4,15 @@ pragma solidity ^0.8.28;
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ISettlementModule} from "@core/interfaces/ISettlementModule.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 
 import {BridgeOutBase} from "./BridgeOutBase.sol";
 import {IOFT} from "../vendor/ILayerZero.sol";
+
+/// @dev WETH9-shaped wrapped native (WETH, WRBTC, WBNB …). Only `withdraw` is used.
+interface IWrappedNativeLike {
+    function withdraw(uint256 amount) external;
+}
 
 /// @title LzOftBridgeOutModule
 /// @notice Source-side MAKE module for BOTH LayerZero paths — Stargate V2 pools
@@ -23,8 +29,10 @@ import {IOFT} from "../vendor/ILayerZero.sol";
 ///  1. NATIVE FEE. LayerZero charges the messaging fee in native currency, and a
 ///     module invoked from an item has no way to receive value — `makeOnBehalf` is
 ///     not payable and carries no filler-supplied data. So the fee is drawn from a
-///     pre-funded credit ledger held here: whoever intends to pay tops up via
-///     {topUpFor}, and the maker names them as `feePayer` in the signed spec.
+///     credit ledger held here: whoever intends to pay tops up via {topUpFor} —
+///     or the fill itself does, from a wrapped-native output leg (FEE FROM THE
+///     FILL'S LEGS below) — and the maker names the payer as `feePayer` in the
+///     signed spec.
 ///     `feePayer` is also the LayerZero refund address, so the executor's change
 ///     goes straight back to them without passing through this contract.
 ///
@@ -64,6 +72,37 @@ import {IOFT} from "../vendor/ILayerZero.sol";
 ///         maker`) works on both seams. The SDK's `assertLzSponsorshipSafe`
 ///         (hard lifelong `exclusiveFiller` = sponsor) remains a LIVENESS check:
 ///         a non-sponsor filler now simply reverts.
+///       • it is PULL-funded only. The pre-funded forms ride `MAKE`, which cannot
+///         carry the filler; `settle` refuses a pre-fund blob ({PreFundNeedsMake}).
+///         The fee-from-legs form below is the zero-float alternative to a
+///         sponsorship: the filler still prices the fee, but delivers it as an
+///         output leg instead of parking a float here.
+///
+///     FEE FROM THE FILL'S LEGS (review 2026-10-18 M-4). The two forms above both
+///     make the messaging fee a native FLOAT someone must park here before the
+///     fill: a prior {topUpFor} by the maker, or a sponsor's float that the
+///     auction never prices. The PRE-FUNDED fee credit removes the float: the
+///     order carries a wrapped-native output leg addressed to this module and a
+///     separate MAKE item with op {OP_FEE_CREDIT}
+///
+///         legsOut[k] = (WRAPPED_NATIVE, feeBudget, recipient = this module)
+///         items[0]   = MAKE this, data = abi.encode(forLegPreFund(k, WRAPPED_NATIVE) | OP_FEE_CREDIT << 244)
+///         items[1]   = MAKE this, data = abi.encode(forLegPreFund(j, inputToken), LzSpec{feePayer: maker, …})
+///
+///     Item 0 unwraps exactly the core-sized delivery of leg `k` into
+///     `nativeCredit[maker]`; item 1 then pays the quoted fee from that credit as
+///     an ordinary self-paid send. So the fee is just another output the filler
+///     delivers and prices into its quote — no float, no prior transaction, no
+///     sponsor, zero filler capital. It takes TWO items because the core binds
+///     and consumes ONE leg per item (word 0's descriptor, {Base._forSlice}): a
+///     second leg reference inside one item's data would be sized by nothing but
+///     a balance floor against an `oft`-quoted (maker-chosen) fee — the Teller
+///     shape {PreFundGuard} exists to forbid. Schedule item 0 first (items run in
+///     order on `fill`; on `matchSettle` an out-of-order schedule only finds less
+///     credit and reverts {InsufficientNativeCredit}). Any part of the budget the
+///     quote does not use stays the maker's credit — spent first by their next
+///     send, or reclaimed with {withdrawNative}. Disabled (reverts
+///     {NoWrappedNative}) on a deployment built with `wrappedNative == 0`.
 ///
 ///     ⚠ TOKEN BINDING (audit 2026-09-30 BRIDGE-B-2). `inputToken` MUST be
 ///     `IOFT(oft).token()`, and this is now checked on-chain. A native OFT burns
@@ -83,6 +122,15 @@ import {IOFT} from "../vendor/ILayerZero.sol";
 ///     For a token whose local and shared decimals match (USDT0 at 6) zero is
 ///     correct; for an 18-decimal OFT it must at least cover the dust.
 contract LzOftBridgeOutModule is BridgeOutBase, ISettlementModule {
+    /// @notice The chain's wrapped native token, unwrapped by the {OP_FEE_CREDIT}
+    ///         op. `address(0)` disables that op; nothing else reads it.
+    IWrappedNativeLike public immutable WRAPPED_NATIVE;
+
+    /// @dev Pre-fund ops, descriptor bits [244,252) — the {PreFundModuleBase._preFundOp}
+    ///      convention. Inside the signed descriptor, so the op is maker-signed.
+    uint256 public constant OP_SEND = 0;
+    uint256 public constant OP_FEE_CREDIT = 1;
+
     /// @notice Native balance available to pay LayerZero messaging fees, per payer.
     ///         Deliberately a ledger rather than a pooled float: a pooled balance
     ///         would let any order drain whatever anyone else deposited.
@@ -123,6 +171,19 @@ contract LzOftBridgeOutModule is BridgeOutBase, ISettlementModule {
     /// @dev A sponsored send filled by someone other than the sponsor or one of
     ///      its named agents ({setSponsorFiller}).
     error FillerNotSponsor(address filler);
+    /// @dev A pre-funded blob dispatched on the `SETTLE` seam. The core sizes a
+    ///      pre-funded slice from its delivery ledger only for `ItemOp.MAKE`; on
+    ///      `SETTLE` the slice would be the maker-signed `item.amount` against a
+    ///      delivery nothing bound to this module.
+    error PreFundNeedsMake();
+    /// @dev A pre-fund descriptor naming an op this module does not implement.
+    error BadOp();
+    /// @dev {OP_FEE_CREDIT} on a deployment without a wrapped native token.
+    error NoWrappedNative();
+    /// @dev Native sent to this module by anyone but {WRAPPED_NATIVE}'s `withdraw`.
+    ///      Credit is only ever added through {topUpFor} or {OP_FEE_CREDIT}, so a
+    ///      bare transfer would strand value no ledger row owns.
+    error OnlyWrappedNative();
 
     /// @param oft               Stargate pool or OFT/adapter on THIS chain.
     /// @param inputToken        ERC20 pulled from the maker. Must be `IOFT.token()`.
@@ -153,7 +214,9 @@ contract LzOftBridgeOutModule is BridgeOutBase, ISettlementModule {
     /// @param totalAmount       The item's FULL maker-signed amount. Mandatory (and
     ///                          the slice must equal it) when `feePayer` is not
     ///                          the maker; optional otherwise, where zero allows
-    ///                          partial slices.
+    ///                          partial slices. On the PRE-FUNDED form (always
+    ///                          self-paid) the delivered slice must be AT LEAST it
+    ///                          ({BridgeOutBase._fullFillGate}).
     struct LzSpec {
         address oft;
         address inputToken;
@@ -170,7 +233,17 @@ contract LzOftBridgeOutModule is BridgeOutBase, ISettlementModule {
         uint256 totalAmount;
     }
 
-    constructor(address permit3, address settlement) BridgeOutBase(permit3, settlement) {}
+    /// @param wrappedNative the chain's WETH9-shaped wrapped native, or `address(0)`
+    ///                      to deploy without the {OP_FEE_CREDIT} op.
+    constructor(address permit3, address settlement, address wrappedNative) BridgeOutBase(permit3, settlement) {
+        WRAPPED_NATIVE = IWrappedNativeLike(wrappedNative);
+    }
+
+    /// @dev Accepts only {WRAPPED_NATIVE}'s `withdraw` payout (WETH9 pays with a
+    ///      2,300-gas `transfer`; this body fits it). See {OnlyWrappedNative}.
+    receive() external payable {
+        if (msg.sender != address(WRAPPED_NATIVE)) revert OnlyWrappedNative();
+    }
 
     // ──────────────────── Native fee ledger ────────────────────
 
@@ -232,43 +305,104 @@ contract LzOftBridgeOutModule is BridgeOutBase, ISettlementModule {
 
     /// @inheritdoc IMakerModule
     /// @dev Self-paid sends only: a sponsored spec reverts {SponsoredSendNeedsSettle}.
+    ///
+    ///      PULL: `data = abi.encode(LzSpec)`; the bridged tokens come from the maker
+    ///      under its Permit3 allowance to this module.
+    ///      PRE-FUNDED (word 0 a pre-fund leg reference, `amount` = the core's
+    ///      delivery-ledger figure for that leg, which is addressed to this module):
+    ///        op {OP_SEND}       `data = abi.encode(forLegPreFund(j, inputToken), LzSpec)`
+    ///                           — bridge the delivered leg, no maker grant;
+    ///        op {OP_FEE_CREDIT} `data = abi.encode(forLegPreFund(k, WRAPPED_NATIVE) | 1 << 244)`
+    ///                           — unwrap the delivered leg into `nativeCredit[maker]`.
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override onlySettlement {
-        _send(onBehalfOf, amount, data, address(0));
+        if (!_isPreFund(data)) {
+            _send(onBehalfOf, amount, abi.decode(data, (LzSpec)), data, address(0), false);
+            return;
+        }
+        // The descriptor half of {PreFundModuleBase._gatePreFundMake}; the caller
+        // half is `onlySettlement`. Restated although `_isPreFund` just answered it,
+        // so the pin sits on this entrypoint where the shapes checker reads it.
+        PreFundGuard.requireLegRef(data);
+        uint256 op = _preFundOp(data);
+        if (op == OP_SEND) {
+            (, LzSpec memory s) = abi.decode(data, (uint256, LzSpec));
+            _send(onBehalfOf, amount, s, data, address(0), true);
+        } else if (op == OP_FEE_CREDIT) {
+            _creditFee(onBehalfOf, amount, data);
+        } else {
+            revert BadOp();
+        }
     }
 
     /// @inheritdoc ISettlementModule
-    /// @dev The `SETTLE` twin of {makeOnBehalf}, identical except that the core
-    ///      passes the `filler`, which a sponsored send must be bound to. `filler`
-    ///      is used ONLY for that check — nothing is ever pulled from it (the
-    ///      SETTLE rule, {ISettlementModule}); the bridged tokens come from the
-    ///      MAKER under its own Permit3 allowance to this module, exactly as on
-    ///      the MAKE seam.
+    /// @dev The `SETTLE` twin of {makeOnBehalf}'s PULL form, identical except that
+    ///      the core passes the `filler`, which a sponsored send must be bound to.
+    ///      `filler` is used ONLY for that check — nothing is ever pulled from it
+    ///      (the SETTLE rule, {ISettlementModule}); the bridged tokens come from the
+    ///      MAKER under its own Permit3 allowance to this module, exactly as on the
+    ///      MAKE seam. A pre-funded blob is refused ({PreFundNeedsMake}).
     function settle(address maker, address filler, uint256 amount, bytes calldata data)
         external
         override
         onlySettlement
     {
-        _send(maker, amount, data, filler);
+        if (_isPreFund(data)) revert PreFundNeedsMake();
+        _send(maker, amount, abi.decode(data, (LzSpec)), data, filler, false);
     }
 
-    /// @param filler the fill's filler on the SETTLE seam; `address(0)` on the MAKE
-    ///               seam, where it is unknown.
-    function _send(address onBehalfOf, uint256 amount, bytes calldata data, address filler) private {
-        LzSpec memory s = abi.decode(data, (LzSpec));
+    /// @dev Descriptor bits [244,252): which pre-fund op. Only reached once
+    ///      {_isPreFund} has answered `true`, so `data` is at least one word.
+    function _preFundOp(bytes calldata data) private pure returns (uint256 op) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            op := and(shr(244, calldataload(data.offset)), 0xff)
+        }
+    }
+
+    /// @dev {OP_FEE_CREDIT}: turn this item's core-sized wrapped-native delivery into
+    ///      the maker's messaging-fee credit. {PreFundGuard.requireDelivered} binds
+    ///      the descriptor's signed token to {WRAPPED_NATIVE} and proves `amount` of it
+    ///      landed here on top of the pre-delivery balance (underflow = fail closed),
+    ///      so neither residue nor another order's parked delivery can be credited.
+    ///      The credit is keyed by `onBehalfOf` — the core-verified maker who paid for
+    ///      the delivery — never by anything in `data`.
+    function _creditFee(address onBehalfOf, uint256 amount, bytes calldata data) private {
+        IWrappedNativeLike w = WRAPPED_NATIVE;
+        if (address(w) == address(0)) revert NoWrappedNative();
+        PreFundGuard.requireDelivered(data, address(w), amount);
+        w.withdraw(amount);
+        uint256 credit = nativeCredit[onBehalfOf] + amount;
+        nativeCredit[onBehalfOf] = credit;
+        emit ToppedUp(onBehalfOf, amount, credit);
+    }
+
+    /// @param s       the decoded spec (PULL: `data` itself; PRE-FUNDED: word 1 on).
+    /// @param data    the raw item data — read only by the PRE-FUNDED floor, for the
+    ///                descriptor's signed funding token.
+    /// @param filler  the fill's filler on the SETTLE seam; `address(0)` on the MAKE
+    ///                seam, where it is unknown.
+    /// @param preFund the funding form ({BridgeOutBase._fundIn}).
+    function _send(
+        address onBehalfOf,
+        uint256 amount,
+        LzSpec memory s,
+        bytes calldata data,
+        address filler,
+        bool preFund
+    ) private {
         _checkDestination(s.dstRecipient, s.dstChainId);
         // The endpoint id is a SEPARATE namespace from the chain id, and nothing
         // on-chain can prove the two agree — that pairing is an off-chain preflight.
         // Zero is the one value that is unambiguously an unpopulated field.
         if (s.dstEid == 0) revert BadDestination();
-        // See the TOKEN BINDING note: the venue must move exactly the token pulled.
+        // See the TOKEN BINDING note: the venue must move exactly the token funded.
         if (IOFT(s.oft).token() != s.inputToken) revert OftTokenMismatch();
         // A sponsored send is one message for the whole item — see the contract note.
-        _fullFillGate(amount, s.totalAmount, s.feePayer != onBehalfOf);
+        _fullFillGate(amount, s.totalAmount, s.feePayer != onBehalfOf, preFund);
 
-        // Snapshot before the pull — see {_sweep}: the sweep must return only what
-        // THIS fill brought in, never a balance that was already resident.
-        uint256 floor = _floorOf(s.inputToken);
-        _pull(onBehalfOf, s.inputToken, amount);
+        // PULL snapshots then pulls; PRE-FUNDED proves the delivery landed here. Either
+        // way `floor` is the pre-fill balance the closing sweep returns down to.
+        uint256 floor = _fundIn(onBehalfOf, s.inputToken, amount, data, preFund);
 
         IOFT.SendParam memory sp = IOFT.SendParam({
             dstEid: s.dstEid,

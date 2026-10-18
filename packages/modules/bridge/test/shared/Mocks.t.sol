@@ -241,3 +241,39 @@ contract MockTokenMessenger {
 interface IERC20Like {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
+
+/// @dev WETH9 in miniature: `withdraw` pays native with the 2,300-gas stipend
+///      (`transfer`), the shape {LzOftBridgeOutModule.receive} must fit. `deposit`
+///      backs every unit with real native, so `withdraw` is always payable.
+contract MockWETH9 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function deposit() external payable {
+        balanceOf[msg.sender] += msg.value;
+    }
+
+    function withdraw(uint256 amount) external {
+        balanceOf[msg.sender] -= amount;
+        payable(msg.sender).transfer(amount);
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        uint256 a = allowance[from][msg.sender];
+        if (a != type(uint256).max) allowance[from][msg.sender] = a - amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}

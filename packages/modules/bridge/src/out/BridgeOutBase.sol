@@ -5,6 +5,7 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 
 import {CommitmentCodec} from "../CommitmentCodec.sol";
 
@@ -14,14 +15,42 @@ import {CommitmentCodec} from "../CommitmentCodec.sol";
 ///         carrying a {CommitmentCodec} commitment that names the destination
 ///         order.
 ///
-///  Placement in the fill
-///  ─────────────────────
+///  Placement in the fill — two funding forms
+///  ──────────────────────────────────────────
 ///  A fill runs `deliverOutputs → items → payInputs`, so by the time an item
-///  executes the solver has already delivered the order's outputs to the maker.
-///  A cross-chain order is therefore an ordinary order plus one item: `legsOut[0]`
-///  delivers the bridgeable token to the maker, and this module immediately pulls
-///  it back through Permit3 and bridges it. No settlement changes, no new
-///  callback, no special fill entrypoint.
+///  executes the solver has already delivered the order's outputs. A cross-chain
+///  order is therefore an ordinary order plus one item, and the item is funded in
+///  one of two ways, chosen by word 0 of its `data`:
+///
+///    PULL (`data = abi.encode(spec)`) — `legsOut[j]` delivers the bridgeable token
+///      to the MAKER, and this module draws it back through the maker's Permit3
+///      token allowance to THIS module, then bridges it. The original shape; it
+///      costs the maker a receive-side approval for a token they may never have
+///      held (review 2026-10-18 M-5).
+///
+///    PRE-FUNDED (`data = abi.encode(forLegPreFund(j, token), spec)`) — `legsOut[j]`
+///      is addressed to THIS MODULE, and the item bridges exactly what the core's
+///      delivery ledger says was delivered there. `item.amount` is unread (the
+///      core sizes the slice from `ctx.outs[j]`, {Base._forSlice}), the maker
+///      grants nothing, and the tokens never transit the wallet. Admission is the
+///      {PreFundModuleBase._gatePreFundMake} pair — `msg.sender == SETTLEMENT`
+///      (the `onlySettlement` modifier) and {PreFundGuard.requireLegRef} — and the
+///      body opens with {PreFundGuard.floorOf} on the asset it is about to move:
+///      the core binds the leg's recipient and token to the DESCRIPTOR, the floor
+///      binds the descriptor to the spec's `inputToken` and proves the delivery
+///      landed here. Anything the bridge leaves unconsumed above that floor goes
+///      back to the maker ({_sweep}); another order's in-flight delivery parked
+///      on this singleton between a netted plan's DELIVER and ITEM steps sits
+///      below the floor and is never spent.
+///      ⚠ MAKE SEAM ONLY. The core sizes a pre-funded slice from the ledger only
+///      for `ItemOp.MAKE`; on `SETTLE` the same blob would be sized from the
+///      maker-signed `item.amount` against a delivery nothing bound, so
+///      {LzOftBridgeOutModule.settle} refuses it ({PreFundNeedsMake}).
+///
+///  The two data spaces are disjoint at word 0: every pull spec opens with an
+///  address (Across, CCTP) or an ABI offset (LayerZero's dynamic `LzSpec`), so
+///  `>> 253 == 0`, while a pre-fund descriptor has `>> 253 == 5`
+///  (`tools/check-module-shapes.py` rule 4 / `WORD0_EXEMPT`).
 ///
 ///  Trust model — identical to {GenericCallModule}'s, and for the same reasons:
 ///    1. `msg.sender == SETTLEMENT`. Settlement only dispatches items whose
@@ -29,9 +58,10 @@ import {CommitmentCodec} from "../CommitmentCodec.sol";
 ///       this gate is what makes the maker's signature the authority over the
 ///       bridge parameters. Without it, anyone could call `makeOnBehalf(victim,
 ///       …)` and bridge a victim's funds to a destination of their choosing.
-///    2. The maker's Permit3 allowance to THIS module caps what a fill can move.
+///    2. PULL: the maker's Permit3 allowance to THIS module caps what a fill can
+///       move. PRE-FUNDED: the core-sized delivery does, under the balance floor.
 ///       The module holds no settlement allowances and is nobody's Permit3
-///       spender, so it can never reach beyond that per-module cap.
+///       spender, so it can never reach beyond either bound.
 ///
 ///  Partial fills
 ///  ─────────────
@@ -53,6 +83,8 @@ import {CommitmentCodec} from "../CommitmentCodec.sol";
 ///  inbox-committed deposit, and the LayerZero module does so for every
 ///  sponsored send (fees are per message). Bridge fees are per-message on every
 ///  path, so a maker-signed `totalAmount` is the right call elsewhere too.
+///  On the PRE-FUNDED form the slice is the leg's delivery rather than a pro-rated
+///  `item.amount`, so `totalAmount` is read as a floor there — see {_fullFillGate}.
 abstract contract BridgeOutBase is IMakerModule {
     IPermit3 public immutable PERMIT3;
     address public immutable SETTLEMENT;
@@ -110,11 +142,66 @@ abstract contract BridgeOutBase is IMakerModule {
         PERMIT3.transferFrom(onBehalfOf, address(this), token, uint160(amount));
     }
 
+    /// @dev Which funding form `data` is in: `true` = PRE-FUNDED (word 0 is a pre-fund
+    ///      leg-reference descriptor, `>> 253 == 5`), `false` = PULL. The same
+    ///      predicate as {Base._isPreFundDesc} — so the module's funding form and the
+    ///      core's sizing rule are driven off one signed word and cannot disagree —
+    ///      with the length test folded in, so a blob shorter than a word answers
+    ///      PULL (the branch that cannot spend this module's balance) instead of
+    ///      being classified from whatever calldata follows it.
+    function _isPreFund(bytes calldata data) internal pure returns (bool r) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            r := and(gt(data.length, 31), eq(shr(253, calldataload(data.offset)), 5))
+        }
+    }
+
+    /// @dev Bring this item's `amount` of `token` under the module's control and
+    ///      return the floor the closing {_sweep} must not dip below.
+    ///
+    ///      PRE-FUNDED: nothing moves. {PreFundGuard.floorOf} asserts that the
+    ///      descriptor's signed funding token IS `token` (the asset about to be
+    ///      bridged) and that at least `amount` of it sits here on top of the
+    ///      pre-delivery balance; the floor it returns is that pre-delivery balance.
+    ///      Underflows — fails closed — on a leg addressed elsewhere or priced in
+    ///      another token. The caller must already have pinned the dispatcher and
+    ///      the descriptor ({PreFundGuard.requireLegRef}).
+    ///      PULL: snapshot first, then draw `amount` from the maker's wallet.
+    function _fundIn(address onBehalfOf, address token, uint256 amount, bytes calldata data, bool preFund)
+        internal
+        returns (uint256 floor)
+    {
+        if (preFund) {
+            if (amount == 0) revert ZeroAmount();
+            return PreFundGuard.floorOf(data, token, amount);
+        }
+        // Snapshot before the pull — see {_sweep}: the sweep must return only what
+        // THIS fill brought in, never a balance that was already resident.
+        floor = _floorOf(token);
+        _pull(onBehalfOf, token, amount);
+    }
+
     /// @dev Full-fill gate driven by a maker-signed `totalAmount` in the spec.
     ///      `required` forces it (an absent total then fails closed); otherwise a
     ///      zero total means "partial slices allowed".
-    function _fullFillGate(uint256 amount, uint256 totalAmount, bool required) internal pure {
-        if (required || totalAmount != 0) FullFillGuard.requireFullFill(amount, totalAmount);
+    ///
+    ///      PRE-FUNDED reads `totalAmount` as a FLOOR (`amount >= totalAmount`), not an
+    ///      equality. There `amount` is the leg's actual delivery, which a decaying
+    ///      output leg prices anywhere in `[end, start]`; an equality would make
+    ///      every auction-priced full fill revert. What the gate protects — that ONE
+    ///      message carries at least the whole-order figure the destination anchor
+    ///      and the per-message fee were authored against — is exactly `>=`. A
+    ///      partial fill that already meets it is harmless (the bridge carries the
+    ///      whole floor); the remainder then cannot meet it and never fills.
+    function _fullFillGate(uint256 amount, uint256 totalAmount, bool required, bool preFund) internal pure {
+        if (!required && totalAmount == 0) return;
+        if (preFund) {
+            if (amount < totalAmount || totalAmount == 0) {
+                revert FullFillGuard.PartialFillUnsupported(amount, totalAmount);
+            }
+        } else {
+            FullFillGuard.requireFullFill(amount, totalAmount);
+        }
     }
 
     /// @dev The guaranteed-delivery floor the destination order must be authored

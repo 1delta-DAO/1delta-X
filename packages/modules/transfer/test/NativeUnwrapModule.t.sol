@@ -41,7 +41,7 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
 
     function setUp() public override {
         super.setUp();
-        unwrapModule = new NativeUnwrapModule(WETH, address(settlement));
+        unwrapModule = new NativeUnwrapModule(WETH, address(settlement), 100_000);
         vm.label(address(unwrapModule), "nativeUnwrapModule");
     }
 
@@ -175,19 +175,23 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
         assertEq(maker.balance, 0, "maker was not paid twice");
     }
 
-    // ── A recipient that can't take native kills the fill (nothing strands) ──
-    function test_nativeOut_revertingRecipient_killsFill() public {
+    // ── A recipient that can't take native is paid in WETH (batch safety, v2) ──
+    function test_nativeOut_revertingRecipient_paidWrapped() public {
         NoReceive bad = new NoReceive();
         _fund(USDC_IN, ETH_OUT);
         Order memory order = _nativeOutOrder(3, USDC_IN, ETH_OUT, address(bad));
         bytes memory sig = _sign(order);
 
+        vm.expectEmit(true, false, false, true, address(unwrapModule));
+        emit NativeUnwrapModule.PaidWrapped(address(bad), ETH_OUT);
         vm.prank(solver);
-        vm.expectRevert(); // NativeUnwrapModule.NativeSendFailed, bubbled through the item call
         settlement.fill(order, sig, USDC_IN);
 
-        assertEq(IERC20(WETH).balanceOf(address(unwrapModule)), 0, "atomic: no WETH stranded");
-        assertEq(IERC20(USDC).balanceOf(solver), 0, "atomic: solver not paid");
+        assertEq(IERC20(WETH).balanceOf(address(bad)), ETH_OUT, "paid the same amount in WETH");
+        assertEq(address(bad).balance, 0, "no native reached it");
+        assertEq(IERC20(WETH).balanceOf(address(unwrapModule)), 0, "nothing stranded on the module");
+        assertEq(address(unwrapModule).balance, 0, "no native stranded on the module");
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "the fill went through");
     }
 
     // ── Auth: only Settlement may dispatch the unwrap ──

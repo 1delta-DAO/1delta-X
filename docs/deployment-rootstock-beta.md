@@ -69,6 +69,10 @@ Plain CREATE from the same deployer (nonce 5), `make deploy-native-unwrap`, prof
 Read back: `WETH()` = WRBTC, `SETTLEMENT()` = Settlement, runtime 1,633 B. Stateless, no
 owner.
 
+This is **v1** (source at `8001ccc`): an uncapped send that reverts on failure. The source
+in the tree is now v2, with a capped send, a WETH fallback and a 3-argument constructor,
+for the task-31 Settlement (native-rbtc-delivery-plan §8). Verify v1 against `8001ccc`.
+
 ⚠ **Not fillable by the route solver** (2026-10-14, fork-proven). Its MAKE item needs
 outputs delivered before inputs, which `AggregatorFillSolver` (PostInputs; `matchSettle`
 refuses pre-funded MAKE) cannot do without capital. It serves fillers that hold WRBTC. The
@@ -180,3 +184,25 @@ variable of the same name overrides them. `dist/_worker.js` (advanced mode) prox
   `FILLER_BINDING_KEY` (= the filler's `QUOTE_BINDING_KEY`)
 
 then retry the deployment so the bindings take effect.
+
+## Deploy freeze until the audited rollout (2026-10-18)
+
+Everything above is Git-linked to `main`: a push to `main` rebuilds and redeploys the
+Pages app and both Workers within minutes, with no further confirmation. The live beta
+(the contracts listed on this page) was built from `main`, and the work that follows the
+2026-10-18 zero-capital review (`REVIEW-2026-10-18-zero-capital-fills.md`) targets the
+**next** Settlement version, so it must not reach `main` before that version is deployed
+and `packages/app/.env.production` points at it.
+
+Rules while the freeze holds:
+
+- All review work lands on feature branches (`zero-capital-item-fills` and its
+  successors). `main` stays the snapshot the live beta was built from.
+- `make hooks` installs `scripts/git-hooks/pre-push`, which refuses any push to `main`.
+  A deliberate hotfix to the live beta is `ALLOW_MAIN_PUSH=1 git push origin main`.
+- Pushes to other branches are safe: Pages builds them as previews on their own URLs and
+  Workers Builds uploads non-production versions; neither touches the production URL.
+- Belt and braces, dashboard only (the local wrangler token has no Pages scope):
+  Pages → Settings → Builds & deployments → disable "Automatic production branch
+  deployments"; Workers → each worker → Settings → Builds → pause. Re-enable both at
+  the rollout.

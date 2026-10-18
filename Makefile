@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill deploy-native-delivery simulate-native-unwrap deploy-native-unwrap size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: hooks print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill deploy-native-delivery simulate-native-unwrap deploy-native-unwrap size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── CI matrix source ──────────────────────────────────────────────────────────
 
@@ -481,3 +481,9 @@ help:
 	@echo "  test-solvers-deployed solvers suite against the deployed (via-IR) solver bytecode"
 	@echo ""
 	@echo "Packages: $(PACKAGES)"
+
+# Install the repo's git hooks (scripts/git-hooks). The pre-push hook refuses pushes to
+# `main`, which Cloudflare auto-deploys as the live beta (docs/deployment-rootstock-beta.md).
+hooks:
+	git config core.hooksPath scripts/git-hooks
+	@echo "core.hooksPath = scripts/git-hooks (pre-push refuses main; ALLOW_MAIN_PUSH=1 overrides)"

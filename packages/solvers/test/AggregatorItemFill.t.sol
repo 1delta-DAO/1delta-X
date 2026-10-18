@@ -10,11 +10,11 @@ import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.so
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
-import {AggregatorFillSolver, RoutePlan, FillRoute, SurplusPolicy, NO_PATCH, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {AggregatorFillSolver, RoutePlan, FillRoute, SurplusPolicy, NO_PATCH, Permit2612, PoolVenue, ItemFillGuard} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 import {MockERC20} from "@coretest/shared/MockSettlementBase.t.sol";
 import {AggregatorFillSolverTest, MockRouter} from "./AggregatorFillSolver.t.sol";
-import {newAgg} from "./shared/AggDeploy.sol";
+import {newAgg, noGuard} from "./shared/AggDeploy.sol";
 
 /// @dev The item-fill entry, declared here rather than called through the
 ///      contract type so this file compiles against the PRE-fix solver too — the
@@ -28,7 +28,8 @@ interface IAggregatorItemFill {
         RoutePlan calldata plan,
         bytes calldata takerData,
         uint256 lateItems,
-        Permit2612[] calldata permits
+        Permit2612[] calldata permits,
+        ItemFillGuard calldata guard
     ) external returns (uint256[] memory);
 }
 
@@ -123,7 +124,7 @@ contract AggregatorItemFillTest is AggregatorFillSolverTest {
         (ok, ret) = address(aggSolver).call(
             abi.encodeCall(
                 IAggregatorItemFill.executeItemFill,
-                (o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), bytes(""), lateItems, new Permit2612[](0))
+                (o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), bytes(""), lateItems, new Permit2612[](0), noGuard())
             )
         );
     }
@@ -195,14 +196,14 @@ contract AggregatorItemFillTest is AggregatorFillSolverTest {
         vm.expectRevert(
             _wrapped(abi.encodeWithSelector(AggregatorFillSolver.InsufficientOutput.selector, AMOUNT_IN, AMOUNT_IN + 1))
         );
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, plan, "", LATE_DEPOSIT, new Permit2612[](0));
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, plan, "", LATE_DEPOSIT, new Permit2612[](0), noGuard());
     }
 
     /// AGG-6: an item-free order is a valid (if unneeded) shape for the new entry.
     function test_audit_AGG_6_itemFreeOrderAlsoFillsViaMatch() public {
         Order memory o = _order(6);
         bytes memory sig = _sign(o);
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", 0, new Permit2612[](0));
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", 0, new Permit2612[](0), noGuard());
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
         assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "spread to the caller, less the floor");
         assertEq(tB.balanceOf(address(aggSolver)), 1);
@@ -241,11 +242,11 @@ contract AggregatorItemFillTest is AggregatorFillSolverTest {
         // A stranger cannot drive the instance at all (gated-only since 2026-10)…
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, attacker));
-        aggSolver.executeItemFill(o, sig, 1e18, plan, "", 0, new Permit2612[](0));
+        aggSolver.executeItemFill(o, sig, 1e18, plan, "", 0, new Permit2612[](0), noGuard());
         // …and an OPERATOR submitting the attacker's hostile order still cannot
         // pay it out of the parked balance: the delta bound holds.
         vm.expectRevert();
-        aggSolver.executeItemFill(o, sig, 1e18, plan, "", 0, new Permit2612[](0));
+        aggSolver.executeItemFill(o, sig, 1e18, plan, "", 0, new Permit2612[](0), noGuard());
         assertEq(tB.balanceOf(address(aggSolver)), 50e18, "residue untouched");
         assertEq(tB.balanceOf(attacker), 0);
     }
@@ -263,6 +264,6 @@ contract AggregatorItemFillTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory plan = _plan(address(g), AMOUNT_OUT);
         vm.expectRevert(AggregatorFillSolver.DirectNotMatchable.selector);
-        g.executeItemFill(o, sig, AMOUNT_IN, plan, "", 0, new Permit2612[](0));
+        g.executeItemFill(o, sig, AMOUNT_IN, plan, "", 0, new Permit2612[](0), noGuard());
     }
 }

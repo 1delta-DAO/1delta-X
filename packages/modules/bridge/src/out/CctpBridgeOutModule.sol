@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 
 import {BridgeOutBase} from "./BridgeOutBase.sol";
 import {ICctpTokenMessenger} from "../vendor/ICctp.sol";
@@ -44,8 +45,10 @@ import {ICctpTokenMessenger} from "../vendor/ICctp.sol";
 ///  Routing the inbox path over CCTP would need V2's `depositForBurnWithHook` plus
 ///  a destination handler that runs the hook — a separate module, not a flag here.
 ///
-///  Trust model, partial fills and the `msg.sender == SETTLEMENT` gate are all
-///  inherited unchanged from {BridgeOutBase}.
+///  Trust model, partial fills, the `msg.sender == SETTLEMENT` gate and the two
+///  funding forms — PULL (`data = abi.encode(CctpSpec)`) and PRE-FUNDED (`data =
+///  abi.encode(forLegPreFund(j, inputToken), CctpSpec)`, `legsOut[j]` addressed to
+///  this module, no maker grant) — are all inherited unchanged from {BridgeOutBase}.
 contract CctpBridgeOutModule is BridgeOutBase {
     ICctpTokenMessenger public immutable TOKEN_MESSENGER;
 
@@ -119,14 +122,20 @@ contract CctpBridgeOutModule is BridgeOutBase {
     ///      note on {CctpSpec}. `destinationCaller` is zero so the solver that pays
     ///      for the mint can submit `receiveMessage` (see the package README).
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override onlySettlement {
-        CctpSpec memory s = abi.decode(data, (CctpSpec));
+        bool preFund = _isPreFund(data);
+        CctpSpec memory s;
+        if (preFund) {
+            // Descriptor half of {PreFundModuleBase._gatePreFundMake}; the caller
+            // half is `onlySettlement`. See {AcrossBridgeOutModule.makeOnBehalf}.
+            PreFundGuard.requireLegRef(data);
+            (, s) = abi.decode(data, (uint256, CctpSpec));
+        } else {
+            s = abi.decode(data, (CctpSpec));
+        }
         _checkDestination(s.dstRecipient, s.dstChainId);
         uint256 maxFee = amount - _floorAfterBps(amount, s.maxFeeBps);
 
-        // Snapshot before the pull — see {_sweep}: the sweep must return only what
-        // THIS fill brought in, never a balance that was already resident.
-        uint256 floor = _floorOf(s.inputToken);
-        _pull(onBehalfOf, s.inputToken, amount);
+        uint256 floor = _fundIn(onBehalfOf, s.inputToken, amount, data, preFund);
         SafeTransferLib.forceApprove(s.inputToken, address(TOKEN_MESSENGER), amount);
         TOKEN_MESSENGER.depositForBurn(
             amount,

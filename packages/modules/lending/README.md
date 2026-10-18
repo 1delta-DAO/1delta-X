@@ -27,7 +27,7 @@ what the 2026-09 rework fixed:
 
 The op says which way value moves for the user; the descriptor says where the
 module's funding comes from. A taker allowance is required exactly when value
-leaves the position — which is why the 15 one-sided `*PreFundModule` contracts need
+leaves the position — which is why the 19 one-sided `*PreFundModule` contracts need
 none at all.
 
 Pre-funded is the canonical shape: any flow where the funding leg arrives from a
@@ -52,8 +52,10 @@ funding source by definition (the literal and balance descriptor forms).
 One-sided pre-fund modules ("deposit/repay whatever the conversion delivered") are
 **PUSH-funded MAKE items**: Settlement delivers the funding leg to the module and
 calls `makeOnBehalf`; there is no TAKE_FOR item and no taker allowance (the earlier
-"vestigial take side" is gone). The 16 pre-fund MAKE sites are the 15
-`*PreFundModule` contracts plus `ListaBrokerModule`'s pre-fund branch; all of them
+"vestigial take side" is gone). The 21 pre-fund MAKE sites are the 19
+`*PreFundModule` contracts plus the pre-fund branches of `ListaBrokerModule` and
+`DolomiteOperatorModule` (Dolomite's rides the operator grant the maker already
+gives, since even a deposit goes through `operate`); all of them
 pin `msg.sender`, require the descriptor (bit 253) and take a token-bound floor via
 `_gatePreFundMake`. See [docs/audit-2026-09-push-family.md](../../../docs/audit-2026-09-push-family.md#head-census-2026-09-30-audit-l-census-6)
 for the census and the dual-funding-shape soundness argument, and `aave-v3`'s

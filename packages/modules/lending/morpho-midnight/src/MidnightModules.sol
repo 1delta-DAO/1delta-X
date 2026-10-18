@@ -220,6 +220,10 @@ contract MidnightRepayModule is IMakerModule {
 //
 // `data = abi.encode(Offer offer, bytes ratifierData, uint256 units, uint256 totalAmount)`.
 //
+// PULL-funded: the maker approves this module for the loan token. The pre-funded
+// form — the loan token delivered by the fill to the module, units sized from it by
+// a signed rate, partial fills allowed — is {MidnightPreFundModule} `Op.Lend`.
+//
 contract MidnightLendModule is IMakerModule {
     IPermit3 public immutable permit3;
     IMidnight public immutable midnight;

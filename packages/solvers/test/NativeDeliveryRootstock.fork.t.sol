@@ -130,6 +130,7 @@ contract NativeDeliveryRootstockForkTest is Test {
             router: POOL_ROUTE,
             minOut: 0,
             maxPay: 0,
+            inventory: 0,
             amountInOffset: 0,
             amountOutOffset: 32,
             minBumpBps: 0,

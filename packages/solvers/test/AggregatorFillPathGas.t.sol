@@ -5,6 +5,7 @@ import {Order} from "@core/settlement/Settlement.sol";
 import {RoutePlan} from "../src/aggregator/AggregatorFillSolver.sol";
 
 import {AggregatorZeroCapitalItemsTest, MockPreFundSupply} from "./AggregatorZeroCapitalItems.t.sol";
+import {noGuard} from "./shared/AggDeploy.sol";
 
 /// @notice Task 31 §4.6 — the measurement behind "is a third single-order callback mode
 ///         (pay inputs → callback → deliver → items) worth Settlement bytecode?".
@@ -31,7 +32,7 @@ contract AggregatorFillPathGasTest is AggregatorZeroCapitalItemsTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
         uint256 g0 = gasleft();
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", 0, _np(), noGuard());
         emit log_named_uint("item-free pull, executeItemFill (netted)  ", g0 - gasleft());
     }
 
@@ -41,7 +42,7 @@ contract AggregatorFillPathGasTest is AggregatorZeroCapitalItemsTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
         uint256 g0 = gasleft();
-        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", LATE0, _np());
+        aggSolver.executeItemFill(o, sig, AMOUNT_IN, p, "", LATE0, _np(), noGuard());
         emit log_named_uint("swap->supply, executeItemFill (netted)    ", g0 - gasleft());
     }
 }

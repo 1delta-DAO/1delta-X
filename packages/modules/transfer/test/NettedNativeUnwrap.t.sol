@@ -45,6 +45,43 @@ contract MockWETH9 {
         balanceOf[msg.sender] -= amount;
         payable(msg.sender).transfer(amount);
     }
+
+    function deposit() external payable {
+        balanceOf[msg.sender] += msg.value;
+    }
+}
+
+/// @dev Cannot take native at all (no `receive`): the misconfigured contract payee.
+contract NoReceive {}
+
+/// @dev Burns every unit of gas it is given: the griefing payee that, uncapped, would
+///      starve the rest of a batch.
+contract GasBurner {
+    receive() external payable {
+        while (true) {}
+    }
+}
+
+/// @dev Succeeds only when given (about) the module's full send budget: burns 90k of
+///      the 100k + 2,300 it should receive, then returns. The payee a caller would
+///      most like to push into the WETH fallback by starving the send.
+contract NeedsGas {
+    receive() external payable {
+        uint256 start = gasleft();
+        while (start - gasleft() < 90_000) {}
+    }
+}
+
+/// @dev A smart-account-shaped payee whose `receive()` does real work (three fresh
+///      SSTOREs, ~66k gas) — above any stipend, inside the module's send budget.
+contract HeavyReceiver {
+    uint256[3] public slots;
+
+    receive() external payable {
+        slots[0] = msg.value;
+        slots[1] = block.number;
+        slots[2] = uint160(msg.sender);
+    }
 }
 
 /// @title NettedNativeUnwrapTest
@@ -86,11 +123,12 @@ contract NettedNativeUnwrapTest is MockSettlementBase {
 
     uint256 constant RESIDUE = 0.25e18; //   stray WETH already on the singleton
     uint256 constant DONATION = 0.5 ether; // stray native already on the singleton
+    uint256 constant SEND_GAS = 100_000;
 
     function setUp() public override {
         super.setUp();
         weth = new MockWETH9();
-        unwrap = new NativeUnwrapModule(address(weth), address(settlement));
+        unwrap = new NativeUnwrapModule(address(weth), address(settlement), SEND_GAS);
         vm.label(address(unwrap), "nativeUnwrap");
         vm.label(bob, "bob");
         vm.label(carol, "carol");
@@ -130,6 +168,15 @@ contract NettedNativeUnwrapTest is MockSettlementBase {
         view
         returns (Order memory o)
     {
+        return _nativeOutTo(who, nonce, amtIn, ethOut, address(0));
+    }
+
+    /// @dev {_nativeOut} with an explicit payout recipient (`address(0)` = the maker).
+    function _nativeOutTo(address who, uint256 nonce, uint256 amtIn, uint256 ethOut, address payout)
+        internal
+        view
+        returns (Order memory o)
+    {
         o = _blank(nonce);
         o.maker = who;
         o.legsIn = PackedEncode.oneLegIn(address(tA), amtIn, 0);
@@ -140,7 +187,7 @@ contract NettedNativeUnwrapTest is MockSettlementBase {
             module: address(unwrap),
             amount: 0, // unread: the delivery ledger sizes a pre-funded MAKE
             recipient: address(0),
-            data: abi.encode(_forLeg(address(weth), 0), address(0))
+            data: abi.encode(_forLeg(address(weth), 0), payout)
         });
         o.items = PackedEncode.items(items);
     }
@@ -211,8 +258,9 @@ contract NettedNativeUnwrapTest is MockSettlementBase {
         mid[1] = _step(MatchStep.DELIVER, 1, 0);
         mid[2] = _step(MatchStep.ITEM, 1, 0); // reverse order on purpose
         mid[3] = _step(MatchStep.ITEM, 0, 0);
-        MatchPlan memory p =
-            _plan3(_nativeOut(maker, 1, IN_A, OUT_A), _nativeOut(bob, 1, IN_B, OUT_B), bobPk, _carol(1), _schedule(mid));
+        MatchPlan memory p = _plan3(
+            _nativeOut(maker, 1, IN_A, OUT_A), _nativeOut(bob, 1, IN_B, OUT_B), bobPk, _carol(1), _schedule(mid)
+        );
 
         uint256 aliceEth = maker.balance;
         uint256 bobEth = bob.balance;
@@ -240,8 +288,9 @@ contract NettedNativeUnwrapTest is MockSettlementBase {
         mid[1] = _step(MatchStep.ITEM, 0, 0);
         mid[2] = _step(MatchStep.DELIVER, 1, 0);
         mid[3] = _step(MatchStep.ITEM, 1, 0);
-        MatchPlan memory p =
-            _plan3(_nativeOut(maker, 1, IN_A, OUT_A), _nativeOut(bob, 1, IN_B, OUT_B), bobPk, _carol(1), _schedule(mid));
+        MatchPlan memory p = _plan3(
+            _nativeOut(maker, 1, IN_A, OUT_A), _nativeOut(bob, 1, IN_B, OUT_B), bobPk, _carol(1), _schedule(mid)
+        );
 
         vm.prank(solver);
         settlement.matchSettle(p);
@@ -369,5 +418,144 @@ contract NettedNativeUnwrapTest is MockSettlementBase {
         vm.prank(solver);
         vm.expectRevert(PreFundGuard.FundingTokenMismatch.selector);
         settlement.matchSettle(p);
+    }
+
+    // ──────────────────── batch safety (v2: capped send + WETH fallback) ────────────────────
+
+    /// The netted plan pays two makers natively in ONE transaction. Bob's payee cannot
+    /// take native; uncapped-and-reverting (v1) that killed Alice's fill too. Now Bob's
+    /// payee is paid in WETH and the plan settles.
+    function test_batch_revertingPayee_paidWrapped_otherMakerStillNative() public {
+        NoReceive bad = new NoReceive();
+        uint256[] memory mid = new uint256[](4);
+        mid[0] = _step(MatchStep.DELIVER, 0, 0);
+        mid[1] = _step(MatchStep.DELIVER, 1, 0);
+        mid[2] = _step(MatchStep.ITEM, 0, 0);
+        mid[3] = _step(MatchStep.ITEM, 1, 0);
+        MatchPlan memory p = _plan3(
+            _nativeOut(maker, 1, IN_A, OUT_A),
+            _nativeOutTo(bob, 1, IN_B, OUT_B, address(bad)),
+            bobPk,
+            _carol(1),
+            _schedule(mid)
+        );
+
+        vm.expectEmit(true, false, false, true, address(unwrap));
+        emit NativeUnwrapModule.PaidWrapped(address(bad), OUT_B);
+        vm.prank(solver);
+        settlement.matchSettle(p);
+
+        assertEq(maker.balance, OUT_A, "alice: native, unaffected by bob's payee");
+        assertEq(weth.balanceOf(address(bad)), OUT_B, "bob's payee: the same amount in WETH");
+        assertEq(weth.balanceOf(address(unwrap)), RESIDUE, "module back to its residue");
+        assertEq(address(unwrap).balance, DONATION, "donation untouched (re-wrap is exact)");
+    }
+
+    /// A payee that burns all gas it gets costs the batch at most {SEND_GAS}: the plan
+    /// settles, the payee is paid in WETH, and the transaction's gas stays within the
+    /// budget of the same plan with an ordinary payee.
+    function test_batch_gasBurningPayee_boundedByCap() public {
+        GasBurner burner = new GasBurner();
+        uint256[] memory mid = new uint256[](4);
+        mid[0] = _step(MatchStep.DELIVER, 0, 0);
+        mid[1] = _step(MatchStep.DELIVER, 1, 0);
+        mid[2] = _step(MatchStep.ITEM, 0, 0);
+        mid[3] = _step(MatchStep.ITEM, 1, 0);
+
+        uint256 snap = vm.snapshotState();
+        MatchPlan memory base = _plan3(
+            _nativeOut(maker, 1, IN_A, OUT_A), _nativeOut(bob, 1, IN_B, OUT_B), bobPk, _carol(1), _schedule(mid)
+        );
+        vm.prank(solver);
+        uint256 g0 = gasleft();
+        settlement.matchSettle(base);
+        uint256 baseGas = g0 - gasleft();
+        vm.revertToState(snap);
+
+        MatchPlan memory p = _plan3(
+            _nativeOut(maker, 1, IN_A, OUT_A),
+            _nativeOutTo(bob, 1, IN_B, OUT_B, address(burner)),
+            bobPk,
+            _carol(1),
+            _schedule(mid)
+        );
+        vm.prank(solver);
+        uint256 g1 = gasleft();
+        settlement.matchSettle(p);
+        uint256 burnGas = g1 - gasleft();
+
+        assertEq(maker.balance, OUT_A, "alice native");
+        assertEq(weth.balanceOf(address(burner)), OUT_B, "burner paid in WETH");
+        // The burner eats its whole budget (+ the 2,300 value stipend); the WETH
+        // re-wrap and transfer add a few tens of thousands on top.
+        assertLe(burnGas, baseGas + SEND_GAS + 2300 + 60_000, "burn bounded by the cap");
+    }
+
+    /// A payee whose `receive()` does real work (~66k: above a stipend, inside the
+    /// budget) is paid in NATIVE — the cap is not C10's 2,300-gas exclusion.
+    function test_batch_heavySmartAccountPayee_getsNative() public {
+        HeavyReceiver acct = new HeavyReceiver();
+        uint256[] memory mid = new uint256[](4);
+        mid[0] = _step(MatchStep.DELIVER, 0, 0);
+        mid[1] = _step(MatchStep.DELIVER, 1, 0);
+        mid[2] = _step(MatchStep.ITEM, 0, 0);
+        mid[3] = _step(MatchStep.ITEM, 1, 0);
+        MatchPlan memory p = _plan3(
+            _nativeOut(maker, 1, IN_A, OUT_A),
+            _nativeOutTo(bob, 1, IN_B, OUT_B, address(acct)),
+            bobPk,
+            _carol(1),
+            _schedule(mid)
+        );
+
+        vm.prank(solver);
+        settlement.matchSettle(p);
+
+        assertEq(address(acct).balance, OUT_B, "smart account: native");
+        assertEq(acct.slots(0), OUT_B, "its receive() ran to completion");
+        assertEq(weth.balanceOf(address(acct)), 0, "no WETH fallback");
+    }
+
+    /// Too little gas left to hand the payee its full {SEND_GAS}: the module reverts
+    /// with {InsufficientSendGas} rather than sending a starved call. With enough gas
+    /// the same call (a payee that burns everything) falls back to WETH.
+    function test_module_underfundedGas_revertsInsteadOfStarvingTheSend() public {
+        GasBurner burner = new GasBurner();
+        uint256 amt = 0.1e18; // inside the module's residue: stands in for a delivery
+        bytes memory d = abi.encode(_forLeg(address(weth), 0), address(burner));
+
+        vm.prank(address(settlement));
+        vm.expectRevert(NativeUnwrapModule.InsufficientSendGas.selector);
+        unwrap.makeOnBehalf{gas: SEND_GAS + 40_000}(maker, amt, d);
+
+        vm.prank(address(settlement));
+        unwrap.makeOnBehalf{gas: SEND_GAS + 200_000}(maker, amt, d);
+        assertEq(weth.balanceOf(address(burner)), amt, "full budget given, refused, paid in WETH");
+    }
+
+    /// THE PROPERTY: no gas limit a caller picks turns a payee that CAN take native
+    /// within the budget into a WETH payout. Swept across every limit from "far too
+    /// little" to "ample" in 1k steps: each attempt either reverts or pays NATIVE.
+    /// (EIP-150 alone already leaves a starved send only ~1/64 of the gas, too little
+    /// for the re-wrap; {InsufficientSendGas} makes the refusal explicit.)
+    function test_module_noGasLimit_forcesWrappedPayout() public {
+        NeedsGas payee = new NeedsGas();
+        uint256 amt = 0.001e18;
+        bytes memory d = abi.encode(_forLeg(address(weth), 0), address(payee));
+        uint256 paid;
+        for (uint256 g = 60_000; g <= 400_000; g += 1_000) {
+            vm.prank(address(settlement));
+            try unwrap.makeOnBehalf{gas: g}(maker, amt, d) {
+                paid++;
+            } catch {}
+            assertEq(weth.balanceOf(address(payee)), 0, "never paid wrapped");
+        }
+        assertGt(paid, 0, "ample gas pays");
+        assertEq(address(payee).balance, paid * amt, "every success paid native");
+    }
+
+    function test_constructor_sendGasBelowStipend_reverts() public {
+        vm.expectRevert(NativeUnwrapModule.SendGasTooLow.selector);
+        new NativeUnwrapModule(address(weth), address(settlement), 2299);
     }
 }

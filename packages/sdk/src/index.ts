@@ -29,3 +29,4 @@ export * from "./itemFill";
 export * from "./json";
 export * from "./aggregator";
 export * from "./erc2612";
+export * from "./matchFlash";
