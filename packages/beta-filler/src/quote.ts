@@ -90,6 +90,10 @@ export interface PricedCandidate {
   costOut: bigint;
   /** The gas units the cost is priced at (estimate × r). */
   gasUnits: bigint;
+  /** The route's OWN gas as ranked (an API route: its corrected figure; a pool path: the quoter's) — transparency/diagnostics. */
+  routeGas?: bigint;
+  /** The fill estimate the cost was priced from, before × r — transparency/diagnostics. */
+  gasEstimate?: bigint;
   /** Of `gasUnits`, the part a permit-funded fill spends on the maker's ERC-2612 permit (0 otherwise). */
   permitGasUnits?: bigint;
   /** Where the price comes from: `oku` (n hops), `sushi`, `nordstern`, `inventory`. */
@@ -128,7 +132,7 @@ export interface QuoteResult {
   strategy: "route" | "inventory";
   /** Priced for a native order (echo of the request): sign the NativeBalance shape, DIRECT. */
   nativeOut?: boolean;
-  route: { source: string; hops?: number; path?: { tokens: Address[]; fees: number[]; venues: string[] } };
+  route: { source: string; hops?: number; path?: { tokens: Address[]; fees: number[]; venues: string[] }; gas?: bigint; estimate?: bigint };
 }
 
 /**
@@ -497,7 +501,14 @@ export class Quoter {
       validUntil,
       strategy: best.c.strategy,
       ...(req.nativeOut ? { nativeOut: true } : {}),
-      route: { source: best.c.source, ...(best.c.hops !== undefined ? { hops: best.c.hops } : {}), ...(best.c.path ? { path: best.c.path } : {}) },
+      route: {
+        source: best.c.source,
+        ...(best.c.hops !== undefined ? { hops: best.c.hops } : {}),
+        ...(best.c.path ? { path: best.c.path } : {}),
+        // What the gas charge was built from: the route's own gas and the fill estimate.
+        ...(best.c.routeGas !== undefined ? { gas: best.c.routeGas } : {}),
+        ...(best.c.gasEstimate !== undefined ? { estimate: best.c.gasEstimate } : {}),
+      },
     };
     this.book.issue(
       {

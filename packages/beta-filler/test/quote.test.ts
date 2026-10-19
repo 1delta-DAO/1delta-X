@@ -214,7 +214,7 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(q.amountOut).toBe(q.grossOut - q.gasChargeOut);
     expect(q.gasMarginBps).toBe(1_000n);
     expect(q.strategy).toBe("route");
-    expect(q.route).toEqual({ source: "oku", hops: 1, path: { tokens: [WRBTC, USDT0], fees: [3000], venues: ["oku"] } });
+    expect(q.route).toMatchObject({ source: "oku", hops: 1, path: { tokens: [WRBTC, USDT0], fees: [3000], venues: ["oku"] } });
     expect(q.validUntil - Math.floor(q.issuedAt / 1000)).toBe(30);
     expect(q.quoteId).toMatch(/^q_[0-9a-f]{24}$/);
     expect(e.quotes.size).toBe(1);
@@ -603,7 +603,7 @@ describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PU
     const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
     const v = await e.quote(sellReq());
     if (!v.ok) throw new Error(v.reason);
-    expect(v.quote.route).toEqual({ source: "nordstern" });
+    expect(v.quote.route).toMatchObject({ source: "nordstern" });
     expect(v.quote.grossOut).toBe((1_001_000_000n * 9_998n) / 10_000n); // never the raw toAmount
     expect(seen).toMatchObject({ sushi: 1, nordstern: 1 });
     expect(seen.referer).toEqual(["https://1delta-x.pages.dev"]);
@@ -615,9 +615,11 @@ describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PU
     const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
     const v = await e.quote(sellReq());
     if (!v.ok) throw new Error(v.reason);
-    expect(v.quote.route).toEqual({ source: "nordstern" });
+    expect(v.quote.route).toMatchObject({ source: "nordstern" });
     // 68,490 × 1.2 × 2.0 (NORDSTERN_GAS_MULT_PCT) = 164,376 + sandbox 30k + fill 200k, priced × r 0.88.
     expect(apiFillGas(164_376n)).toBe(394_376n);
+    // …and the quote says what it priced: the route's own gas and the fill estimate.
+    expect(v.quote.route).toMatchObject({ gas: 164_376n, estimate: 394_376n });
     expect(v.quote.gasUnits).toBeGreaterThanOrEqual((394_376n * 88n) / 100n - 1n);
   });
 
@@ -628,7 +630,7 @@ describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PU
     const { chain } = fake();
     const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
     const v = await e.quote(sellReq());
-    expect(v.ok && v.quote.route).toEqual({ source: "sushi" }); // the fillable route, not the unfillable better one
+    expect(v.ok && v.quote.route).toMatchObject({ source: "sushi" }); // the fillable route, not the unfillable better one
   });
 
   it("/quote: a higher RAW Nordstern toAmount loses to Sushi once the haircut is applied", async () => {
@@ -636,7 +638,7 @@ describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PU
     const { chain } = fake();
     const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
     const v = await e.quote(sellReq());
-    expect(v.ok && v.quote.route).toEqual({ source: "sushi" });
+    expect(v.ok && v.quote.route).toMatchObject({ source: "sushi" });
     expect(v.ok && v.quote.grossOut).toBe(1_000_500_000n);
   });
 

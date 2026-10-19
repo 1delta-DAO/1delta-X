@@ -1068,6 +1068,8 @@ export class RouteFiller {
         grossOut: best.out,
         costOut: grossUp(gasOut + profitOut, this.keepPpm),
         gasUnits,
+        routeGas: best.gasUnits,
+        gasEstimate: estimate,
         ...(permitGasUnits > 0n ? { permitGasUnits } : {}),
         source: best.label,
         ...(best.hops !== undefined ? { hops: best.hops } : {}),
