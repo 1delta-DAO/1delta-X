@@ -194,9 +194,10 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 | RIF | the RIF rail's 15–25 % band (§3) | MoC / pools |
 
 - **Tickets:** $5–100, any pair among these assets, PULL orders only.
-- **Valuation:** the live pool quote for swapping the received token back (the replacement).
+- **Valuation:** the live pool quote for swapping the received token back, grossed up to the pool's **pre-fee rate less the half of its fee the wallet keeps** (`SPOT_FEE_SHARE_BPS` 5000). A spot fill swaps nothing, so it pays no pool fee: half goes to the maker, half is kept as spread toward the operator's eventual re-centring swap (two-way flow nets out without one).
 - **Gate:** that value − paid ≥ the wallet fill's gas + its rebalance share + min profit.
-- **Quote:** priced like a route fill. It charges `SPOT_CHARGE_GAS` (~250k) of gas against the wallet fill's real ~92k + rebalance share, and keeps the difference (the "fee take"), so the price stays about the DEX's.
+- **Quote:** that value less `SPOT_CHARGE_GAS` (150k, about a direct DEX swap's 86–132k) of gas + min profit. The fill really burns ~92k; the gas gap is the margin.
+- **Against the DEX** (2026-10-20): on a 0.3 % pool (WRBTC) the maker gets ~0.15 % more than the pool gives, gasless, with no RBTC — better than swapping on Uniswap themselves. On the 0.05 % USDRIF pool the fee share is worth only ~0.025 %: about DEX parity, the case there is gasless and one signature.
 - **Rebalancing:** a reserve below 50 % of its target is bought back to target from USD₮0; one above 150 % is sold down to target.
 - **Gasless makers (follow-up):** relay their ERC-2612 permit (`permit()` is public, ~50k gas) before `fillUpTo`. That turns their $0.61–0.82 route fill into ~$0.28.
 
@@ -209,6 +210,7 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 
 | Date | Decision |
 | --- | --- |
+| 2026-10-20 | Spot beats the DEX: `SPOT_CHARGE_GAS` 250k → 150k (about a direct swap), and the price is the pool's pre-fee rate with half the fee handed to the maker (`SPOT_FEE_SHARE_BPS` 5000). |
 | 2026-10-20 | USDRIF ⇄ USD₮0 handed to spot (`BUY_USDRIF` off: its MoC-exit pricing lost small tickets to the route). USDRIF reserve $100 ±100 %; bands per reserve. |
 | 2026-10-19 | Spot reserves are never swapped on their own: they move with the flow, a fill cannot lift a received reserve past its band top, and re-centring is the operator's `rebalance-spot`. |
 | 2026-10-19 | Spot reserves planned (§9): WRBTC $60, USDRIF $50, tickets ≤ $100 from the wallet, quoted at a route-equivalent price. |

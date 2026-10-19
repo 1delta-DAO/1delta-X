@@ -19,12 +19,15 @@ import type { PricedCandidate } from "./quote";
  * direction (`claimedPair`) — is filled from the wallet with `fillUpTo` (~92k gas)
  * instead of routed (222k–409k). It is:
  *   • VALUED at the live pool quote for swapping the received token back into the paid
- *     one (`dexQuote`, the route's own pool quoting): what replacing the paid token costs;
+ *     one (`dexQuoteFee`, the route's own pool quoting), grossed up to the pool's PRE-FEE
+ *     rate less the fee part the wallet keeps (`feeShared`, SPOT_FEE_SHARE_BPS): a spot
+ *     fill swaps nothing, so it pays no pool fee — half of it goes to the maker, half is
+ *     kept as spread toward the operator's eventual re-centring swap (2026-10-20);
  *   • GATED at fill time: value − paid ≥ the fill's gas (estimate × r) + its share of the
- *     rebalance swap it causes + the min profit — never below the replacement value;
- *   • QUOTED like a route fill: the charge is `SPOT_CHARGE_GAS` (~250k, about a route fill)
- *     against the real ~92k + rebalance share, so the price stays about the DEX's and the
- *     gas gap is the margin.
+ *     rebalance swap it causes + the min profit;
+ *   • QUOTED at that value less `SPOT_CHARGE_GAS` (150k, about a direct DEX swap's
+ *     86–132k) against the real ~92k: on a 0.3 % pool the maker gets ~0.15 % more than
+ *     swapping on the DEX themselves, gasless; the gas gap is the margin.
  * NO SWAP RUNS ON ITS OWN (operator's rule, 2026-10-19: unpredictable gas and conversion
  * fees). Reserves move only with the flow. At a threshold — the paid reserve cannot cover
  * the ticket, or the fill would lift the RECEIVED reserve past its band top — spot passes,
@@ -40,6 +43,8 @@ export const SPOT_BUDGET_KEY = "spot-usd" as Address;
 export interface SpotDeps {
   /** Best exact-input pool output (routeFiller.ts `dexQuote`). */
   dexQuote(tokenIn: Address, tokenOut: Address, amountIn: bigint): Promise<bigint | undefined>;
+  /** The same, with the best path's compound pool fee in ppm (routeFiller.ts `dexQuoteFee`). */
+  dexQuoteFee(tokenIn: Address, tokenOut: Address, amountIn: bigint): Promise<{ amount: bigint; feePpm: number } | undefined>;
   /** RBTC wei → `token` units at the route's reference price (routeFiller.ts `nativeToToken`). */
   nativeToToken(wei: bigint, token: Address): Promise<bigint | undefined>;
 }
@@ -53,6 +58,16 @@ export interface SpotHost {
 }
 
 const lc = (a: string) => a.toLowerCase();
+
+/**
+ * A pool output `out` (after a `feePpm` fee) re-priced with `shareBps` of that fee handed
+ * back: out × (1e6 − fee × (1 − share)) / (1e6 − fee). share 0 = `out`; 10000 = the pre-fee rate.
+ */
+export function feeShared(out: bigint, feePpm: number, shareBps: bigint): bigint {
+  const f = BigInt(feePpm);
+  if (f <= 0n || f >= 1_000_000n || shareBps === 0n) return out;
+  return (out * (1_000_000n * 10_000n - f * (10_000n - shareBps))) / ((1_000_000n - f) * 10_000n);
+}
 const GAS_LIMIT_PCT = 125n;
 
 export class SpotFiller {
@@ -97,6 +112,13 @@ export class SpotFiller {
     const tokenOut = order.legsOut[0]!.token;
     if (!this.isSpotPair(tokenIn, tokenOut)) return { ok: false, reason: "spot: not a spot pair" };
     return { ok: true, tokenIn, tokenOut };
+  }
+
+  /** The maker's price for `amount` of `tokenIn` in `tokenOut`: the pool output with SPOT_FEE_SHARE_BPS of its fee handed back, and the raw pool output. */
+  private async value(tokenIn: Address, tokenOut: Address, amount: bigint): Promise<{ value: bigint; pool: bigint } | undefined> {
+    const q = await this.deps.dexQuoteFee(tokenIn, tokenOut, amount);
+    if (!q || q.amount === 0n) return undefined;
+    return { value: feeShared(q.amount, q.feePpm, this.cfg.policy.spot.feeShareBps), pool: q.amount };
   }
 
   /** USD₮0 (6 dec) value of `amount` of `token`: 1:1 for USD₮0, else the pool quote into it. */
@@ -145,15 +167,16 @@ export class SpotFiller {
   }
 
   /**
-   * The spot QUOTE candidate (pull, no permit): gross = the pool quote for `amountIn`
-   * (what the DEX gives), cost = SPOT_CHARGE_GAS priced like a route fill + the min profit,
-   * capped by the paid token's spendable balance.
+   * The spot QUOTE candidate (pull, no permit): gross = the pool quote for `amountIn` with
+   * SPOT_FEE_SHARE_BPS of the pool fee handed back (`value`), cost = SPOT_CHARGE_GAS + the
+   * min profit, capped by the paid token's spendable balance.
    */
   async quote(tokenIn: Address, tokenOut: Address, amountIn: bigint, gasPrice: bigint): Promise<Verdict<{ candidate: PricedCandidate }>> {
     if (!this.isSpotPair(tokenIn, tokenOut)) return { ok: false, reason: "spot: not a spot pair" };
     const p = this.cfg.policy;
-    const [dexOut, spendable] = await Promise.all([this.deps.dexQuote(tokenIn, tokenOut, amountIn), this.spendable(tokenOut)]);
-    if (dexOut === undefined || dexOut === 0n) return { ok: false, reason: "spot: no pool quote" };
+    const [q, spendable] = await Promise.all([this.value(tokenIn, tokenOut, amountIn), this.spendable(tokenOut)]);
+    if (q === undefined) return { ok: false, reason: "spot: no pool quote" };
+    const dexOut = q.pool;
     // The ticket's USD value: the output itself when it is USD₮0, else the input's pool value.
     const usd = lc(tokenOut) === lc(this.cfg.tokens.usdt0) ? dexOut : await this.usd6(tokenIn, amountIn);
     if (usd === undefined) return { ok: false, reason: "spot: cannot value the ticket in USD₮0" };
@@ -169,8 +192,8 @@ export class SpotFiller {
     const [gasOut, profitOut] = await Promise.all([this.deps.nativeToToken(gasPrice * gasUnits, tokenOut), Promise.resolve(usd === 0n ? 0n : (p.minProfitUsdt0 * dexOut) / usd)]);
     if (gasOut === undefined) return { ok: false, reason: "spot: cannot price gas" };
     const costOut = gasOut + profitOut;
-    if (spendable < dexOut - costOut) return { ok: false, reason: "spot: reserve too small for this ticket" };
-    return { ok: true, candidate: { strategy: "inventory", grossOut: dexOut, capOut: spendable, costOut, gasUnits, source: "inventory-spot" } };
+    if (spendable < q.value - costOut) return { ok: false, reason: "spot: reserve too small for this ticket" };
+    return { ok: true, candidate: { strategy: "inventory", grossOut: q.value, capOut: spendable, costOut, gasUnits, source: "inventory-spot" } };
   }
 
   /** Fill one spot order from the wallet (the inventory Filler calls this; it holds the busy lock and the guard admission). */
@@ -193,9 +216,10 @@ export class SpotFiller {
     const received = pv.received[0] ?? 0n;
     if (paid === 0n || received === 0n) return host.skip(orderHash, "spot: zero-sized preview", true);
 
-    // 2. Value the received token at the live pool (swapping it back into the paid one).
-    const [value, usd, spendable] = await Promise.all([this.deps.dexQuote(tokenIn, tokenOut, received), this.usd6(tokenIn, received), this.spendable(tokenOut)]);
-    if (value === undefined || usd === undefined) return host.skip(orderHash, "spot: no pool quote to value the fill");
+    // 2. Value the received token at the live pool (swapping it back into the paid one), with the maker's fee share.
+    const [q, usd, spendable] = await Promise.all([this.value(tokenIn, tokenOut, received), this.usd6(tokenIn, received), this.spendable(tokenOut)]);
+    if (q === undefined || usd === undefined) return host.skip(orderHash, "spot: no pool quote to value the fill");
+    const value = q.value;
     if (usd < p.minFillUsdt0) return host.skip(orderHash, "spot: below minimum fill", true);
     if (usd > p.spot.maxTicketUsd6) return host.skip(orderHash, `spot: above SPOT_MAX_TICKET_USD`, true);
     if (paid > spendable) return host.skip(orderHash, `spot: reserve ${fmtUnits(spendable, 18)} short of ${paid} ${tokenOut}`);
@@ -225,7 +249,7 @@ export class SpotFiller {
     // 5. Simulate the exact calldata; the bump we priced is the on-chain floor.
     const minBumpBps = await previewBump(chain, cfg.lens, order, chain.me, gasPrice);
     const data = encodeFillUpTo({ order, sig: entry.announce.sig, fillAmount: fillable, minBumpBps });
-    const tag = `spot ${orderHash} pay ${paid} ${tokenOut} for ${received} ${tokenIn} (value ${value}, edge ${edge})`;
+    const tag = `spot ${orderHash} pay ${paid} ${tokenOut} for ${received} ${tokenIn} (pool ${q.pool}, value ${value}, edge ${edge})`;
     let simPaid = paid;
     let simReceived = received;
     try {

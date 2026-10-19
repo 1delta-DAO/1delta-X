@@ -374,8 +374,9 @@ export function spotBand(r: SpotReserve, sp: Pick<SpotPolicy, "bandBps">): bigin
  * SPOT (2026-10-19, INVENTORY-POLICY §9): tickets of `minFill`..`maxTicketUsd6` between any
  * two of {USD₮0, the reserves}, not claimed by another inventory direction, are filled from
  * the wallet (`fillUpTo`, ~92k gas) instead of routed (222k–409k), valued at the live pool
- * quote for swapping the received token back, and QUOTED like a route fill (`chargeGas`) —
- * the gas gap is the margin. Reserves are kept in a ±`bandBps` band around their target.
+ * quote for swapping the received token back, and QUOTED at the pool's pre-fee rate less
+ * the kept part of its fee (`feeShareBps`) and about a direct swap's gas (`chargeGas`) —
+ * the gas gap is the margin, the fee share beats the DEX. Reserves are kept in a ±`bandBps` band around their target.
  */
 export interface SpotPolicy {
   /** `SPOT_RESERVES` = `token:targetUsd:fee,…`; empty = spot off. */
@@ -384,8 +385,18 @@ export interface SpotPolicy {
   bandBps: bigint;
   /** `SPOT_MAX_TICKET_USD` (default 100), USD₮0 units. */
   maxTicketUsd6: bigint;
-  /** `SPOT_CHARGE_GAS` (default 250000): the gas a spot QUOTE charges — about a route fill's. */
+  /**
+   * `SPOT_CHARGE_GAS` (default 150000): the gas a spot QUOTE charges — about a direct DEX
+   * swap's (86–132k), above the fill's real ~92k; the gap is the margin.
+   */
   chargeGas: bigint;
+  /**
+   * `SPOT_FEE_SHARE_BPS` (default 5000): the share of the pool fee handed to the maker. A
+   * spot fill swaps nothing, so the ticket is priced at the pool's PRE-FEE rate less the
+   * rest of the fee: 5000 = half the fee back (0.15 % better than the DEX on a 0.3 % pool),
+   * half kept as spread toward the operator's eventual re-centring swap. 0 = the DEX price.
+   */
+  feeShareBps: bigint;
   /** `SPOT_FILL_GAS` (default 150000): the pre-simulation estimate of a spot fill (measured ~92k). */
   fillGas: bigint;
   /**
@@ -943,7 +954,8 @@ export function loadConfig(env: Env): Config {
       reserves: parseSpotReserves(env.SPOT_RESERVES),
       bandBps: bps(env, "SPOT_BAND_BPS", 5000),
       maxTicketUsd6: fixed(env, "SPOT_MAX_TICKET_USD", "100", USDT0_DECIMALS),
-      chargeGas: posInt(env, "SPOT_CHARGE_GAS", 250_000),
+      chargeGas: posInt(env, "SPOT_CHARGE_GAS", 150_000),
+      feeShareBps: bps(env, "SPOT_FEE_SHARE_BPS", 5000),
       fillGas: posInt(env, "SPOT_FILL_GAS", 150_000),
       rebalanceGas: uint(env, "SPOT_REBALANCE_GAS", 0),
       hourlyUsd6: fixed(env, "SPOT_HOURLY_USD", "1000", USDT0_DECIMALS),

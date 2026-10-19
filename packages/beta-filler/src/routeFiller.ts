@@ -366,15 +366,26 @@ export class RouteFiller {
    * back — and the rebalancer's swap quote (./spot.ts).
    */
   async dexQuote(tokenIn: Address, tokenOut: Address, amountIn: bigint): Promise<bigint | undefined> {
-    if (amountIn === 0n) return 0n;
-    if (tokenIn.toLowerCase() === tokenOut.toLowerCase()) return amountIn;
+    return (await this.dexQuoteFee(tokenIn, tokenOut, amountIn))?.amount;
+  }
+
+  /**
+   * {@link dexQuote} and the best path's compound pool fee (ppm, `pathFeePpm`): what the
+   * spot quote grosses back up to price at the pool's pre-fee rate (./spot.ts `feeShared`).
+   */
+  async dexQuoteFee(tokenIn: Address, tokenOut: Address, amountIn: bigint): Promise<{ amount: bigint; feePpm: number } | undefined> {
+    if (amountIn === 0n) return { amount: 0n, feePpm: 0 };
+    if (tokenIn.toLowerCase() === tokenOut.toLowerCase()) return { amount: amountIn, feePpm: 0 };
     await this.init();
     await this.ensureGraph();
     const paths = this.pathsFor(tokenIn, tokenOut);
     if (paths.length === 0) return undefined;
-    const quotes = await this.quoteMany(this.select(paths, amountIn, tokenOut, 0n), amountIn, "in");
-    let best: bigint | undefined;
-    for (const q of quotes) if (q.ok && (best === undefined || q.amount > best)) best = q.amount;
+    const picked = this.select(paths, amountIn, tokenOut, 0n);
+    const quotes = await this.quoteMany(picked, amountIn, "in");
+    let best: { amount: bigint; feePpm: number } | undefined;
+    quotes.forEach((q, i) => {
+      if (q.ok && (best === undefined || q.amount > best.amount)) best = { amount: q.amount, feePpm: pathFeePpm(picked[i]!.fees) };
+    });
     return best;
   }
 
@@ -1212,4 +1223,15 @@ export function errorReason(e: unknown): string {
     if (d) return d;
   }
   return msg.split("\n")[0]!;
+}
+
+/** A path's compound pool fee, ppm, rounded down: 1e6 − Π(1e6 − feeᵢ) / 1e6^(n−1) (v3 fee units are ppm). */
+export function pathFeePpm(fees: readonly number[]): number {
+  let keep = 1n;
+  let one = 1n;
+  for (const f of fees) {
+    keep *= 1_000_000n - BigInt(f);
+    one *= 1_000_000n;
+  }
+  return fees.length === 0 ? 0 : Number(((one - keep) * 1_000_000n) / one);
 }

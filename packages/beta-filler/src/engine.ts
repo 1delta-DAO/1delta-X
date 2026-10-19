@@ -209,7 +209,7 @@ export class Engine {
     const route = this.route;
     const dexQuote = route ? (a: Address, b: Address, n: bigint) => route.dexQuote(a, b, n) : undefined;
     if (this.filler && route && cfg.policy.spot.reserves.length > 0) {
-      this.filler.attachSpot(new SpotFiller(cfg, chain, this.budget, this.guard, this.gasRatios, { dexQuote: dexQuote!, nativeToToken: (w, t) => route.nativeToToken(w, t) }));
+      this.filler.attachSpot(new SpotFiller(cfg, chain, this.budget, this.guard, this.gasRatios, { dexQuote: dexQuote!, dexQuoteFee: (a, b, n) => route.dexQuoteFee(a, b, n), nativeToToken: (w, t) => route.nativeToToken(w, t) }));
     }
     this.rebalancer = new Rebalancer(cfg, chain, log, this.guard, { ...(state.rebalance ?? {}) }, mark, dexQuote);
     this.quoter = new Quoter(cfg, chain, this.guard, this.quotes, { route: this.route, inventory: this.filler }, this.now, (m) => this.o.log(m));

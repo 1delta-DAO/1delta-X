@@ -209,9 +209,10 @@ RAIL_SWAP_SLIPPAGE_BPS = "30"
 RAIL_USDRIF_BATCH = "100"
 # SPOT RESERVES (INVENTORY-POLICY §9): tickets ≤ SPOT_MAX_TICKET_USD between any two of
 # {USD₮0, these reserves} — not claimed by another inventory direction — filled from the wallet
-# (fillUpTo, ~92k–157k gas) instead of routed (222k–409k), valued at the pool, QUOTED at
-# SPOT_CHARGE_GAS (about a route fill) so the price stays the DEX's and the gas gap is the
-# margin. NO SWAP RUNS ON ITS OWN: a reserve moves only with the flow. At a threshold (the
+# (fillUpTo, ~92k–157k gas) instead of routed (222k–409k), priced at the pool's PRE-FEE rate
+# with SPOT_FEE_SHARE_BPS of the pool fee handed to the maker (a spot fill swaps nothing) and
+# QUOTED at SPOT_CHARGE_GAS (about a direct DEX swap): ~0.15 % better than the DEX on a 0.3 %
+# pool, gasless; the gas gap and the kept half of the fee are the margin. NO SWAP RUNS ON ITS OWN: a reserve moves only with the flow. At a threshold (the
 # paid reserve cannot cover a ticket, or a fill would lift the received reserve past target ×
 # (1 + SPOT_BAND_BPS)) spot passes and the ticket is quoted and filled through the DEX route. The operator funds the reserves and re-centres them on demand
 # (`scripts/admin.sh rebalance-spot`: one swap of the first reserve outside its band,
@@ -220,7 +221,8 @@ RAIL_USDRIF_BATCH = "100"
 SPOT_RESERVES = "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:100:500:10000"
 SPOT_BAND_BPS = "5000"
 SPOT_MAX_TICKET_USD = "100"
-SPOT_CHARGE_GAS = "250000"
+SPOT_CHARGE_GAS = "150000"
+SPOT_FEE_SHARE_BPS = "5000"
 SPOT_FILL_GAS = "150000"
 SPOT_REBALANCE_GAS = "0"   # no automatic rebalance swaps: fills charge none
 SPOT_HOURLY_USD = "1000"

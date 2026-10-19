@@ -438,7 +438,7 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(!pull.ok && pull.reason).toMatch(/DIRECT only/);
   });
 
-  it("SPOT (INVENTORY-POLICY §9): a small USD₮0 → WRBTC ticket is quoted from the wallet's reserve at SPOT_CHARGE_GAS and beats the routed fill", async () => {
+  it("SPOT (INVENTORY-POLICY §9): a small USD₮0 → WRBTC ticket is quoted from the wallet's reserve at SPOT_CHARGE_GAS, above the pool's own output", async () => {
     const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1", SPOT_RESERVES: `${WRBTC}:60:3000` });
     const { chain } = fake({ balances: { [WRBTC.toLowerCase()]: 6n * 10n ** 14n } }); // $60 of WRBTC at $100k
     const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
@@ -446,7 +446,10 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     const v = await e.quote(req);
     if (!v.ok) throw new Error(v.reason);
     expect(v.quote).toMatchObject({ strategy: "inventory", delivery: "pull", route: { source: "inventory-spot" } });
-    expect(v.quote.gasUnits).toBe(220_000n); // 250k × r 0.88: about a route fill's charge, not the ~92k it burns
+    expect(v.quote.gasUnits).toBe(132_000n); // 150k × r 0.88: about a direct DEX swap's charge, not the ~92k it burns
+    // Priced at the pool's pre-fee rate less half its fee: more than the pool itself gives.
+    const pool = await (e as unknown as { route: { dexQuote(a: string, b: string, n: bigint): Promise<bigint> } }).route.dexQuote(USDT0, WRBTC, 20_000_000n);
+    expect(v.quote.grossOut).toBeGreaterThan(pool);
     // At a threshold (the $60 WRBTC reserve cannot cover an $80 ticket) spot passes and the DEX route answers.
     const big = await e.quote({ ...req, amountIn: 80_000_000n });
     expect(big.ok && [big.quote.strategy, big.quote.route.source]).toEqual(["route", "oku"]);

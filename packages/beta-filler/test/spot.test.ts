@@ -1,6 +1,6 @@
 /**
  * SPOT reserves (INVENTORY-POLICY §9, ./src/spot.ts): small tickets filled from the wallet,
- * valued at the pool, quoted like a route fill; reserves kept in a band against USD₮0.
+ * valued at the pool with half its fee handed to the maker, quoted at a direct swap's gas; reserves kept in a band against USD₮0.
  */
 import { OrderSide, type Order } from "@1delta-x/sdk";
 import { decodeFunctionData, encodeAbiParameters, getAddress, keccak256, parseTransaction, zeroAddress, type Address, type Hex } from "viem";
@@ -13,7 +13,8 @@ import { GasRatios } from "../src/gasRatio";
 import { Guard } from "../src/guard";
 import { Budget } from "../src/policy";
 import { Rebalancer } from "../src/rebalance";
-import { SPOT_BUDGET_KEY, SpotFiller, type SpotHost } from "../src/spot";
+import { pathFeePpm } from "../src/routeFiller";
+import { feeShared, SPOT_BUDGET_KEY, SpotFiller, type SpotHost } from "../src/spot";
 
 const KEY = ("0x" + "11".repeat(32)) as Hex;
 const ACCOUNT = privateKeyToAccount(KEY);
@@ -46,6 +47,7 @@ function dex(tin: Address, tout: Address, amt: bigint): bigint {
 }
 const deps = {
   dexQuote: async (a: Address, b: Address, n: bigint) => (a.toLowerCase() === b.toLowerCase() ? n : dex(a, b, n)),
+  dexQuoteFee: async (a: Address, b: Address, n: bigint) => (a.toLowerCase() === b.toLowerCase() ? { amount: n, feePpm: 0 } : { amount: dex(a, b, n), feePpm: 3000 }),
   // RBTC wei → token units at $100k / RBTC.
   nativeToToken: async (wei: bigint, t: Address) => {
     const p = PX[t.toLowerCase()]!;
@@ -129,7 +131,7 @@ describe("spot config and pairs", () => {
     // An optional 4th field: the reserve's own band (a stablecoin's wider).
     expect(parseSpotReserves(`${USDRIF}:100:500:10000`)).toEqual([{ token: USDRIF, targetUsd6: 100_000_000n, fee: 500, bandBps: 10_000n }]);
     expect(() => parseSpotReserves(`${USDRIF}:100:500:20000`)).toThrow(/band/);
-    expect(cfg.policy.spot).toMatchObject({ bandBps: 5000n, maxTicketUsd6: 100_000_000n, chargeGas: 250_000n });
+    expect(cfg.policy.spot).toMatchObject({ bandBps: 5000n, maxTicketUsd6: 100_000_000n, chargeGas: 150_000n, feeShareBps: 5000n });
   });
 
   it("any two of {USD₮0, reserves}, except a pair an enabled direction owns (USDRIF → USD₮0 is the buy side's)", () => {
@@ -146,13 +148,29 @@ describe("spot config and pairs", () => {
   });
 });
 
-describe("spot quote: priced like a route fill (SPOT_CHARGE_GAS), capped by the reserve", () => {
-  it("20 USD₮0 → WRBTC: gross = the pool quote, cost = 250k × r of gas + min profit", async () => {
+describe("spot quote: the pool's pre-fee rate less the kept fee share, a direct swap's gas, capped by the reserve", () => {
+  it("feeShared: out × (1e6 − fee × (1 − share)) / (1e6 − fee); pathFeePpm compounds the hops", () => {
+    expect(feeShared(997_000n, 3000, 0n)).toBe(997_000n); // the DEX price
+    expect(feeShared(997_000n, 3000, 10_000n)).toBe(1_000_000n); // the pre-fee rate
+    expect(feeShared(997_000n, 3000, 5000n)).toBe(998_500n); // half the fee back: +0.15 %
+    expect(feeShared(999_500n, 500, 5000n)).toBe(999_750n); // a 0.05 % pool: +0.025 %
+    expect(pathFeePpm([3000])).toBe(3000);
+    expect(pathFeePpm([500, 3000])).toBe(3498); // 1 − 0.9995 × 0.997 = 0.34985 %, rounded down
+    expect(pathFeePpm([])).toBe(0);
+  });
+
+  it("20 USD₮0 → WRBTC: gross = the pool quote with half its fee back (beats the DEX), cost = 150k × r of gas + min profit", async () => {
     const { s } = spot(fakeChain({ [WRBTC.toLowerCase()]: 6n * 10n ** 14n }, { received: 1n, paid: 1n }).chain);
     const v = await s.quote(USD0, WRBTC, 20_000_000n, GAS_PRICE);
     if (!v.ok) throw new Error(v.reason);
-    expect(v.candidate).toMatchObject({ strategy: "inventory", source: "inventory-spot", grossOut: dex(USD0, WRBTC, 20_000_000n), gasUnits: 220_000n });
+    const pool = dex(USD0, WRBTC, 20_000_000n);
+    expect(v.candidate).toMatchObject({ strategy: "inventory", source: "inventory-spot", grossOut: feeShared(pool, 3000, 5000n), gasUnits: 132_000n });
+    expect(v.candidate.grossOut).toBeGreaterThan(pool);
     expect(v.candidate.capOut).toBe(6n * 10n ** 14n);
+    // SPOT_FEE_SHARE_BPS=0: the DEX price, as before.
+    const c0 = loadConfig({ ...ENV, SPOT_FEE_SHARE_BPS: "0" });
+    const v0 = await new SpotFiller(c0, fakeChain({ [WRBTC.toLowerCase()]: 6n * 10n ** 14n }, { received: 1n, paid: 1n }).chain, new Budget({ [SPOT_BUDGET_KEY]: c0.policy.spot.hourlyUsd6 }), new Guard(c0.gas), new GasRatios(c0.gas.defaultReceiptRatioPpm), deps).quote(USD0, WRBTC, 20_000_000n, GAS_PRICE);
+    expect(v0.ok && v0.candidate.grossOut).toBe(pool);
   });
 
   it("refused above SPOT_MAX_TICKET_USD and when the reserve cannot pay", async () => {
@@ -163,7 +181,7 @@ describe("spot quote: priced like a route fill (SPOT_CHARGE_GAS), capped by the 
   });
 });
 
-describe("spot fill: valued at the pool, gated at the real estimate, never below the replacement", () => {
+describe("spot fill: valued at the pool with the maker's fee share, gated at the real estimate", () => {
   // A maker pays 20 USD₮0 for WRBTC. The pool gives 0.00019940 WRBTC for it.
   const value = dex(USD0, WRBTC, 20_000_000n);
 
@@ -192,7 +210,7 @@ describe("spot fill: valued at the pool, gated at the real estimate, never below
   });
 
   it("refuses a price that does not cover the costs (rests), and a reserve that cannot pay", async () => {
-    const tight = value - 10n ** 11n; // $0.01 under the pool
+    const tight = feeShared(value, 3000, 5000n) - 10n ** 11n; // $0.01 under the maker's price (the pool + half its fee)
     const a = fakeChain({ [WRBTC.toLowerCase()]: 6n * 10n ** 14n }, { received: 20_000_000n, paid: tight });
     const h = host();
     expect(await spot(a.chain).s.fill(h, entry(order(USD0, 20_000_000n, WRBTC, tight)) as never, USD0, WRBTC)).toMatchObject({ status: "skipped", rest: true });
