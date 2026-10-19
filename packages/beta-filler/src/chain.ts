@@ -486,10 +486,30 @@ export async function quoteWrbtcToUsdt0(c: Chain, cfg: Config, amountIn: bigint,
 }
 
 /**
+ * Spenders the operator EOA approves for the MAXIMUM, once, instead of per action
+ * (2026-10-19). Each pulls ONLY from its own caller, inside a transaction that caller
+ * sends — so an approval of ours is spendable by our own transactions alone — and each
+ * is immutable (no proxy: verified on chain 30, the EIP-1967 implementation slot is
+ * empty and the runtime is the contract itself):
+ *   • Settlement — `_deliverOutputs` pulls output legs from `ctx.filler == msg.sender`;
+ *   • SwapRouter02 — the payer of every swap is `msg.sender`.
+ * The per-action exact approvals they replace churned: a refill approved 239.29 →
+ * reset → 239.81 → reset → 240.06 USD₮0 (USD₮0 refuses non-zero → non-zero) before its
+ * one swap, ~170k gas (2026-10-14). Money on Chain's core is an UPGRADEABLE proxy, so
+ * it keeps bounded approvals. The AggregatorFillSolver contract approves nothing at all
+ * (it pays pools in their callbacks; aggregator routes run in its sandbox).
+ */
+export function maxApprovalSpender(cfg: Pick<Config, "settlement" | "uniswap">, spender: Address): boolean {
+  const s = spender.toLowerCase();
+  return s === cfg.settlement.toLowerCase() || s === cfg.uniswap.router.toLowerCase();
+}
+
+/**
  * The approval tx (if any) that lets `spender` pull at least `needed` of `token`
- * from us: a bounded `target` (never unlimited). A token that refuses a non-zero →
- * non-zero change is first reset to 0 — as its OWN tx (`reset`), so the caller
- * sends one transaction per tick and comes back for the second.
+ * from us: a bounded `target`, or the maximum for a {@link maxApprovalSpender}
+ * (`unlimited`; any other spender is refused an unlimited amount). A token that
+ * refuses a non-zero → non-zero change is first reset to 0 — as its OWN tx (`reset`),
+ * so the caller sends one transaction per tick and comes back for the second.
  */
 export async function allowanceCall(
   c: Chain,
@@ -499,11 +519,13 @@ export async function allowanceCall(
   target: bigint,
   /** The allowance already read by the caller (saves the read). */
   known?: bigint,
+  /** Approve the maximum: only for a {@link maxApprovalSpender}. */
+  unlimited = false,
 ): Promise<{ data: Hex; amount: bigint; reset: boolean } | undefined> {
   const current = known ?? (await allowanceOf(c, token, spender));
   if (current >= needed) return undefined;
-  const amount = target > needed ? target : needed;
-  if (amount === maxUint256) throw new Error("refusing an unlimited approval");
+  const amount = unlimited ? maxUint256 : target > needed ? target : needed;
+  if (amount === maxUint256 && !unlimited) throw new Error("refusing an unlimited approval");
   if (current > 0n) return { data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, 0n] }), amount: 0n, reset: true };
   return { data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, amount] }), amount, reset: false };
 }

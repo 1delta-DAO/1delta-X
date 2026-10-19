@@ -531,10 +531,12 @@ export class Filler {
     const minBumpBps = await previewBump(chain, cfg.lens, order, chain.me, gasPrice);
     const data = encodeFillUpTo({ order, sig, fillAmount, minBumpBps });
 
-    // 5. Allowance for Settlement to pull what we pay (direct-approval path, bounded).
+    // 5. Allowance for Settlement to pull what we pay (direct-approval path): the maximum,
+    //    once — Settlement pulls from the filler only inside fills the filler sends
+    //    (chain.ts `maxApprovalSpender`).
     //    Live, a missing approval is its own tx: send it and come back next tick.
     const hourly = pay.toLowerCase() === cfg.tokens.usdt0.toLowerCase() ? p.hourlyUsdt0 : sellsRif(direction) ? p.hourlyRif : p.hourlyUsdrif;
-    const appr = await allowanceCall(chain, pay, cfg.settlement, paid, hourly);
+    const appr = await allowanceCall(chain, pay, cfg.settlement, paid, hourly, undefined, true);
     if (appr) {
       if (cfg.dryRun) this.log(`[dry-run] would approve ${cfg.settlement} for ${appr.amount} of ${pay}`);
       else return this.sendApproval(orderHash, pay, appr, gasPrice);

@@ -4,11 +4,11 @@
  * 0.05 % pool, then redeemTP). Quote selection is in quote.test.ts.
  */
 import { OrderSide, type Order } from "@1delta-x/sdk";
-import { decodeFunctionData, keccak256, parseTransaction, zeroAddress, type Address, type Hex } from "viem";
+import { decodeFunctionData, erc20Abi, keccak256, maxUint256, parseTransaction, zeroAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it } from "vitest";
 
-import { MOC_CORE_ABI, SWAP_ROUTER02_ABI } from "../src/chain";
+import { allowanceCall, maxApprovalSpender, MOC_CORE_ABI, SWAP_ROUTER02_ABI } from "../src/chain";
 import { loadConfig, ROOTSTOCK } from "../src/config";
 import { Guard } from "../src/guard";
 import { classify, legsFor, railRifOut, railUsdrifFor, rifBand, shareAfterBuy } from "../src/policy";
@@ -88,7 +88,7 @@ describe("the rail's shape and arithmetic", () => {
 });
 
 /** A chain where the wallet holds `bal` and the MoC queue's head is `head`; records sent txs. The pool: 0.999 USDRIF per USDT0, both ways. */
-function fakeChain(bal: Record<string, bigint>, q: { head: bigint; count: bigint } = { head: 0n, count: 0n }) {
+function fakeChain(bal: Record<string, bigint>, q: { head: bigint; count: bigint } = { head: 0n, count: 0n }, allowance = 10n ** 30n) {
   const sent: Array<{ to: Address; data: Hex; value: bigint }> = [];
   const pub: Record<string, unknown> = {
     getGasPrice: async () => 26_065_600n,
@@ -102,7 +102,7 @@ function fakeChain(bal: Record<string, bigint>, q: { head: bigint; count: bigint
     readContract: async ({ functionName, address }: { functionName: string; address: string }) => {
       switch (functionName) {
         case "balanceOf": return bal[address.toLowerCase()] ?? 0n;
-        case "allowance": return 10n ** 30n;
+        case "allowance": return allowance;
         case "getPACtp": return PACTP;
         case "getExecFee": return 9n * 10n ** 12n;
         case "firstOperId": return q.head;
@@ -208,5 +208,35 @@ describe("the RIF band: RIF stays a minority (15–25 %, target 20 %) of the wal
     const c = loadConfig({ ...ENV, RIF_SELL_MIN: "200" });
     expect(await rebalancer(chain, {}, c).sellRifIfNeeded()).toBeUndefined();
     expect(sent).toHaveLength(0);
+  });
+});
+
+describe("approvals (2026-10-19): the maximum, once, to the immutable spenders; bounded to MoC", () => {
+  const approveOf = (data: Hex) => decodeFunctionData({ abi: erc20Abi, data });
+
+  it("a refill approves the ROUTER for the maximum (no per-swap exact approvals to churn)", async () => {
+    const { sent, chain } = fakeChain(wallet(400_000_000n, 0n, 0n), undefined, 0n);
+    expect(await rebalancer(chain).step()).toMatchObject({ action: "refill", status: "sent", approval: true });
+    const a = approveOf(sent[0]!.data);
+    expect([sent[0]!.to.toLowerCase(), a.functionName, (a.args[0] as string).toLowerCase(), a.args[1]]).toEqual([
+      T.usdt0.toLowerCase(), "approve", cfg.uniswap.router.toLowerCase(), maxUint256,
+    ]);
+  });
+
+  it("a redemption approves Money on Chain's (upgradeable) core a BOUNDED amount", async () => {
+    // USDRIF on hand below the band: the redeem leg, approval first.
+    const { sent, chain } = fakeChain(wallet(330_000_000n, 100n * E18, 0n), undefined, 0n);
+    expect(await rebalancer(chain).step()).toMatchObject({ action: "redeem", approval: true });
+    const a = approveOf(sent[0]!.data);
+    expect((a.args[0] as string).toLowerCase()).toBe(cfg.moc.core.toLowerCase());
+    expect(a.args[1]).toBeLessThan(maxUint256);
+  });
+
+  it("only Settlement and the router qualify; anything else is refused an unlimited approval", async () => {
+    expect(maxApprovalSpender(cfg, cfg.settlement)).toBe(true);
+    expect(maxApprovalSpender(cfg, cfg.uniswap.router)).toBe(true);
+    expect(maxApprovalSpender(cfg, cfg.moc.core)).toBe(false);
+    const { chain } = fakeChain({}, undefined, 0n);
+    await expect(allowanceCall(chain, T.usdt0, cfg.moc.core, 1n, maxUint256)).rejects.toThrow(/unlimited/);
   });
 });

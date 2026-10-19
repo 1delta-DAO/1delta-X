@@ -2,6 +2,7 @@ import { encodeFunctionData, zeroAddress, type Address, type Hex } from "viem";
 
 import {
   allowanceCall,
+  maxApprovalSpender,
   allowanceOf,
   balanceOf,
   MOC_CORE_ABI,
@@ -309,7 +310,7 @@ export class Rebalancer {
 
   /**
    * Approval first (its own tx) when the allowance is below `needed`, to `target`
-   * (bounded, never unlimited) — else the action, through the Guard.
+   * (bounded; the maximum for the router — chain.ts `maxApprovalSpender`) — else the action, through the Guard.
    */
   private async act(
     action: RebalanceOutcome["action"],
@@ -330,7 +331,15 @@ export class Rebalancer {
     const blocked = guard.admit(key, "rebalance", now);
     if (blocked) return { action, status: "skipped", reason: blocked.reason };
     try {
-      const appr = await allowanceCall(chain, allowance.token, allowance.spender, allowance.needed, allowance.target, allowance.current);
+      const appr = await allowanceCall(
+        chain,
+        allowance.token,
+        allowance.spender,
+        allowance.needed,
+        allowance.target,
+        allowance.current,
+        maxApprovalSpender(cfg, allowance.spender),
+      );
       if (appr) {
         const akey = `approve:${allowance.token}:${allowance.spender}`;
         const ablocked = guard.admit(akey, "approve", now);
