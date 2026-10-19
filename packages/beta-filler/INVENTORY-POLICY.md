@@ -143,10 +143,57 @@ amountOut = gross − ⌈gas × (1 + 3 %)⌉
 - **Before funding a token** to the EOA: check every automatic rule that moves that token (§4).
 - **Before resizing the wallet:** the RIF target is a share of value, so funding USD₮0 alone moves RIF below 15 % and triggers a refill swap at the next rebalance. Fund both, or expect it.
 
-## 9. Decisions (newest first)
+## 9. Planned: spot reserves for small tickets (2026-10-19)
+
+**Idea:** keep a small reserve of the busiest assets in the operator wallet. Tickets under
+~$100 are then filled from it (`fillUpTo`, ~92k gas) instead of routed (222k–409k gas), with
+the reserve topped back up by batched pool swaps through USD₮0.
+
+**Measured basis.** Gas per fill, at 24.4 Mwei and BTC $82.5k:
+
+| Fill | Gas | ≈ USD |
+| --- | --- | --- |
+| wallet `fillUpTo` | 91,750 | $0.18 |
+| route, direct | 222k–268k | $0.45–0.54 |
+| route, pull | 256k | $0.52 |
+| route, pull + permit | 303k–409k | $0.61–0.82 |
+| rebalance pool swap | 86k–132k | $0.17–0.27 |
+
+Fills since 10-11, by ticket size: 11 under $25, 9 at $25–50, 4 at $50–100, 1 at $100 or
+more. The pairs are mostly USDRIF ⇄ USD₮0, which is two-sided and nets, then WRBTC ⇄ USD₮0.
+Nearly all of it is the operator's own test traffic.
+
+**Per-ticket economics.** The pool fee is neutral: the user pays it inside a DEX-equivalent
+price, and the wallet pays it back on rebalancing. Two-sided flow skips the rebalance
+entirely. What remains is the gas gap, ≈ $0.19–0.56 per fill. On a $10 ticket that takes
+the fee share from 4.5–8 % (route) to ~2.6 %.
+
+**Policy.**
+
+| Asset | Reserve (target, band ±50 %) | Pool for rebalancing |
+| --- | --- | --- |
+| USD₮0 | the hub; never below the 100 reserve | — |
+| WRBTC | **$60** | WRBTC/USD₮0 0.3 % (Oku) |
+| USDRIF | **$50** (`USDRIF_RESERVE` = the band's top, so the RIF rail leaves it alone) | USDRIF/USD₮0 0.05 % |
+| RIF | the RIF rail's 15–25 % band (§3) | MoC / pools |
+
+- **Tickets:** $5–100, any pair among these assets, PULL orders only.
+- **Valuation:** the live pool quote for swapping the received token back (the replacement).
+- **Gate:** that value − paid ≥ the wallet fill's gas + its rebalance share + min profit.
+- **Quote:** priced like a route fill. It charges `SPOT_CHARGE_GAS` (~250k) of gas against the wallet fill's real ~92k + rebalance share, and keeps the difference (the "fee take"), so the price stays about the DEX's.
+- **Rebalancing:** a reserve below 50 % of its target is bought back to target from USD₮0; one above 150 % is sold down to target.
+- **Gasless makers (follow-up):** relay their ERC-2612 permit (`permit()` is public, ~50k gas) before `fillUpTo`. That turns their $0.61–0.82 route fill into ~$0.28.
+
+**Risks.**
+- Idle capital (~$110).
+- WRBTC price noise (±$2/day on $60).
+- Bounded by the band and by the live re-check at fill time: the wallet never fills below its replacement value.
+
+## 10. Decisions (newest first)
 
 | Date | Decision |
 | --- | --- |
+| 2026-10-19 | Spot reserves planned (§9): WRBTC $60, USDRIF $50, tickets ≤ $100 from the wallet, quoted at a route-equivalent price. |
 | 2026-10-19 | Fills fall through to the next route on any failure. Heavy API routes allowed (`MAX_ROUTE_GAS` 2M) when quoted at their corrected gas (Nordstern × 2.0). |
 | 2026-10-19 | Maximum approvals to Settlement, SwapRouter02 and MoC's core. Money on Chain is treated as trusted. |
 | 2026-10-14 | USDRIF → RIF through one `redeemTP` (`sellRifUsdrif`). USDRIF collected in batches of 100. |
