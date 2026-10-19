@@ -670,6 +670,9 @@ export class RouteFiller {
     const variant = native ? ("native" as const) : itemFill ? ("items" as const) : undefined;
     const nativeGas = native ? rc.nativeDirectGas : itemFill ? rc.itemFills?.gas ?? 0n : 0n;
     const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, tokenOut, rc.solver, fillPermit ? "permit" : undefined, variant);
+    // An API route's fills are their own shape (see the gas meter at the send).
+    const apiShape = (source: string) =>
+      gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, tokenOut, `${rc.solver}#${source}`, fillPermit ? "permit" : undefined, variant);
     const pricedGas = (estimate: bigint) => this.gasRatios.priced(shape, estimate);
     // A gasless maker's order (./permit.ts) carries its ERC-2612 permit IN the fill: the
     // solver runs it first, in the same tx (and the same simulation). Its gas is part of
@@ -830,13 +833,57 @@ export class RouteFiller {
       return this.skip(orderHash, refusals.join("; "), !transient, transient || buildFailed ? undefined : recheck(passesAt(cands, gasOutFor)));
     }
 
-    // 5. Simulate from the operator and decode — the best viable candidate first,
-    //    falling through to the next if its simulation reverts (e.g. an API route
-    //    quoted on state that has since moved, failing its own floor, or one that
-    //    delivers less than its priced figure, failing the plan's minOut). A gasless
-    //    maker's permit runs inside the same simulation.
-    let picked: { c: Candidate; sim: Simulated; tag: string; margin: bigint } | undefined;
-    let lastReason = "";
+    // 5–6. Per viable candidate, best first, the WHOLE trial: simulate from the operator
+    //    and decode (a gasless maker's permit runs inside the same simulation), then
+    //    re-price at the MEASURED gas — the plan's floor is priced at
+    //    P = max(estimate, simulated) × r; if P is above the gas the floor was built at,
+    //    rebuild the floor at P and re-simulate until the priced gas covers its own
+    //    measurement; the tx goes out with gas limit G = max(P, simulated × 1.25).
+    //    ANY failure of a candidate hands over to the next: a reverted simulation (an API
+    //    route quoted on moved state, a plan failing its own floor), a gas limit above
+    //    MAX_ROUTE_GAS, a plan unprofitable at its measured gas. (Until 2026-10-19 only a
+    //    revert fell through: a Nordstern route that SIMULATED at ~1.06M gas was refused
+    //    over the cap and the fill gave up, though the pool route was right behind it.)
+    type Trial =
+      | { ok: true; c: Candidate; sim: Simulated; tag: string; priced: bigint; gasLimit: bigint }
+      | { ok: false; reason: string; price?: { c: Candidate; gasOut: bigint } };
+    const trial = async (v: { c: Candidate; plan: RoutePlan; margin: bigint }, tag: string): Promise<Trial> => {
+      let sim: Simulated;
+      try {
+        sim = await simulate(v.plan);
+      } catch (e) {
+        return { ok: false, reason: `simulation reverted: ${sanitize(errorReason(e))}` };
+      }
+      const gasEstimate = estimateFor(v.c);
+      let priced = pricedGas(gasEstimate);
+      for (let round = 0; ; round++) {
+        const need = pricedGas(sim.gasUsed > gasEstimate ? sim.gasUsed : gasEstimate);
+        const limit = ceilPct(sim.gasUsed, GAS_LIMIT_PCT);
+        if ((limit > need ? limit : need) > rc.maxGas) {
+          return { ok: false, reason: `simulated gas ${sim.gasUsed} → limit ${limit > need ? limit : need} above MAX_ROUTE_GAS ${rc.maxGas}` };
+        }
+        if (need <= priced) break;
+        if (round >= MAX_REPRICE_ROUNDS) return { ok: false, reason: `gas did not converge (simulated ${sim.gasUsed}, priced ${priced})` };
+        priced = need;
+        const g2Out = await gasOutAt(priced);
+        if (g2Out === undefined) return { ok: false, reason: `cannot price gas (simulated gas ${sim.gasUsed}, priced ${priced})` };
+        const g2 = gate(v.c, g2Out);
+        // Unprofitable at its MEASURED gas: a verdict about this route at the order's price.
+        if (!g2.ok) return { ok: false, reason: `${g2.reason} (simulated gas ${sim.gasUsed}, priced ${priced})`, price: { c: v.c, gasOut: g2Out } };
+        const rebuilt = build(v.c, g2.costOut);
+        if (!rebuilt.ok) return { ok: false, reason: `${rebuilt.reason} (re-priced at gas ${priced})` };
+        try {
+          sim = await simulate(rebuilt.plan);
+        } catch (e) {
+          return { ok: false, reason: `re-simulation at gas ${priced} reverted: ${sanitize(errorReason(e))}` };
+        }
+      }
+      const measuredLimit = ceilPct(sim.gasUsed, GAS_LIMIT_PCT);
+      return { ok: true, c: v.c, sim, tag, priced, gasLimit: measuredLimit > priced ? measuredLimit : priced };
+    };
+    let picked: Extract<Trial, { ok: true }> | undefined;
+    const trialFailures: string[] = [];
+    const priceFailed: Array<{ c: Candidate; gasOut: bigint }> = [];
     for (const v of viable) {
       const via =
         v.c.source === "pool"
@@ -845,56 +892,33 @@ export class RouteFiller {
             ? `nordstern api ${v.c.quote.apiAmountOut}`
             : "sushi api";
       const tag = `${direct ? (liveOut ? "direct+live" : "direct") : "pull"}${native ? "+native" : ""}${itemFill ? `+items(late ${itemFill.lateItems})` : ""}${permits.length > 0 ? "+permit" : ""}${quoted ? ` quoted ${quoted.id}` : ""} ${orderHash} in ${received} ${order.legsIn[0]!.token} → owed ${owed} ${tokenOut} (${via}, quote ${v.c.out}, margin ${v.margin})`;
-      try {
-        picked = { c: v.c, sim: await simulate(v.plan), tag, margin: v.margin };
+      const t = await trial(v, tag);
+      if (t.ok) {
+        picked = t;
         break;
-      } catch (e) {
-        lastReason = `simulation reverted: ${sanitize(errorReason(e))}`;
-        this.log(`${cfg.dryRun ? "[dry-run] " : ""}· [route] ${lastReason} — ${tag}`);
       }
+      trialFailures.push(`${v.c.source}: ${t.reason}`);
+      if (t.price) priceFailed.push(t.price);
+      this.log(`${cfg.dryRun ? "[dry-run] " : ""}· [route] ${t.reason} — ${tag}${viable.length > 1 ? " (next route)" : ""}`);
     }
     if (!picked) {
-      this.guard.onSimFail(orderHash, "route", Date.now());
-      if (cfg.dryRun) return { orderHash, status: "skipped", reason: lastReason, strategy: "route" };
-      return this.skip(orderHash, lastReason);
-    }
-    const { c: best, tag } = picked;
-
-    // 6. Re-price at the MEASURED gas. The plan's floor is priced at
-    //    P = max(estimate, simulated) × r; if P is above the gas the floor was built
-    //    at, rebuild the floor at P and re-simulate (the new floor changes the
-    //    calldata, so the gas is measured again) until the priced gas covers its own
-    //    measurement. The tx goes out with gas limit G = max(P, simulated × 1.25):
-    //    headroom against a moved state, NOT priced into the quote (see GAS_LIMIT_PCT).
-    let sim = picked.sim;
-    const gasEstimate = estimateFor(best);
-    let priced = pricedGas(gasEstimate);
-    for (let round = 0; ; round++) {
-      const need = pricedGas(sim.gasUsed > gasEstimate ? sim.gasUsed : gasEstimate);
-      const limit = ceilPct(sim.gasUsed, GAS_LIMIT_PCT);
-      if ((limit > need ? limit : need) > rc.maxGas) {
-        return this.skipBackoff(orderHash, `simulated gas ${sim.gasUsed} → limit ${limit > need ? limit : need} above MAX_ROUTE_GAS ${rc.maxGas}`);
+      const reason = trialFailures.join("; ");
+      // Every candidate was merely unprofitable at its measured gas: rest (no strike, no
+      // backoff) and, for a decaying order, re-quote when one clears at that gas.
+      if (priceFailed.length === trialFailures.length) {
+        const gasOf = new Map(priceFailed.map((p) => [p.c, p.gasOut]));
+        return this.skip(orderHash, reason, true, recheck(passesAt(priceFailed.map((p) => p.c), (c) => gasOf.get(c)!)));
       }
-      if (need <= priced) break;
-      if (round >= MAX_REPRICE_ROUNDS) return this.skipBackoff(orderHash, `gas did not converge (simulated ${sim.gasUsed}, priced ${priced})`);
-      priced = need;
-      const g2Out = await gasOutAt(priced);
-      if (g2Out === undefined) return this.skipBackoff(orderHash, `cannot price gas (simulated gas ${sim.gasUsed}, priced ${priced})`);
-      const g2 = gate(best, g2Out);
-      // Unprofitable at the MEASURED gas is a verdict about the order's price, not a
-      // failure: rest (no strike, no backoff) and, for a decaying order, re-quote
-      // when it clears at this gas.
-      if (!g2.ok) return this.skip(orderHash, `${g2.reason} (simulated gas ${sim.gasUsed}, priced ${priced})`, true, recheck(passesAt([best], () => g2Out)));
-      const rebuilt = build(best, g2.costOut);
-      if (!rebuilt.ok) return this.skipBackoff(orderHash, `${rebuilt.reason} (re-priced at gas ${priced})`);
-      try {
-        sim = await simulate(rebuilt.plan);
-      } catch (e) {
-        return this.skipBackoff(orderHash, `re-simulation at gas ${priced} reverted: ${sanitize(errorReason(e))}`);
+      if (cfg.dryRun) {
+        this.guard.onSimFail(orderHash, "route", Date.now());
+        return { orderHash, status: "skipped", reason, strategy: "route" };
       }
+      return this.skipBackoff(orderHash, reason);
     }
-    const measuredLimit = ceilPct(sim.gasUsed, GAS_LIMIT_PCT);
-    const gasLimit = measuredLimit > priced ? measuredLimit : priced;
+    const { c: best, tag, sim, priced, gasLimit } = picked;
+    // An API route's receipts are learned under their OWN shape: a heavy Nordstern fill
+    // must not raise the pair's estimate that pool-route quotes are priced from.
+    const meterShape = best.source === "pool" ? shape : apiShape(best.source);
 
     // 7. The shared hourly gas budget must cover the full gas LIMIT at this price.
     const room = this.guard.gasRoom(gasLimit * gasPrice, Date.now());
@@ -920,7 +944,7 @@ export class RouteFiller {
       orderHash,
       expiry: order.expiry,
       reserve: { budget: "route", token: ROUTE_FILLS, amount: 1n },
-      gasMeter: { shape, estimate: sim.gasUsed.toString() },
+      gasMeter: { shape: meterShape, estimate: sim.gasUsed.toString() },
       info: {
         tag: `${tag} (limit ${gasLimit})`,
         payToken: tokenOut,
@@ -1020,7 +1044,13 @@ export class RouteFiller {
     const base = learnedPermit ?? (learnedPlain ?? fallback) + permitAdd;
     // An API route charges its OWN gas (+ the fill around it) when that is more: the
     // generic pull estimate priced a 1.06M-gas Nordstern fill at ~380k (2026-10-19).
-    const apiFloor = best.source === "pool" ? 0n : apiFillGas(best.gasUnits) + permitAdd + nativeAdd;
+    // Once such a route has filled, its OWN learned estimate (the fill meters it under
+    // `<solver>#<source>`) is the figure; before, the corrected API figure + the fill.
+    const apiLearned =
+      best.source === "pool"
+        ? undefined
+        : this.gasRatios.typicalEstimate(gasShape("route", delivery, a.tokenIn, a.tokenOut, `${this.rc.solver}#${best.source}`, a.permit ? "permit" : undefined, variant));
+    const apiFloor = best.source === "pool" ? 0n : (apiLearned ?? apiFillGas(best.gasUnits) + permitAdd + nativeAdd);
     const planFloor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas + permitAdd + nativeAdd;
     const floor = apiFloor > planFloor ? apiFloor : planFloor;
     const estimate = base > floor ? base : floor;

@@ -673,6 +673,28 @@ describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PU
     expect(e.pending?.info?.tag).toMatch(/\(nordstern api 1001000000, quote 1000799800/);
   });
 
+  it("fill: a route that simulates fine but over MAX_ROUTE_GAS hands over to the NEXT route (2026-10-19: Nordstern ~1.06M, the fill gave up)", async () => {
+    apis({ sushiOut: 1_000_500_000n, nordOut: 1_001_000_000n });
+    const { chain, w } = fake();
+    const pub = (chain as unknown as { pub: Record<string, unknown> }).pub;
+    // The Nordstern plan simulates at 1.5M gas (limit 1.875M > MAX_ROUTE_GAS 1.2M); anything else at 300k.
+    pub.estimateGas = async ({ data }: { data: Hex }) => {
+      const plan = decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data }).args[3] as { router: Address };
+      return plan.router.toLowerCase() === NORDSTERN_GUARD_ROOTSTOCK.toLowerCase() ? 1_500_000n : 300_000n;
+    };
+    const logs: string[] = [];
+    const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: (m) => logs.push(m) });
+    w.received = 10n ** 16n;
+    w.owed = 990_000_000n;
+    const t = await e.tick({ fetchEntries: async () => [entry("0e", order({ legsOut: [{ token: USDT0, start: 990_000_000n, end: 0n, recipient: zeroAddress }] }))] });
+    expect(t.outcomes[0]?.status).toBe("pending");
+    const plan = decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data: w.sent[0]!.data }).args[3] as { router: Address };
+    expect(plan.router.toLowerCase()).toBe(SUSHI_RED_SNWAPPER_ROOTSTOCK.toLowerCase()); // the next-best route filled it
+    expect(logs.some((l) => /above MAX_ROUTE_GAS .*\(next route\)/.test(l))).toBe(true);
+    // …and its receipt is metered under the API's own shape, not the pair's pool shape.
+    expect(e.pending?.gasMeter?.shape).toMatch(/#sushi\+/);
+  });
+
   it("fill: the per-sweep caps bound each API separately (NORDSTERN_MAX_PER_SWEEP)", async () => {
     const seen = apis({ sushiOut: 1_000_000n, nordOut: 1_000_000n }); // both unprofitable: nothing sends
     const { chain, w } = fake();

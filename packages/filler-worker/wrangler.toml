@@ -113,7 +113,13 @@ ROUTE_SLIPPAGE_BPS = "10"
 ROUTE_STABLE_SLIPPAGE_BPS = "5"
 # v2 solver (2026-10-12): a pool plan assumes this − 30k = 265k (fork: 229k net direct).
 ROUTE_GAS_ESTIMATE = "295000"
-MAX_ROUTE_GAS = "1200000"
+# Per-fill gas-limit cap (Rootstock block limit 10M). 2M (was 1.2M, 2026-10-19): a heavy
+# multi-hop API route is allowed WHEN its quote charged that gas — Nordstern's figure is
+# corrected to Rootstock (NORDSTERN_GAS_MULT_PCT) and an API route's own fill gas is
+# charged; a route that cannot fit is dropped before ranking, and a fill whose best route
+# fails the cap falls through to the next one.
+MAX_ROUTE_GAS = "2000000"
+NORDSTERN_GAS_MULT_PCT = "200"
 ROUTE_HOURLY_FILLS = "60"
 MIN_PROFIT_RBTC = "0"
 # Local pool plans (Oku = venue 0, SushiSwap v3 = venue 1; the solver swaps on the pools
