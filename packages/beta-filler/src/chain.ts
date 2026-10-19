@@ -453,6 +453,18 @@ export async function quoteUsdt0ForUsdrif(c: Chain, cfg: Config, amountOut: bigi
   return result[0];
 }
 
+/** Exact-input quote on ONE pool (`fee` tier, the default venue's QuoterV2) — the spot rebalancer's swap. */
+export async function quoteSingle(c: Chain, cfg: Config, tokenIn: Address, tokenOut: Address, fee: number, amountIn: bigint): Promise<bigint> {
+  if (amountIn === 0n) return 0n;
+  const { result } = await c.pub.simulateContract({
+    address: cfg.uniswap.quoter,
+    abi: QUOTER_V2_ABI,
+    functionName: "quoteExactInputSingle",
+    args: [{ tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96: 0n }],
+  });
+  return result[0];
+}
+
 /** USDT0 out of the RIF/USDT0 pool for `amountIn` RIF, quoted live. */
 export async function quoteRifToUsdt0(c: Chain, cfg: Config, amountIn: bigint): Promise<bigint> {
   if (amountIn === 0n) return 0n;

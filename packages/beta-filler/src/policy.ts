@@ -273,6 +273,25 @@ export function classify(
   return { ok: false, reason: "not an inventory pair (USDRIF/USDT0, USDT0→RIF)" };
 }
 
+/**
+ * Whether an ENABLED inventory direction already owns the pair (`tokenIn` → `tokenOut`,
+ * the maker's view): such a pair is that direction's — priced its own way (the USDRIF exit,
+ * the RIF rail) — and never the spot strategy's.
+ */
+export function claimedPair(tokenIn: Address, tokenOut: Address, cfg: Pick<Config, "tokens" | "policy">): boolean {
+  const tin = tokenIn.toLowerCase();
+  const tout = tokenOut.toLowerCase();
+  const { usdrif, usdt0, rif } = { usdrif: cfg.tokens.usdrif.toLowerCase(), usdt0: cfg.tokens.usdt0.toLowerCase(), rif: cfg.tokens.rif.toLowerCase() };
+  const p = cfg.policy;
+  return (
+    (tin === usdrif && tout === usdt0 && p.buyUsdrif) ||
+    (tin === usdt0 && tout === usdrif && p.sellUsdrif) ||
+    (tin === usdt0 && tout === rif && p.sellRif) ||
+    (tin === usdrif && tout === rif && p.sellRif) ||
+    (tin === rif && tout === usdt0 && p.buyRif)
+  );
+}
+
 /** The token we pay and the token we receive, for a direction. */
 export function legsFor(direction: Direction, tokens: Config["tokens"]): { pay: Address; receive: Address } {
   if (direction === "buyUsdrif") return { pay: tokens.usdt0, receive: tokens.usdrif };

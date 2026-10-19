@@ -438,6 +438,20 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(!pull.ok && pull.reason).toMatch(/DIRECT only/);
   });
 
+  it("SPOT (INVENTORY-POLICY §9): a small USD₮0 → WRBTC ticket is quoted from the wallet's reserve at SPOT_CHARGE_GAS and beats the routed fill", async () => {
+    const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1", SPOT_RESERVES: `${WRBTC}:60:3000` });
+    const { chain } = fake({ balances: { [WRBTC.toLowerCase()]: 6n * 10n ** 14n } }); // $60 of WRBTC at $100k
+    const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
+    const req = sellReq({ tokenIn: USDT0, tokenOut: WRBTC, amountIn: 20_000_000n, side: "buy", delivery: "auto" });
+    const v = await e.quote(req);
+    if (!v.ok) throw new Error(v.reason);
+    expect(v.quote).toMatchObject({ strategy: "inventory", delivery: "pull", route: { source: "inventory-spot" } });
+    expect(v.quote.gasUnits).toBe(220_000n); // 250k × r 0.88: about a route fill's charge, not the ~92k it burns
+    // Without the reserve the route answers, at its (higher) direct-fill gas.
+    const off = await (await Engine.create({ cfg: loadConfig({ ...ENV, INVENTORY_ENABLED: "1" }), chain, store: new MemoryStateStore(), log: () => {} })).quote({ ...req, amountIn: 20_000_001n });
+    expect(off.ok && off.quote.strategy).toBe("route");
+  });
+
   it("inventory refuses what it could not fill (wallet balance): the route quote stands", async () => {
     const { chain } = fake({ usdt0Balance: 1_000_000n });
     const e = await Engine.create({ cfg: loadConfig({ ...ENV, INVENTORY_ENABLED: "1" }), chain, store: new MemoryStateStore(), log: () => {} });

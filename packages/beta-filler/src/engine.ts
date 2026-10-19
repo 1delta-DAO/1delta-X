@@ -1,3 +1,4 @@
+import type { Address } from "viem";
 import { withSendGasPrice, type Chain } from "./chain";
 import { AUCTION_RECHECK_MS, legacyRouteConfig, type Config } from "./config";
 import { dispatch, type Strategy } from "./dispatch";
@@ -9,6 +10,7 @@ import { permitStage } from "./permit";
 import { Budget, isFixedPrice, windowEndMs, type Verdict } from "./policy";
 import { QuoteBook, Quoter, type QuoteRequest, type QuoteResult } from "./quote";
 import { Rebalancer, type RebalanceOutcome } from "./rebalance";
+import { SPOT_BUDGET_KEY, SpotFiller } from "./spot";
 import { ROUTE_FILLS, RouteFiller } from "./routeFiller";
 import { sanitize } from "./sanitize";
 import { STATE_KEY, type FillerState, type RecentEvent, type StateStore } from "./state";
@@ -168,7 +170,13 @@ export class Engine {
     this.quotes = new QuoteBook(state.quotes ?? [], mark);
     this.guard = new Guard(cfg.gas, state.guard ?? {}, mark, () => this.save());
     this.budget = new Budget(
-      { [cfg.tokens.usdt0.toLowerCase()]: cfg.policy.hourlyUsdt0, [cfg.tokens.usdrif.toLowerCase()]: cfg.policy.hourlyUsdrif, [cfg.tokens.rif.toLowerCase()]: cfg.policy.hourlyRif },
+      {
+        [cfg.tokens.usdt0.toLowerCase()]: cfg.policy.hourlyUsdt0,
+        [cfg.tokens.usdrif.toLowerCase()]: cfg.policy.hourlyUsdrif,
+        [cfg.tokens.rif.toLowerCase()]: cfg.policy.hourlyRif,
+        // Spot fills are counted in USD (./spot.ts), whatever token they pay.
+        [SPOT_BUDGET_KEY]: cfg.policy.spot.hourlyUsd6,
+      },
       state.spends ?? [],
     );
     this.routeBudget = new Budget({ [ROUTE_FILLS]: cfg.route?.hourlyFills ?? 0n }, state.routeSpends ?? []);
@@ -197,7 +205,13 @@ export class Engine {
       this.route = r;
       this.strategies.push({ name: "route", consider: (e) => r.consider(e), accepts: (e) => r.accepts(e), beginSweep: () => r.beginSweep() });
     }
-    this.rebalancer = new Rebalancer(cfg, chain, log, this.guard, { ...(state.rebalance ?? {}) }, mark);
+    // SPOT reserves (./spot.ts) value tickets and rebalance with the route's pool quoting.
+    const route = this.route;
+    const dexQuote = route ? (a: Address, b: Address, n: bigint) => route.dexQuote(a, b, n) : undefined;
+    if (this.filler && route && cfg.policy.spot.reserves.length > 0) {
+      this.filler.attachSpot(new SpotFiller(cfg, chain, this.budget, this.guard, this.gasRatios, { dexQuote: dexQuote!, nativeToToken: (w, t) => route.nativeToToken(w, t) }));
+    }
+    this.rebalancer = new Rebalancer(cfg, chain, log, this.guard, { ...(state.rebalance ?? {}) }, mark, dexQuote);
     this.quoter = new Quoter(cfg, chain, this.guard, this.quotes, { route: this.route, inventory: this.filler }, this.now, (m) => this.o.log(m));
     this.cursor = state.cursor;
     this.recentEvents = [...(state.recent ?? [])];

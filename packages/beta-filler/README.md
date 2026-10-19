@@ -816,6 +816,8 @@ Inventory strategy:
 | `SELL_RIF`, `BUY_RIF` | `0`, `0` | the RIF rail: makers buy RIF from / sell RIF to the wallet (USD₮0, pull orders) |
 | `RIF_SHARE_LOW_BPS`, `RIF_SHARE_TARGET_BPS`, `RIF_SHARE_HIGH_BPS` | `1500`, `2000`, `2500` | the RIF band, as a share of the wallet's value |
 | `HOURLY_RIF`, `RIF_RAIL_HAIRCUT_BPS`, `USDT0_RESERVE` | `20000`, `20`, `0` | RIF outflow cap per hour; the haircut on async MoC conversions; USD₮0 the rail never spends |
+| `SPOT_RESERVES` | `""` (off) | spot reserves, `token:targetUsd:fee,…` (INVENTORY-POLICY §9) |
+| `SPOT_BAND_BPS`, `SPOT_MAX_TICKET_USD`, `SPOT_CHARGE_GAS`, `SPOT_FILL_GAS`, `SPOT_REBALANCE_GAS`, `SPOT_HOURLY_USD`, `SPOT_SLIPPAGE_BPS` | `5000`, `100`, `250000`, `150000`, `130000`, `1000`, `50` | spot band, ticket cap, the quote's gas charge, the fill's pre-estimate, the rebalance swap, the hourly USD cap, the swap floor |
 | `RAIL_SWAP_SLIPPAGE_BPS`, `USDRIF_PEG_TOLERANCE_BPS` | `30`, `50` | the band's USD₮0 ⇄ USDRIF pool swaps |
 | `RAIL_USDRIF_BATCH` | `100` | USDRIF collected before the band redeems / swaps it (a MoC op costs ~$2.4); at once below the band |
 | `USDRIF`, `USDT0`, `RIF`, `MOC_CORE`, `MOC_QUEUE` | Rootstock mainnet | overrides |

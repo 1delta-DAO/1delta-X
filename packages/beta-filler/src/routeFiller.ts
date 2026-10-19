@@ -359,6 +359,25 @@ export class RouteFiller {
     return selectPaths(paths, edges, amountIn, { k: this.rc.maxCandidates, hopPenalty, forced });
   }
 
+  /**
+   * The best exact-input POOL output for `amountIn` of `tokenIn` → `tokenOut` over the
+   * pair's pool paths (configured + graph; no APIs, no gas netting), or `undefined` when
+   * none quotes. The spot strategy's valuation — what a received token is worth swapped
+   * back — and the rebalancer's swap quote (./spot.ts).
+   */
+  async dexQuote(tokenIn: Address, tokenOut: Address, amountIn: bigint): Promise<bigint | undefined> {
+    if (amountIn === 0n) return 0n;
+    if (tokenIn.toLowerCase() === tokenOut.toLowerCase()) return amountIn;
+    await this.init();
+    await this.ensureGraph();
+    const paths = this.pathsFor(tokenIn, tokenOut);
+    if (paths.length === 0) return undefined;
+    const quotes = await this.quoteMany(this.select(paths, amountIn, tokenOut, 0n), amountIn, "in");
+    let best: bigint | undefined;
+    for (const q of quotes) if (q.ok && (best === undefined || q.amount > best)) best = q.amount;
+    return best;
+  }
+
   /** Quote `paths` for `amount` — exact-input forward (`"in"`) or exact-output backward (`"out"`) — batched (./poolQuote.ts). */
   private quoteMany(paths: readonly RoutePath[], amount: bigint, kind: "in" | "out"): Promise<PathQuote[]> {
     return quotePaths(this.chain.pub as unknown as QuoteClient, this.quoters, this.rc.discovery.multicall, paths, amount, kind);

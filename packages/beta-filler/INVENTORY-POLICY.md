@@ -143,7 +143,13 @@ amountOut = gross − ⌈gas × (1 + 3 %)⌉
 - **Before funding a token** to the EOA: check every automatic rule that moves that token (§4).
 - **Before resizing the wallet:** the RIF target is a share of value, so funding USD₮0 alone moves RIF below 15 % and triggers a refill swap at the next rebalance. Fund both, or expect it.
 
-## 9. Planned: spot reserves for small tickets (2026-10-19)
+## 9. Spot reserves for small tickets (2026-10-19; built, `src/spot.ts`)
+
+**Status:** built on branch `spot-inventory`, configured in `wrangler.toml` (`SPOT_RESERVES`),
+fork-proven (`e2e/spot-fork.sh`: a 20 USD₮0 → WRBTC order filled from the reserve against the
+live Settlement, 157k gas on the fork's Cancun schedule for a first-time maker). Live once
+merged and deployed. On the first run the rebalancer buys each reserve up to its target from
+USD₮0.
 
 **Idea:** keep a small reserve of the busiest assets in the operator wallet. Tickets under
 ~$100 are then filled from it (`fillUpTo`, ~92k gas) instead of routed (222k–409k gas), with

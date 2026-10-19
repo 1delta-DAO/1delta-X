@@ -5,6 +5,7 @@ import type { Address, Hex } from "viem";
 import type { PricedCandidate } from "./quote";
 
 import { sanitize } from "./sanitize";
+import type { SpotFiller } from "./spot";
 
 import {
   allowanceCall,
@@ -154,14 +155,28 @@ export class Filler {
    * ours only once something else has funded it.
    */
   accepts(entry: BookEntry): boolean {
-    return !entry.fillPermit && this.precheck(entry).ok && (entry.state?.fillableAmount ?? 0n) > 0n;
+    if ((entry.state?.fillableAmount ?? 0n) === 0n) return false;
+    if (!entry.fillPermit && this.precheck(entry).ok) return true;
+    return !!this.spot?.classify(entry, this.chain.me).ok;
+  }
+
+  /** SPOT reserves (./spot.ts): wired by the engine once the route strategy (its pool quoting) exists. */
+  private spot?: SpotFiller;
+
+  attachSpot(spot: SpotFiller): void {
+    if (spot.enabled) this.spot = spot;
   }
 
   async consider(entry: BookEntry): Promise<FillOutcome> {
     const { orderHash } = entry;
     const order = entry.announce.order;
     const cls = this.precheck(entry);
-    if (!cls.ok) return this.skip(orderHash, cls.reason, true);
+    if (!cls.ok) {
+      // Not one of the inventory directions: a SPOT ticket (./spot.ts), if it is one.
+      const sc = this.spot?.classify(entry, this.chain.me);
+      if (sc?.ok) return this.considerSpot(entry, sc.tokenIn, sc.tokenOut);
+      return this.skip(orderHash, cls.reason, true);
+    }
     if (entry.fillPermit) return this.skip(orderHash, "funded only by the maker's ERC-2612 permit: an EOA fillUpTo cannot carry it (route strategy only)", true);
     const fillable = entry.state?.fillableAmount ?? 0n;
     if (fillable === 0n) return this.skip(orderHash, "nothing fillable", true);
@@ -180,6 +195,33 @@ export class Filler {
       this.guard.onSimFail(orderHash, "inventory", Date.now());
       const reason = sanitize(e instanceof Error ? e.message.split("\n")[0]! : String(e));
       this.log(`✗ [inventory] ${orderHash} ${reason}`);
+      return { orderHash, status: "failed", reason, strategy: "inventory" };
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** A spot ticket: the same lock, admission and failure handling as {@link consider}. */
+  private async considerSpot(entry: BookEntry, tokenIn: Address, tokenOut: Address): Promise<FillOutcome> {
+    const { orderHash } = entry;
+    if ((entry.state?.fillableAmount ?? 0n) === 0n) return this.skip(orderHash, "nothing fillable", true);
+    if (this.busy) return { orderHash, status: "skipped", reason: "busy", strategy: "inventory" };
+    this.busy = true;
+    try {
+      const blocked = this.guard.admit(orderHash, "inventory", Date.now());
+      if (blocked) return { ...this.skip(orderHash, blocked.reason), final: blocked.global };
+      const host = {
+        skip: (h: Hex, r: string, rest?: boolean) => this.skip(h, r, rest),
+        sendApproval: (h: Hex, t: Hex, a: { data: Hex; amount: bigint; reset: boolean }, gp: bigint) => this.sendApproval(h, t, a, gp),
+        onSpend: () => this.onSpend(),
+        log: (m: string) => this.log(m),
+      };
+      return await this.spot!.fill(host, entry, tokenIn, tokenOut);
+    } catch (e) {
+      if (isAuctionNotStarted(e)) return this.skip(orderHash, "auction not started at the latest block");
+      this.guard.onSimFail(orderHash, "inventory", Date.now());
+      const reason = sanitize(e instanceof Error ? e.message.split("\n")[0]! : String(e));
+      this.log(`✗ [inventory] spot ${orderHash} ${reason}`);
       return { orderHash, status: "failed", reason, strategy: "inventory" };
     } finally {
       this.busy = false;
@@ -223,6 +265,8 @@ export class Filler {
     const { cfg, chain } = this;
     const p = cfg.policy;
     const t = cfg.tokens;
+    // A spot pair (not claimed by a direction below): the spot reserves' quote.
+    if (this.spot?.isSpotPair(tokenIn, tokenOut)) return this.spot.quote(tokenIn, tokenOut, amountIn, gasPrice);
     if (tokenIn.toLowerCase() === t.usdt0.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice, "usdt0");
     if (tokenIn.toLowerCase() === t.usdrif.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice, "usdrif");
     if (tokenIn.toLowerCase() === t.rif.toLowerCase() && tokenOut.toLowerCase() === t.usdt0.toLowerCase()) return this.quoteRailBuy(amountIn, gasPrice);

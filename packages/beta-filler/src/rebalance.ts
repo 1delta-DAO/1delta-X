@@ -11,6 +11,7 @@ import {
   OPER_REDEEM_TP,
   mocPACtp,
   quoteRifToUsdt0,
+  quoteSingle,
   quoteUsdrifToUsdt0,
   quoteUsdt0ForUsdrif,
   quoteUsdt0ToUsdrif,
@@ -45,7 +46,7 @@ const minOf = (a: bigint, b: bigint) => (a < b ? a : b);
 
 /** What one rebalancer action did. */
 export interface RebalanceOutcome {
-  action: "redeem" | "sell-rif" | "mint" | "refill" | "drain";
+  action: "redeem" | "sell-rif" | "mint" | "refill" | "drain" | "spot";
   status: "sent" | "dry-run" | "held" | "skipped" | "failed";
   /** The tx sent (the action itself, or the approval it needs first). */
   tx?: Hex;
@@ -82,6 +83,8 @@ export class Rebalancer {
     private readonly guard: Guard,
     readonly state: RebalanceState = {},
     private readonly persist: () => void = () => {},
+    /** Best pool quote (routeFiller.ts `dexQuote`): values the SPOT reserves; absent = no spot step. */
+    private readonly dexQuote?: (tokenIn: Address, tokenOut: Address, amountIn: bigint) => Promise<bigint | undefined>,
   ) {}
 
   /**
@@ -89,11 +92,17 @@ export class Rebalancer {
    * ({@link railStep}) owns USDRIF and RIF; else redeem USDRIF if needed, then sell RIF if needed.
    */
   async step(): Promise<RebalanceOutcome | undefined> {
-    if (this.cfg.policy.sellRif || this.cfg.policy.buyRif) return this.railStep();
+    if (this.cfg.policy.sellRif || this.cfg.policy.buyRif) {
+      const r = await this.railStep();
+      if (r && (r.status === "sent" || r.status === "failed")) return r;
+      // The rail had nothing to send: the spot reserves' turn.
+      return (await this.spotStep()) ?? r;
+    }
     const r = await this.redeemIfNeeded();
     if (r && (r.status === "sent" || r.status === "failed")) return r;
     const s = await this.sellRifIfNeeded();
-    return s ?? r;
+    if (s && (s.status === "sent" || s.status === "failed")) return s;
+    return (await this.spotStep()) ?? s ?? r;
   }
 
   /**
@@ -121,7 +130,9 @@ export class Rebalancer {
     const band = rifBand(m, p);
     const dust18 = p.minFillUsdt0 * 10n ** 12n;
     const where = `RIF ${fmtUnits(m.rif, 18)} = ${band.shareBps} bps of $${fmtUnits(band.total18, 18)}`;
-    const usdrifFree = m.usdrif > p.usdrifReserve ? m.usdrif - p.usdrifReserve : 0n;
+    // USDRIF held as a SPOT reserve (up to its band's top) is not the rail's to move.
+    const usdrifKeep = maxOf(p.usdrifReserve, this.spotKeep18(cfg.tokens.usdrif));
+    const usdrifFree = m.usdrif > usdrifKeep ? m.usdrif - usdrifKeep : 0n;
     // 2. USDRIF on hand: in batches, or at once when RIF is below the band.
     const urgent = band.gap18 >= dust18 && band.shareBps < p.rifShareLowBps;
     if (usdrifFree >= dust18 && (urgent || force || usdrifFree >= p.railUsdrifBatch)) {
@@ -150,6 +161,63 @@ export class Rebalancer {
       return this.mint(qTP, p.redeemSlippageBps, `drain (${where})`);
     }
     return force ? { action: "refill", status: "held", reason: `nothing to move (${where})` } : undefined;
+  }
+
+  /** A SPOT reserve's band top in 18-dec units of a $1 token (USDRIF), else 0 — what the rail must leave alone. */
+  private spotKeep18(token: Address): bigint {
+    const sp = this.cfg.policy.spot;
+    const r = sp.reserves.find((x) => x.token.toLowerCase() === token.toLowerCase());
+    return r ? ((r.targetUsd6 * (10_000n + sp.bandBps)) / 10_000n) * 10n ** 12n : 0n;
+  }
+
+  /**
+   * SPOT reserves (./spot.ts, INVENTORY-POLICY §9): keep each reserve inside ±SPOT_BAND_BPS
+   * of its USD target, against USD₮0 on its configured pool. Below the band: buy it back
+   * to target with USD₮0 (never USDT0_RESERVE); above: sell the excess to USD₮0. One tx
+   * per step (its router approval first — the maximum, once). Nothing under MIN_FILL_USDT0.
+   */
+  async spotStep(): Promise<RebalanceOutcome | undefined> {
+    const { cfg, chain } = this;
+    const p = cfg.policy;
+    const sp = p.spot;
+    if (sp.reserves.length === 0 || !this.dexQuote) return undefined;
+    const usdt0 = cfg.tokens.usdt0;
+    for (const r of sp.reserves) {
+      const bal = await balanceOf(chain, r.token);
+      const value = bal === 0n ? 0n : await this.dexQuote(r.token, usdt0, bal);
+      if (value === undefined) continue;
+      const low = (r.targetUsd6 * (10_000n - sp.bandBps)) / 10_000n;
+      const high = (r.targetUsd6 * (10_000n + sp.bandBps)) / 10_000n;
+      if (value < low) {
+        const u = await balanceOf(chain, usdt0);
+        const free = u > p.usdt0Reserve ? u - p.usdt0Reserve : 0n;
+        const amountIn = minOf(r.targetUsd6 - value, free);
+        if (amountIn < p.minFillUsdt0) continue;
+        return this.spotSwap(usdt0, r.token, r.fee, amountIn, `spot reserve ${r.token} at $${fmtUnits(value, 6)} < $${fmtUnits(low, 6)}: buy back to $${fmtUnits(r.targetUsd6, 6)}`);
+      }
+      if (value > high) {
+        const excess = value - r.targetUsd6;
+        if (excess < p.minFillUsdt0) continue;
+        const amountIn = (bal * excess) / value;
+        return this.spotSwap(r.token, usdt0, r.fee, amountIn, `spot reserve ${r.token} at $${fmtUnits(value, 6)} > $${fmtUnits(high, 6)}: sell down to $${fmtUnits(r.targetUsd6, 6)}`);
+      }
+    }
+    return undefined;
+  }
+
+  /** One spot rebalance swap on the reserve's pool, floored at SPOT_SLIPPAGE_BPS under its quote. */
+  private async spotSwap(tokenIn: Address, tokenOut: Address, fee: number, amountIn: bigint, why: string): Promise<RebalanceOutcome> {
+    const { cfg, chain } = this;
+    const quote = await quoteSingle(chain, cfg, tokenIn, tokenOut, fee, amountIn);
+    if (quote === 0n) return { action: "spot", status: "held", reason: `${why}: no pool quote` };
+    const minOut = (quote * (10_000n - cfg.policy.spot.slippageBps)) / 10_000n;
+    const msg = `${why}: swap ${amountIn} ${tokenIn} → ≥${minOut} ${tokenOut} (quote ${quote}, fee ${fee})`;
+    const data = encodeFunctionData({
+      abi: SWAP_ROUTER02_ABI,
+      functionName: "exactInputSingle",
+      args: [{ tokenIn, tokenOut, fee, recipient: chain.me, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
+    });
+    return this.act("spot", "spot", msg, { token: tokenIn, spender: cfg.uniswap.router, needed: amountIn, target: amountIn }, cfg.uniswap.router, data);
   }
 
   /** A rail pool swap USDT0 ⇄ USDRIF (exact in), refused off the peg, `RAIL_SWAP_SLIPPAGE_BPS` floor. */

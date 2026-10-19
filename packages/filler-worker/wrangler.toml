@@ -204,6 +204,21 @@ RIF_RAIL_HAIRCUT_BPS = "20"
 USDT0_RESERVE = "100"
 RAIL_SWAP_SLIPPAGE_BPS = "30"
 RAIL_USDRIF_BATCH = "100"
+# SPOT RESERVES (INVENTORY-POLICY §9): tickets ≤ SPOT_MAX_TICKET_USD between any two of
+# {USD₮0, these reserves} — not claimed by another inventory direction — filled from the wallet
+# (fillUpTo, ~92k–157k gas) instead of routed (222k–409k), valued at the pool, QUOTED at
+# SPOT_CHARGE_GAS (about a route fill) so the price stays the DEX's and the gas gap is the
+# margin. Each reserve is kept within ±SPOT_BAND_BPS of its USD target against USD₮0 on its
+# pool (token:targetUsd:fee). The USDRIF reserve's band top is left alone by the RIF rail.
+# ⚠ On first run the rebalancer BUYS each reserve up to target from USD₮0 (above USDT0_RESERVE).
+SPOT_RESERVES = "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:50:500"
+SPOT_BAND_BPS = "5000"
+SPOT_MAX_TICKET_USD = "100"
+SPOT_CHARGE_GAS = "250000"
+SPOT_FILL_GAS = "150000"
+SPOT_REBALANCE_GAS = "130000"
+SPOT_HOURLY_USD = "1000"
+SPOT_SLIPPAGE_BPS = "50"
 USDRIF_PEG_TOLERANCE_BPS = "50"
 
 # ── gas policy (shared by both strategies and the rebalancer) ───────────────

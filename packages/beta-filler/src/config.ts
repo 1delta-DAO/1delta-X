@@ -350,6 +350,58 @@ export interface Policy {
   railSwapSlippageBps: bigint;
   /** Refuse a rail swap whose pool price is more than this away from $1 per USDRIF (bps) — the peg guard. */
   usdrifPegToleranceBps: bigint;
+  /** SPOT reserves (INVENTORY-POLICY §9): small reserves the wallet fills small tickets from. */
+  spot: SpotPolicy;
+}
+
+/** One spot reserve: a token held around a USD target, rebalanced against USD₮0 on one pool. */
+export interface SpotReserve {
+  token: Address;
+  /** Target value, USD₮0 units (6 dec). */
+  targetUsd6: bigint;
+  /** Fee tier of the token/USD₮0 pool the rebalancer swaps on. */
+  fee: number;
+}
+
+/**
+ * SPOT (2026-10-19, INVENTORY-POLICY §9): tickets of `minFill`..`maxTicketUsd6` between any
+ * two of {USD₮0, the reserves}, not claimed by another inventory direction, are filled from
+ * the wallet (`fillUpTo`, ~92k gas) instead of routed (222k–409k), valued at the live pool
+ * quote for swapping the received token back, and QUOTED like a route fill (`chargeGas`) —
+ * the gas gap is the margin. Reserves are kept in a ±`bandBps` band around their target.
+ */
+export interface SpotPolicy {
+  /** `SPOT_RESERVES` = `token:targetUsd:fee,…`; empty = spot off. */
+  reserves: SpotReserve[];
+  /** `SPOT_BAND_BPS` (default 5000): rebalance below target × (1 − band) / above × (1 + band). */
+  bandBps: bigint;
+  /** `SPOT_MAX_TICKET_USD` (default 100), USD₮0 units. */
+  maxTicketUsd6: bigint;
+  /** `SPOT_CHARGE_GAS` (default 250000): the gas a spot QUOTE charges — about a route fill's. */
+  chargeGas: bigint;
+  /** `SPOT_FILL_GAS` (default 150000): the pre-simulation estimate of a spot fill (measured ~92k). */
+  fillGas: bigint;
+  /** `SPOT_REBALANCE_GAS` (default 130000): one rebalance swap, shared pro rata by the fills that cause it. */
+  rebalanceGas: bigint;
+  /** `SPOT_HOURLY_USD` (default 1000): rolling one-hour spot outflow cap, USD₮0 units. */
+  hourlyUsd6: bigint;
+  /** `SPOT_SLIPPAGE_BPS` (default 50): the rebalance swap's floor under its quote. */
+  slippageBps: bigint;
+}
+
+/** `SPOT_RESERVES`: `token:targetUsd:fee` entries (fee = the token/USD₮0 pool tier). */
+export function parseSpotReserves(raw: string | undefined): SpotReserve[] {
+  if (!raw || !raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((x) => {
+      const [t, usd, fee] = x.split(":");
+      if (!t || !isAddress(t, { strict: false })) throw new Error(`SPOT_RESERVES: not an address: ${t}`);
+      if (!usd || !/^\d+(\.\d{1,6})?$/.test(usd)) throw new Error(`SPOT_RESERVES: bad USD target for ${t}: ${usd}`);
+      return { token: getAddress(t), targetUsd6: parseFixed(usd, 6), fee: parseFee(fee ?? "", "SPOT_RESERVES") };
+    });
 }
 
 export interface Config {
@@ -872,6 +924,16 @@ export function loadConfig(env: Env): Config {
     railSwapSlippageBps: bps(env, "RAIL_SWAP_SLIPPAGE_BPS", 30),
     railUsdrifBatch: fixed(env, "RAIL_USDRIF_BATCH", "100", USDRIF_DECIMALS),
     usdrifPegToleranceBps: bps(env, "USDRIF_PEG_TOLERANCE_BPS", 50),
+    spot: {
+      reserves: parseSpotReserves(env.SPOT_RESERVES),
+      bandBps: bps(env, "SPOT_BAND_BPS", 5000),
+      maxTicketUsd6: fixed(env, "SPOT_MAX_TICKET_USD", "100", USDT0_DECIMALS),
+      chargeGas: posInt(env, "SPOT_CHARGE_GAS", 250_000),
+      fillGas: posInt(env, "SPOT_FILL_GAS", 150_000),
+      rebalanceGas: posInt(env, "SPOT_REBALANCE_GAS", 130_000),
+      hourlyUsd6: fixed(env, "SPOT_HOURLY_USD", "1000", USDT0_DECIMALS),
+      slippageBps: bps(env, "SPOT_SLIPPAGE_BPS", 50),
+    },
   };
   if (!(policy.rifShareLowBps <= policy.rifShareTargetBps && policy.rifShareTargetBps <= policy.rifShareHighBps && policy.rifShareHighBps <= 10_000n)) {
     throw new Error("RIF_SHARE_LOW_BPS ≤ RIF_SHARE_TARGET_BPS ≤ RIF_SHARE_HIGH_BPS ≤ 10000");
