@@ -192,10 +192,11 @@ switch (cmd) {
     await rebalanceAction(() => engine.rebalancer.spotStep());
     break;
   case "rebalance-rif":
-    // The RIF band to its target now: each leg (swap / MoC op) awaited. A MoC op then
-    // waits ~2.5 min in its queue; the next leg runs on a later `rebalance-rif` / `run`.
-    await rebalanceAction(() => engine.rebalancer.railStep(true));
-    await rebalanceAction(() => engine.rebalancer.railStep());
+    // The RIF band to its target now (the only way it is re-centred): each leg (swap /
+    // MoC op) awaited. A MoC op then waits ~2.5 min in its queue; the next leg runs on a
+    // later `run` (the re-centring stays open in the state until the band is at target).
+    await rebalanceAction(() => engine.rebalancer.rebalanceRif());
+    await rebalanceAction(() => engine.rebalancer.step());
     break;
   case "mint":
     if (!arg) throw new Error("usage: mint <USDRIF amount, e.g. 250>");

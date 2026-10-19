@@ -3,7 +3,7 @@
 # mainnet, against the LIVE Settlement / Permit3 / Lens, plus a fresh AggregatorFillSolver
 # on the live Settlement (the spot strategy values tickets with the route's pool quoting,
 # which needs a solver the anvil operator runs): the operator holds a small WRBTC reserve,
-# a maker signs a 20 USD₮0 → WRBTC PULL order, and the REAL filler fills it FROM THE
+# a maker signs a 20 USD₮0 → WRBTC (SPOT_TOKEN=RIF: → RIF, rail on) PULL order, and the REAL filler fills it FROM THE
 # RESERVE (inventory strategy, `spot` path) — not through the route.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,25 +42,44 @@ echo "   solver $SOLVER"
 
 OP_WRBTC_HOLDER=0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd
 USDT0=0x779Ded0c9e1022225f8E0630b35a9b54bE713736
-# The operator's spot reserve: 0.0006 WRBTC (~$50), and USD₮0 above its reserve.
+RIF=0x2AcC95758f8b5F583470ba265EB685a8F45fC9D5
+RIF_HOLDER=0x57079b2d3071eb06cce6dbafb9b0306bcc49b020
+# SPOT_TOKEN=RIF: the ticket is USD₮0 → RIF with the RIF RAIL ON (SELL_RIF / BUY_RIF) and
+# RIF a spot reserve — spot takes it from the rail (2026-10-20). Default WRBTC.
+SPOT_TOKEN=${SPOT_TOKEN:-WRBTC}
 cast rpc anvil_impersonateAccount $OP_WRBTC_HOLDER --rpc-url "$RPC" >/dev/null
-cast send $WRBTC "transfer(address,uint256)" "$OPERATOR" 600000000000000 --from $OP_WRBTC_HOLDER --unlocked --rpc-url "$RPC" >/dev/null
 cast send $USDT0 "transfer(address,uint256)" "$OPERATOR" 300000000 --from $OP_WRBTC_HOLDER --unlocked --rpc-url "$RPC" >/dev/null
+if [ "$SPOT_TOKEN" = RIF ]; then
+  # The operator's spot reserve: 1200 RIF (~$90), and USD₮0 above its reserve.
+  OUT_TOKEN=$RIF
+  cast rpc anvil_impersonateAccount $RIF_HOLDER --rpc-url "$RPC" >/dev/null
+  cast rpc anvil_setBalance $RIF_HOLDER 0xDE0B6B3A7640000 --rpc-url "$RPC" >/dev/null
+  cast send $RIF "transfer(address,uint256)" "$OPERATOR" 1200000000000000000000 --from $RIF_HOLDER --unlocked --rpc-url "$RPC" >/dev/null
+  EXTRA_ENV="SELL_RIF=1 BUY_RIF=1"
+  RESERVES="$WRBTC:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:50:500,$RIF:96:3000:2500"
+else
+  # The operator's spot reserve: 0.0006 WRBTC (~$50), and USD₮0 above its reserve.
+  OUT_TOKEN=$WRBTC
+  cast send $WRBTC "transfer(address,uint256)" "$OPERATOR" 600000000000000 --from $OP_WRBTC_HOLDER --unlocked --rpc-url "$RPC" >/dev/null
+  EXTRA_ENV=""
+  RESERVES="$WRBTC:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:50:500"
+fi
 KEY=0x$(printf 'c0de%060x' 31); MAKER=$(cast wallet address "$KEY")
 cast rpc anvil_setBalance "$MAKER" 0xDE0B6B3A7640000 --rpc-url "$RPC" >/dev/null
-echo ">> maker $MAKER signs 20 USD₮0 → WRBTC (pull) at ${PRICE_PCT:-98} % of the pool quote"
+echo ">> maker $MAKER signs 20 USD₮0 → $SPOT_TOKEN (pull) at ${PRICE_PCT:-98} % of the pool quote"
 (cd "$PKG" && env RPC_URL=$RPC SETTLEMENT=$SETTLEMENT PERMIT3=$PERMIT3 AGGREGATOR_SOLVER=$SOLVER MAKER_KEY=$KEY MODE=pull \
-  TOKEN_IN=USDT0 TOKEN_OUT=WRBTC FUNDING=direct AMOUNT=20 NONCE=256 PRICE_PCT=${PRICE_PCT:-98} OUT="$WORK/spot.json" npx tsx e2e/sim-order.ts | tail -1)
-B0=$(cast call $WRBTC 'balanceOf(address)(uint256)' "$MAKER" --rpc-url "$RPC" | awk '{print $1}')
+  TOKEN_IN=USDT0 TOKEN_OUT=$SPOT_TOKEN FUNDING=direct AMOUNT=20 NONCE=256 PRICE_PCT=${PRICE_PCT:-98} OUT="$WORK/spot.json" npx tsx e2e/sim-order.ts | tail -1)
+B0=$(cast call $OUT_TOKEN 'balanceOf(address)(uint256)' "$MAKER" --rpc-url "$RPC" | awk '{print $1}')
 echo ">> the real filler (inventory with SPOT_RESERVES) fills it from the reserve"
 (cd "$PKG" && env PRIVATE_KEY=$OPERATOR_KEY RPC_URL=$RPC ORDERBOOK_URL=http://unused.invalid DRY_RUN=0 STATE_FILE="$WORK/state.json" \
   SETTLEMENT=$SETTLEMENT PERMIT3=$PERMIT3 LENS=$LENS AGGREGATOR_SOLVER=$SOLVER ROUTE_PROFIT_RECIPIENT=$SOLVER INVENTORY_ENABLED=1 \
-  SPOT_RESERVES="$WRBTC:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:50:500" USDT0_RESERVE=100 \
+  SPOT_RESERVES="$RESERVES" USDT0_RESERVE=100 $EXTRA_ENV \
   RPC_TIMEOUT_MS=300000 MAX_GAS_PRICE_GWEI=2 SUSHI_ENABLED=0 NORDSTERN_ENABLED=0 \
   npx tsx src/bin.ts fill-json "$WORK/spot.json") >"$WORK/fill.out" 2>&1 || true
 grep -E "spot|outcome" "$WORK/fill.out" | cut -c1-260 | tail -4
 grep -q '"status":"filled"' "$WORK/fill.out" || { echo "!! not filled (see $WORK/fill.out)"; exit 1; }
 grep -q '"strategy":"inventory"' "$WORK/fill.out" || { echo "!! filled, but not from the reserve (see $WORK/fill.out)"; exit 1; }
-B1=$(cast call $WRBTC 'balanceOf(address)(uint256)' "$MAKER" --rpc-url "$RPC" | awk '{print $1}')
-echo "   maker WRBTC +$((B1 - B0)) wei; operator WRBTC $(cast call $WRBTC 'balanceOf(address)(uint256)' $OPERATOR --rpc-url "$RPC" | awk '{print $1}'), USD₮0 $(cast call $USDT0 'balanceOf(address)(uint256)' $OPERATOR --rpc-url "$RPC" | awk '{print $1}')"
+grep -q 'sent spot' "$WORK/fill.out" || { echo "!! filled from inventory, but not by spot (see $WORK/fill.out)"; exit 1; }
+B1=$(cast call $OUT_TOKEN 'balanceOf(address)(uint256)' "$MAKER" --rpc-url "$RPC" | awk '{print $1}')
+echo "   maker $SPOT_TOKEN +$(echo "$B1 - $B0" | bc) wei; operator $SPOT_TOKEN $(cast call $OUT_TOKEN 'balanceOf(address)(uint256)' $OPERATOR --rpc-url "$RPC" | awk '{print $1}'), USD₮0 $(cast call $USDT0 'balanceOf(address)(uint256)' $OPERATOR --rpc-url "$RPC" | awk '{print $1}')"
 echo "OK"

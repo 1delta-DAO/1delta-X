@@ -276,20 +276,35 @@ export function classify(
 /**
  * Whether an ENABLED inventory direction already owns the pair (`tokenIn` → `tokenOut`,
  * the maker's view): such a pair is that direction's — priced its own way (the USDRIF exit,
- * the RIF rail) — and never the spot strategy's.
+ * the RIF rail) — and never the spot strategy's. A RIF RAIL pair is SHARED instead when RIF
+ * is itself a spot reserve (2026-10-20): spot takes the tickets up to SPOT_MAX_TICKET_USD
+ * (pool-priced, no refill charge) and the rail the rest ({@link railPair}).
  */
 export function claimedPair(tokenIn: Address, tokenOut: Address, cfg: Pick<Config, "tokens" | "policy">): boolean {
   const tin = tokenIn.toLowerCase();
   const tout = tokenOut.toLowerCase();
-  const { usdrif, usdt0, rif } = { usdrif: cfg.tokens.usdrif.toLowerCase(), usdt0: cfg.tokens.usdt0.toLowerCase(), rif: cfg.tokens.rif.toLowerCase() };
+  const { usdrif, usdt0 } = { usdrif: cfg.tokens.usdrif.toLowerCase(), usdt0: cfg.tokens.usdt0.toLowerCase() };
   const p = cfg.policy;
   return (
     (tin === usdrif && tout === usdt0 && p.buyUsdrif) ||
     (tin === usdt0 && tout === usdrif && p.sellUsdrif) ||
-    (tin === usdt0 && tout === rif && p.sellRif) ||
-    (tin === usdrif && tout === rif && p.sellRif) ||
-    (tin === rif && tout === usdt0 && p.buyRif)
+    (railPair(tokenIn, tokenOut, cfg) && !rifIsSpotReserve(cfg))
   );
+}
+
+/** A pair an enabled RIF RAIL direction trades: USD₮0 → RIF, USDRIF → RIF (SELL_RIF), RIF → USD₮0 (BUY_RIF). */
+export function railPair(tokenIn: Address, tokenOut: Address, cfg: Pick<Config, "tokens" | "policy">): boolean {
+  const tin = tokenIn.toLowerCase();
+  const tout = tokenOut.toLowerCase();
+  const { usdrif, usdt0, rif } = { usdrif: cfg.tokens.usdrif.toLowerCase(), usdt0: cfg.tokens.usdt0.toLowerCase(), rif: cfg.tokens.rif.toLowerCase() };
+  const p = cfg.policy;
+  return (tin === usdt0 && tout === rif && p.sellRif) || (tin === usdrif && tout === rif && p.sellRif) || (tin === rif && tout === usdt0 && p.buyRif);
+}
+
+/** RIF is one of the SPOT_RESERVES. */
+export function rifIsSpotReserve(cfg: Pick<Config, "tokens" | "policy">): boolean {
+  const rif = cfg.tokens.rif.toLowerCase();
+  return cfg.policy.spot.reserves.some((r) => r.token.toLowerCase() === rif);
 }
 
 /** The token we pay and the token we receive, for a direction. */

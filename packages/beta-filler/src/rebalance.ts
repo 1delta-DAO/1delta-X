@@ -31,7 +31,16 @@ export interface RebalanceState {
   pendingOp?: string;
   /** When that redemption tx was mined, ms. */
   pendingOpAt?: number;
+  /**
+   * An operator-started RIF re-centring (`rebalance-rif`) still in progress: the regular
+   * step carries its next legs (the swap, the MoC op after the queue) until the band is at
+   * target. Unset = the RIF band moves only with the flow (2026-10-20).
+   */
+  railRebalance?: { legs: number };
 }
+
+/** An operator re-centring sends at most this many txs (approvals, swaps, MoC ops), then stops. */
+export const RAIL_MAX_LEGS = 8;
 
 /**
  * Approval headroom, in batches, for a spender that is NOT approved for the maximum: an
@@ -88,14 +97,16 @@ export class Rebalancer {
   ) {}
 
   /**
-   * One step, at most one tx: with the RIF band on (SELL_RIF / BUY_RIF) the band
-   * ({@link railStep}) owns USDRIF and RIF; else redeem USDRIF if needed, then sell RIF if needed.
+   * One step, at most one tx. With the RIF band on (SELL_RIF / BUY_RIF) NOTHING runs on its
+   * own (operator's rule — unpredictable gas and conversion fees: spot since 2026-10-19,
+   * the RIF band since 2026-10-20): RIF and USDRIF move only with the flow, and the step
+   * only carries the next leg of a re-centring the operator started ({@link rebalanceRif}).
+   * SPOT reserves are never rebalanced here either (`spotStep` is an admin action). With the
+   * band off: redeem USDRIF if needed, then sell RIF if needed.
    */
   async step(): Promise<RebalanceOutcome | undefined> {
     if (this.cfg.policy.sellRif || this.cfg.policy.buyRif) {
-      // SPOT reserves are never rebalanced here: no swap runs on its own (operator's rule,
-      // 2026-10-19 — unpredictable gas and conversion fees). `spotStep` is an admin action.
-      return this.railStep();
+      return this.state.railRebalance ? this.continueRail() : undefined;
     }
     const r = await this.redeemIfNeeded();
     if (r && (r.status === "sent" || r.status === "failed")) return r;
@@ -159,6 +170,35 @@ export class Rebalancer {
       return this.mint(qTP, p.redeemSlippageBps, `drain (${where})`);
     }
     return force ? { action: "refill", status: "held", reason: `nothing to move (${where})` } : undefined;
+  }
+
+  /**
+   * ADMIN (`POST /rebalance-rif`, CLI `rebalance-rif`): re-centre the RIF band on its
+   * target. Sends the first leg now; the regular step carries the rest (a swap, the MoC op
+   * once the queue has executed the last) until nothing is left to move, a leg fails or is
+   * held for a reason other than the MoC queue, or {@link RAIL_MAX_LEGS} txs have gone out.
+   */
+  async rebalanceRif(): Promise<RebalanceOutcome | undefined> {
+    this.state.railRebalance = { legs: 0 };
+    this.persist();
+    return this.continueRail();
+  }
+
+  /** One leg of an operator re-centring ({@link rebalanceRif}); ends it when done. */
+  private async continueRail(): Promise<RebalanceOutcome | undefined> {
+    const run = this.state.railRebalance;
+    if (!run) return undefined;
+    const r = await this.railStep(true);
+    // Waiting is not done: a MoC op in its queue, or a step the guard skipped (a tx outstanding, a backoff, the gas-price cap).
+    const queued = (r?.status === "held" && !!r.reason?.startsWith("MoC op")) || r?.status === "skipped";
+    const moved = r?.status === "sent" || r?.status === "dry-run";
+    if (moved) run.legs++;
+    if ((!queued && !moved) || run.legs >= RAIL_MAX_LEGS) {
+      this.state.railRebalance = undefined;
+      this.log(`rebalance-rif: done after ${run.legs} tx(s)${r?.reason ? ` (${r.reason})` : ""}`);
+    }
+    this.persist();
+    return r;
   }
 
   /** A SPOT reserve's band top in 18-dec units of a $1 token (USDRIF), else 0 — what the rail must leave alone. */

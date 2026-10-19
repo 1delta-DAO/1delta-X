@@ -51,9 +51,9 @@ The operator EOA fills PULL orders directly (`fillUpTo`) from its own balances.
 | --- | --- | --- | --- | --- |
 | `buyUsdrif` | sells USDRIF | USD₮0 → USDRIF | ≤ `MAX_BUY_PRICE` 0.995, and the MoC exit edge ≥ 30 bps | **off** (2026-10-20: USDRIF ⇄ USD₮0 is spot's, §9) |
 | `sellUsdrif` | buys USDRIF | USDRIF → USD₮0 | ≥ `MIN_SELL_PRICE` 1.003 | off |
-| `sellRif` (RIF rail) | buys RIF with USD₮0 | RIF → USD₮0 | MoC replacement cost: USD₮0 → USDRIF (0.05 % pool) → `redeemTP`, + 0.2 % MoC fee + **20 bps** haircut | **on** |
-| `sellRifUsdrif` | buys RIF with USDRIF | RIF → USDRIF | one `redeemTP` of the USDRIF received (no pool leg), fee + haircut | **on** |
-| `buyRif` | sells RIF for USD₮0 | USD₮0 → RIF | replacement cost while RIF ≤ target; MoC exit (`mintTP` → pool) above it; refused past the high mark | **on** |
+| `sellRif` (RIF rail) | buys RIF with USD₮0 | RIF → USD₮0 | MoC replacement cost: USD₮0 → USDRIF (0.05 % pool) → `redeemTP`, + 0.2 % MoC fee + **20 bps** haircut | **on**, tickets above $100 (spot takes the smaller ones, §9) |
+| `sellRifUsdrif` | buys RIF with USDRIF | RIF → USDRIF | one `redeemTP` of the USDRIF received (no pool leg), fee + haircut | **on**, above $100 |
+| `buyRif` | sells RIF for USD₮0 | USD₮0 → RIF | replacement cost while RIF ≤ target; MoC exit (`mintTP` → pool) above it; refused past the high mark | **on**, above $100 |
 
 Every inventory fill also has to pass:
 - **Size:** `MIN_FILL_USDT0` **5** to `MAX_FILL_USDT0` **500** USD₮0 per fill.
@@ -68,9 +68,9 @@ counted separately.
 
 | Asset | Target | Band / limits | Why |
 | --- | --- | --- | --- |
-| **RIF** | **20 %** of value | refill below **15 %**, drain above **25 %** | RIF is volatile: the rail needs a float, but only a minority. |
+| **RIF** | **20 %** of value | **15–25 %**; moves with the flow, re-centred by the operator (`rebalance-rif`); as a spot reserve $96 ±25 % | RIF is volatile: the rail needs a float, but only a minority. |
 | **USD₮0** | the rest (~80 %) | never spend below **100** USD₮0 (`USDT0_RESERVE`) | Pays buys and refills; the reserve keeps the `buyUsdrif` side alive. |
-| **USDRIF** | ≈ 0 | held until **100** (`RAIL_USDRIF_BATCH`) or RIF < 15 %, then redeemed (below target) or swapped to USD₮0 (above) | A MoC operation costs ≈ $1.5–2.4 (exec fee 8.9e12 wei + gas): batch it. |
+| **USDRIF** | spot reserve **$100 ±100 %** (§9) | the rest is redeemed (below the RIF target) or swapped to USD₮0 by an operator re-centring | A MoC operation costs ≈ $1.5–2.4 (exec fee 8.9e12 wei + gas): batch it. |
 | **RBTC (gas)** | **≥ 0.002 RBTC** | alert below **0.001** (`ALERT_MIN_RBTC`) | Route fills cost 6–9 µRBTC, heavy API routes ~26 µRBTC. 0.002 ≈ 100–250 fills ≈ the hourly gas cap. |
 | WRBTC | 0 | n/a | Only dust from unwraps. |
 
@@ -81,8 +81,12 @@ from ~$1.5–2k up, where pool slippage grows. It pays off when the 20 % RIF flo
 
 ## 4. Rebalancing (`src/rebalance.ts`, `railStep`)
 
-The rebalancer runs every 30 s (`REBALANCE_SECONDS`), only when no transaction is
-outstanding, and sends one transaction per step, in this order:
+**Nothing runs on its own (2026-10-20).** RIF and USDRIF move only with the flow, like the
+spot reserves (operator's rule: unpredictable gas and conversion fees). The operator starts a
+re-centring with `scripts/admin.sh rebalance-rif`; the rebalancer (every 30 s,
+`REBALANCE_SECONDS`, only when no transaction is outstanding) then carries its legs, one
+transaction per step, until the band is at target, a leg fails or is held for another reason
+than the MoC queue, or 8 transactions have gone out (`RAIL_MAX_LEGS`). Each leg, in this order:
 
 1. **Hold** while a MoC redeem or mint is in its queue (~2.5 min).
 2. **USDRIF on hand** (≥ the 100 batch, or at once below 15 %): below target, `redeemTP` the
@@ -96,7 +100,7 @@ Guards on every step:
 - swap slippage floor **30 bps**, redeem/mint slippage **50 bps**;
 - **RIF is never sold automatically.** The 2026-10-14 incident: the old rule sold a fresh 1,251 RIF float within a minute. `RIF_SELL_MIN` is effectively off.
 
-Admin: `scripts/admin.sh rebalance-rif` moves the band to target now.
+A re-centring moves the band to TARGET from anywhere (inside the band too).
 
 ## 5. Risk limits
 
@@ -140,8 +144,8 @@ amountOut = gross − ⌈gas × (1 + 3 %)⌉
 
 - **Daily:** `scripts/admin.sh status`. Check `rifRail.nowBps` (15–25 %), `balances.RBTC` (≥ 0.001), `lastError`, `recent.reverts`.
 - **Top up RBTC** below 0.002. As of 2026-10-19 the wallet holds 0.00026, **below the alert line**.
-- **Before funding a token** to the EOA: check every automatic rule that moves that token (§4).
-- **Before resizing the wallet:** the RIF target is a share of value, so funding USD₮0 alone moves RIF below 15 % and triggers a refill swap at the next rebalance. Fund both, or expect it.
+- **Before funding a token** to the EOA: nothing moves it on its own (§4, §9); only fills and your own `rebalance-rif` / `rebalance-spot`.
+- **Before resizing the wallet:** the RIF target is a share of value, so funding USD₮0 alone moves RIF below 15 %. Run `rebalance-rif` (or fund RIF too), and resize the RIF spot reserve (`SPOT_RESERVES`) to ~20 % of the new value.
 
 ## 9. Spot reserves for small tickets (2026-10-19; built, `src/spot.ts`)
 
@@ -191,7 +195,7 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 | USD₮0 | the hub; never below the 100 reserve | — |
 | WRBTC | **$60** | WRBTC/USD₮0 0.3 % (Oku) |
 | USDRIF | **$100 ±100 %** (2026-10-20; its own band, a $1 token). The RIF rail leaves it alone up to the band top. | USDRIF/USD₮0 0.05 % |
-| RIF | the RIF rail's 15–25 % band (§3) | MoC / pools |
+| RIF | **$96 ±25 %** (2026-10-20; ≈ the rail's 15–25 % share band). Spot takes RIF tickets ≤ $100 — the RIF rail's pairs too — and the rail the larger ones. | RIF/USD₮0 0.3 % (Oku) |
 
 - **Tickets:** $5–100, any pair among these assets, PULL orders only.
 - **Valuation:** the live pool quote for swapping the received token back, grossed up to the pool's **pre-fee rate less the half of its fee the wallet keeps** (`SPOT_FEE_SHARE_BPS` 5000). A spot fill swaps nothing, so it pays no pool fee: half goes to the maker, half is kept as spread toward the operator's eventual re-centring swap (two-way flow nets out without one).
@@ -210,6 +214,7 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 
 | Date | Decision |
 | --- | --- |
+| 2026-10-20 | RIF is a spot reserve ($96 ±25 %): spot takes RIF tickets ≤ $100 at the pool price, the rail the larger ones (it charged small tickets 260k gas + most of a refill: $1.80 vs the route's $0.53). The RIF band no longer re-centres on its own: only `rebalance-rif`, whose legs the step then carries. |
 | 2026-10-20 | Spot beats the DEX: `SPOT_CHARGE_GAS` 250k → 150k (about a direct swap), and the price is the pool's pre-fee rate with half the fee handed to the maker (`SPOT_FEE_SHARE_BPS` 5000). |
 | 2026-10-20 | USDRIF ⇄ USD₮0 handed to spot (`BUY_USDRIF` off: its MoC-exit pricing lost small tickets to the route). USDRIF reserve $100 ±100 %; bands per reserve. |
 | 2026-10-19 | Spot reserves are never swapped on their own: they move with the flow, a fill cannot lift a received reserve past its band top, and re-centring is the operator's `rebalance-spot`. |

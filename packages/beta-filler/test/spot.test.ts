@@ -11,7 +11,8 @@ import { SWAP_ROUTER02_ABI } from "../src/chain";
 import { loadConfig, parseSpotReserves, ROOTSTOCK } from "../src/config";
 import { GasRatios } from "../src/gasRatio";
 import { Guard } from "../src/guard";
-import { Budget } from "../src/policy";
+import { Filler } from "../src/filler";
+import { Budget, claimedPair } from "../src/policy";
 import { Rebalancer } from "../src/rebalance";
 import { pathFeePpm } from "../src/routeFiller";
 import { feeShared, SPOT_BUDGET_KEY, SpotFiller, type SpotHost } from "../src/spot";
@@ -284,3 +285,31 @@ describe("spot rebalancing — an operator action only (spotStep): each reserve 
   });
 });
 
+describe("RIF as a spot reserve (2026-10-20): spot shares the RIF rail's pairs — small tickets spot, the rest the rail", () => {
+  const RAIL = loadConfig({ ...ENV, SELL_RIF: "1", BUY_RIF: "1", SPOT_RESERVES: `${WRBTC}:60:3000,${RIF}:96:3000:2500` });
+
+  it("a rail pair is claimed by the rail alone unless RIF is a spot reserve", () => {
+    const railOnly = loadConfig({ ...ENV, SELL_RIF: "1", BUY_RIF: "1" });
+    expect([claimedPair(USD0, RIF, railOnly), claimedPair(RIF, USD0, railOnly), claimedPair(USDRIF, RIF, railOnly)]).toEqual([true, true, true]);
+    expect([claimedPair(USD0, RIF, RAIL), claimedPair(RIF, USD0, RAIL), claimedPair(USDRIF, RIF, RAIL)]).toEqual([false, false, false]);
+    const s = new SpotFiller(RAIL, fakeChain({}, { received: 1n, paid: 1n }).chain, new Budget({}), new Guard(RAIL.gas), new GasRatios(RAIL.gas.defaultReceiptRatioPpm), deps);
+    expect([s.isSpotPair(USD0, RIF), s.isSpotPair(RIF, USD0), s.isSpotPair(WRBTC, RIF)]).toEqual([true, true, true]);
+  });
+
+  it("consider: spot first; a spot PASS on a rail pair goes on to the rail, a spot fill ends it", async () => {
+    let gasPriceReads = 0;
+    const chain = { pub: { getGasPrice: async () => (gasPriceReads++, 10n ** 18n) }, account: ACCOUNT, me: ACCOUNT.address, chainId: 30 } as never;
+    const e = entry(order(USD0, 150_000_000n, RIF, 2_000n * E18));
+    const stub = (out: Record<string, unknown>) => ({ enabled: true, classify: () => ({ ok: true, tokenIn: USD0, tokenOut: RIF }), fill: async () => ({ orderHash: e.orderHash, strategy: "inventory", ...out }) });
+    const pass = new Filler(RAIL, chain, new Budget({}), () => {});
+    pass.attachSpot(stub({ status: "skipped", reason: "spot: above SPOT_MAX_TICKET_USD", rest: true }) as never);
+    const railed = await pass.consider(e as never);
+    expect(railed.reason).not.toMatch(/^spot:/); // the rail looked at it (here: the 1 RBTC gas price)
+    expect(gasPriceReads).toBeGreaterThan(0);
+    gasPriceReads = 0;
+    const fill = new Filler(RAIL, chain, new Budget({}), () => {});
+    fill.attachSpot(stub({ status: "pending", tx: "0x01", final: true }) as never);
+    expect(await fill.consider(e as never)).toMatchObject({ status: "pending" });
+    expect(gasPriceReads).toBe(0);
+  });
+});

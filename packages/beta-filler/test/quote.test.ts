@@ -394,6 +394,22 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(r.ok && [r.quote.strategy, r.quote.delivery]).toEqual(["route", "direct"]);
   });
 
+  it("USDT0→RIF with RIF a SPOT reserve (2026-10-20): spot takes the small tickets at the pool, the rail the ones above SPOT_MAX_TICKET_USD", async () => {
+    const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1", SELL_RIF: "1", BUY_RIF: "1", SPOT_RESERVES: `${RIF}:96:3000:2500` });
+    const { chain } = fake({ balances: { [RIF.toLowerCase()]: 5_000n * 10n ** 18n } }); // $200 at $0.04: pays a $150 ticket
+    const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
+    const small = await e.quote(sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn: 20_000_000n, side: "buy", delivery: "auto" }));
+    if (!small.ok) throw new Error(small.reason);
+    expect(small.quote).toMatchObject({ strategy: "inventory", delivery: "pull", route: { source: "inventory-spot" } });
+    const big = await e.quote(sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn: 150_000_000n, side: "buy", delivery: "auto" }));
+    if (!big.ok) throw new Error(big.reason);
+    expect(big.quote).toMatchObject({ strategy: "inventory", route: { source: "moc-rail" } });
+    // Without RIF in SPOT_RESERVES the rail keeps the pair (spot never sees it).
+    const railOnly = await Engine.create({ cfg: loadConfig({ ...ENV, INVENTORY_ENABLED: "1", SELL_RIF: "1" }), chain, store: new MemoryStateStore(), log: () => {} });
+    const r = await railOnly.quote(sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn: 20_000_000n, side: "buy", delivery: "auto" }));
+    expect(r.ok && r.quote.route.source).not.toBe("inventory-spot");
+  });
+
   it("USDRIF→RIF `auto`: the RIF RAIL quotes one redemption's rate (no pool leg) and beats the pools", async () => {
     const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1", SELL_RIF: "1" });
     const { chain } = fake({ balances: { [RIF.toLowerCase()]: 3_000n * 10n ** 18n } });

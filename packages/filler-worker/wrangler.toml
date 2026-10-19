@@ -194,9 +194,11 @@ RIF_SELL_MAX_DISCOUNT_BPS = "150"
 #  • BUY_RIF: makers sell RIF — we pay USD₮0 and keep it, at its replacement cost while RIF is
 #    below the target share, at its MoC exit (mintTP → USDRIF → pool) above.
 # THE BAND: RIF is volatile, so it is a MINORITY of the wallet's value (USD₮0 + USDRIF + RIF at
-# the oracle): below LOW the rebalancer buys back to TARGET, above HIGH it sells down to TARGET,
-# and buys that would cross HIGH are refused. USDT0_RESERVE is never spent by the rail.
-# Admin: `scripts/admin.sh rebalance-rif` moves it to TARGET now.
+# the oracle); buys that would cross HIGH are refused. USDT0_RESERVE is never spent by the rail.
+# NOTHING MOVES IT ON ITS OWN (2026-10-20): RIF moves only with the flow; the operator
+# re-centres it with `scripts/admin.sh rebalance-rif` (the next legs follow on the regular
+# steps until the band is at TARGET). RIF is also a SPOT reserve (below): spot takes RIF
+# tickets up to SPOT_MAX_TICKET_USD at the pool price, the rail the larger ones.
 SELL_RIF = "1"
 BUY_RIF = "1"
 RIF_SHARE_LOW_BPS = "1500"
@@ -217,8 +219,9 @@ RAIL_USDRIF_BATCH = "100"
 # (1 + SPOT_BAND_BPS)) spot passes and the ticket is quoted and filled through the DEX route. The operator funds the reserves and re-centres them on demand
 # (`scripts/admin.sh rebalance-spot`: one swap of the first reserve outside its band,
 # token:targetUsd:fee). The USDRIF reserve's band top is left alone by the RIF rail.
-# WRBTC $60 ±50 % (volatile); USDRIF $100 ±100 % (a $1 token: room for two-sided flow).
-SPOT_RESERVES = "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:100:500:10000"
+# WRBTC $60 ±50 % (volatile); USDRIF $100 ±100 % (a $1 token: room for two-sided flow);
+# RIF $96 ±25 % (≈ the rail's 15–25 % share band of a ~$480 wallet; shares the rail's pairs).
+SPOT_RESERVES = "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:100:500:10000,0x2AcC95758f8b5F583470ba265EB685a8F45fC9D5:96:3000:2500"
 SPOT_BAND_BPS = "5000"
 SPOT_MAX_TICKET_USD = "100"
 SPOT_CHARGE_GAS = "150000"

@@ -52,6 +52,7 @@ import {
   railUsdrifFor,
   rebalanceShare,
   rifBand,
+  railPair,
   rifValue18,
   shareAfterBuy,
   type WalletMix,
@@ -171,12 +172,15 @@ export class Filler {
     const { orderHash } = entry;
     const order = entry.announce.order;
     const cls = this.precheck(entry);
-    if (!cls.ok) {
-      // Not one of the inventory directions: a SPOT ticket (./spot.ts), if it is one.
-      const sc = this.spot?.classify(entry, this.chain.me);
-      if (sc?.ok) return this.considerSpot(entry, sc.tokenIn, sc.tokenOut);
-      return this.skip(orderHash, cls.reason, true);
+    // A SPOT ticket (./spot.ts) first: a pair no direction claims, or a RIF rail pair while
+    // RIF is a spot reserve — then spot takes the small tickets and passes the rest
+    // (above SPOT_MAX_TICKET_USD, a reserve at its threshold) on to the rail below.
+    const sc = this.spot?.classify(entry, this.chain.me);
+    if (sc?.ok) {
+      const out = await this.considerSpot(entry, sc.tokenIn, sc.tokenOut);
+      if (!cls.ok || out.status !== "skipped" || out.reason === "busy" || out.final) return out;
     }
+    if (!cls.ok) return this.skip(orderHash, cls.reason, true);
     if (entry.fillPermit) return this.skip(orderHash, "funded only by the maker's ERC-2612 permit: an EOA fillUpTo cannot carry it (route strategy only)", true);
     const fillable = entry.state?.fillableAmount ?? 0n;
     if (fillable === 0n) return this.skip(orderHash, "nothing fillable", true);
@@ -265,8 +269,12 @@ export class Filler {
     const { cfg, chain } = this;
     const p = cfg.policy;
     const t = cfg.tokens;
-    // A spot pair (not claimed by a direction below): the spot reserves' quote.
-    if (this.spot?.isSpotPair(tokenIn, tokenOut)) return this.spot.quote(tokenIn, tokenOut, amountIn, gasPrice);
+    // A spot pair (not claimed by a direction below): the spot reserves' quote. A RIF rail
+    // pair shared with spot (RIF a spot reserve) falls back to the rail when spot passes.
+    if (this.spot?.isSpotPair(tokenIn, tokenOut)) {
+      const s = await this.spot.quote(tokenIn, tokenOut, amountIn, gasPrice);
+      if (s.ok || !railPair(tokenIn, tokenOut, this.cfg)) return s;
+    }
     if (tokenIn.toLowerCase() === t.usdt0.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice, "usdt0");
     if (tokenIn.toLowerCase() === t.usdrif.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice, "usdrif");
     if (tokenIn.toLowerCase() === t.rif.toLowerCase() && tokenOut.toLowerCase() === t.usdt0.toLowerCase()) return this.quoteRailBuy(amountIn, gasPrice);

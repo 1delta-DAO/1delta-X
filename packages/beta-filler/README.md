@@ -201,6 +201,11 @@ volatile, so it stays a minority:
 - `USDT0_RESERVE` is never spent by the rail; a pool more than `USDRIF_PEG_TOLERANCE_BPS`
   off $1 is refused; RIF is never auto-sold; `beta-filler rebalance-rif` (Worker:
   `POST /rebalance-rif`) moves the band to its target now. Fork proof: `e2e/rail-fork.sh`.
+- **Since 2026-10-20 the two band moves above run only in a re-centring the operator starts**
+  (`rebalance-rif`; the regular step carries its legs until the band is at target, at most
+  `RAIL_MAX_LEGS` txs): otherwise RIF moves only with the flow. With RIF in `SPOT_RESERVES`,
+  spot takes the rail's tickets up to `SPOT_MAX_TICKET_USD` at the pool price (INVENTORY-POLICY
+  §9) and the rail the larger ones (`e2e/spot-fork.sh` with `SPOT_TOKEN=RIF`).
 
 Without the rail:
 

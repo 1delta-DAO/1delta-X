@@ -541,13 +541,14 @@ export class Engine {
   }
 
   /**
-   * Admin: move the RIF band to its target now (rebalance.ts `railStep(force)`), even
-   * from inside the band. At most one tx — the next leg (an approval, the swap, the MoC
-   * op) follows on the regular rebalancer steps. Refused while another tx is outstanding.
+   * Admin: move the RIF band to its target now (rebalance.ts `rebalanceRif`), even from
+   * inside the band — the only way the band is re-centred. At most one tx now; the next
+   * legs (an approval, the swap, the MoC op) follow on the regular rebalancer steps until
+   * the band is at target. Refused while another tx is outstanding.
    */
   async rebalanceRifNow(): Promise<RebalanceOutcome | undefined> {
     if (this.guard.pending) return { action: "refill", status: "skipped", reason: `tx ${this.guard.pending.hash} outstanding` };
-    const r = await this.rebalancer.railStep(true);
+    const r = await this.rebalancer.rebalanceRif();
     if (r) await this.emit({ type: "rebalance", outcome: r });
     if (this.guard.pending) await this.emit({ type: "sent", pending: this.guard.pending });
     await this.saveIfDirty();
