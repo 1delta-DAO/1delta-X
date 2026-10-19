@@ -447,6 +447,9 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     if (!v.ok) throw new Error(v.reason);
     expect(v.quote).toMatchObject({ strategy: "inventory", delivery: "pull", route: { source: "inventory-spot" } });
     expect(v.quote.gasUnits).toBe(220_000n); // 250k × r 0.88: about a route fill's charge, not the ~92k it burns
+    // At a threshold (the $60 WRBTC reserve cannot cover an $80 ticket) spot passes and the DEX route answers.
+    const big = await e.quote({ ...req, amountIn: 80_000_000n });
+    expect(big.ok && [big.quote.strategy, big.quote.route.source]).toEqual(["route", "oku"]);
     // Without the reserve the route answers, at its (higher) direct-fill gas.
     const off = await (await Engine.create({ cfg: loadConfig({ ...ENV, INVENTORY_ENABLED: "1" }), chain, store: new MemoryStateStore(), log: () => {} })).quote({ ...req, amountIn: 20_000_001n });
     expect(off.ok && off.quote.strategy).toBe("route");

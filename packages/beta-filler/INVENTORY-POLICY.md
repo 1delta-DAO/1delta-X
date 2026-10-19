@@ -151,7 +151,11 @@ live Settlement, 157k gas on the fork's Cancun schedule for a first-time maker).
 merged and deployed.
 
 **No swap runs on its own** (operator's rule: unpredictable gas and conversion fees).
-- **Reserves move only with the flow.** A reserve that runs dry stops quoting its pair. A fill may never lift a *received* reserve past its band top (target × 1.5), so no volatile asset piles up.
+- **Reserves move only with the flow.** Spot passes at either threshold:
+  - the paid reserve cannot cover the ticket;
+  - the fill would lift the *received* reserve past its band top (target × 1.5), which keeps a volatile asset from piling up.
+
+  The ticket is then **quoted and filled through the DEX route** as usual: the quote prices both strategies, and a spot pass hands the order to the route in the same sweep. Spot never blocks a pair.
 - **Re-centring is an operator action.** The operator funds the reserves and moves them back to target on demand: `scripts/admin.sh rebalance-spot` swaps the first reserve outside its band against USD₮0.
 - **No rebalance charge.** `SPOT_REBALANCE_GAS` is 0: fills charge no rebalance share they do not cause.
 

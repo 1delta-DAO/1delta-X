@@ -26,9 +26,12 @@ import type { PricedCandidate } from "./quote";
  *     against the real ~92k + rebalance share, so the price stays about the DEX's and the
  *     gas gap is the margin.
  * NO SWAP RUNS ON ITS OWN (operator's rule, 2026-10-19: unpredictable gas and conversion
- * fees). Reserves move only with the flow: a reserve that runs dry stops quoting its pair,
- * and a fill may never lift a RECEIVED reserve past its band top. Putting one back on
- * target is an operator action (rebalance.ts `spotStep`, `POST /rebalance-spot`).
+ * fees). Reserves move only with the flow. At a threshold — the paid reserve cannot cover
+ * the ticket, or the fill would lift the RECEIVED reserve past its band top — spot passes,
+ * and the ticket is QUOTED AND FILLED THROUGH THE DEX ROUTE instead: the quoter prices both
+ * strategies in parallel and the dispatcher hands a spot skip (never `final`) to the route
+ * in the same sweep. Spot never blocks a pair. Re-centring a reserve is an operator action
+ * (rebalance.ts `spotStep`, `POST /rebalance-spot`).
  */
 
 /** The `Budget` key spot outflows are counted under, in USD₮0 units (6 dec). */

@@ -199,6 +199,16 @@ describe("spot fill: valued at the pool, gated at the real estimate, never below
   });
 });
 
+describe("at a threshold, spot passes and the ROUTE takes the order (never blocked)", () => {
+  it("a spot skip is not final: the dispatcher hands the order to the next strategy", async () => {
+    const { dispatch } = await import("../src/dispatch");
+    const e = entry(order(USD0, 20_000_000n, WRBTC, 193n * 10n ** 12n));
+    const spotPass = { name: "inventory" as const, consider: async () => ({ orderHash: e.orderHash, status: "skipped" as const, reason: "spot: reserve short", strategy: "inventory" as const }) };
+    const route = { name: "route" as const, consider: async () => ({ orderHash: e.orderHash, status: "pending" as const, strategy: "route" as const, tx: "0x01" as Hex }) };
+    expect(await dispatch(e as never, [spotPass, route])).toMatchObject({ status: "pending", strategy: "route" });
+  });
+});
+
 describe("spot rebalancing — an operator action only (spotStep): each reserve back within ±50 % of its target", () => {
   const rebal = (bal: Record<string, bigint>, env: Record<string, string> = {}) => {
     const c = loadConfig({ ...ENV, ...env });
