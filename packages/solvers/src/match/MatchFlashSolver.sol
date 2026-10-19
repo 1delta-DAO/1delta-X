@@ -50,7 +50,12 @@ struct FlashProviders {
 /// @notice The flash itself.
 /// @param kind      the provider — see {FlashKind}.
 /// @param token     the asset borrowed (for UNI_V3_SWAP: the swap's OUTPUT).
-/// @param amount    how much of it.
+/// @param amount    how much of it. Sized off-chain from a PREVIEW; when the core prices
+///                  the plan lower at inclusion (a decaying output), the unused principal
+///                  round-trips through the pool and is swept back, but the provider's
+///                  fee was charged on the whole `amount` (0.3 % × the decay on a v3
+///                  flash). Price the fee on the full `amount` (review 2026-10-18 D-6):
+///                  drift is then always in the filler's favour.
 /// @param pairToken UNI_V3_*: the pool's other token (for UNI_V3_SWAP: the token the
 ///                  flash swap is REPAID in). Ignored otherwise.
 /// @param fee       UNI_V3_*: the pool's fee tier.
@@ -89,6 +94,11 @@ struct PoolSwap {
 ///                   order leg token, every `swaps` path token) — e.g. the output of a
 ///                   mid-plan {MatchFlashSolver.onMatchStep} swap that is not a leg.
 /// @param minProfit  floors on the final sweep, per token ({MatchRaceGuard.SweptFloor}).
+///                   A floor on the SWEPT BALANCE, not on this call's P&L: whatever sat
+///                   here before the call (a donation, an earlier call's residue) is
+///                   swept and counted too, so a parked wei can satisfy `expected + 1`
+///                   (review 2026-10-18 D-5). The recipient still receives at least the
+///                   floor; price a plan's profit from the simulation, not from this.
 struct FlashMatch {
     FlashSource flash;
     PoolSwap[] swaps;
@@ -295,6 +305,9 @@ contract MatchFlashSolver is MatchRaceGuard {
     error BadPath();
     error BadPoolSwap();
     error SwapBelowMin(uint256 out, uint256 minOut);
+    /// @dev A hop's pool consumed less than its exact input (its price limit was hit):
+    ///      the unconsumed token would be left here, possibly outside the sweep set.
+    error PartialSwap(uint256 consumed, uint256 amountIn);
     error NotPool();
     error PoolOverBudget(uint256 owed, uint256 budget);
     error OnlyExecutor();
@@ -657,8 +670,14 @@ contract MatchFlashSolver is MatchRaceGuard {
                 zeroForOne ? MIN_SQRT_RATIO_PLUS_1 : MAX_SQRT_RATIO_MINUS_1,
                 abi.encode(tokenIn, tokenOut, fee, venue, amountIn)
             );
-        int256 got = zeroForOne ? a1 : a0;
+        (int256 paid, int256 got) = zeroForOne ? (a0, a1) : (a1, a0);
         if (got >= 0) revert BadPoolSwap();
+        // EXACT input or nothing (review 2026-10-18 F-3): a pool that stops at its price
+        // limit consumes less, and the rest of `tokenIn` would stay here — for a mid-plan
+        // {onMatchStep} hop an intermediate token that is no leg, no `job.swaps` path
+        // token and no `extraSweep` entry, so the final sweep would never move it.
+        // (`paid` cannot exceed `amountIn`: {_paySwap} caps it at the hop's budget.)
+        if (uint256(paid) != amountIn) revert PartialSwap(uint256(paid), amountIn);
         out = uint256(-got);
     }
 

@@ -15,7 +15,8 @@ import { DELTA_VERIFY_OUTPUTS_BIT, ItemOp, type Order } from "./types";
  * amounts)`, which pushes the flash principal into the Settlement pool. The canonical
  * one-order shape ({@link buildFlashMatchPlan}) is
  *
- *   schedule = [CALL 0 → onMatchStep([], [flashToken], [max]), DELIVER 0, ITEM 0 0 … ITEM 0 n−1]
+ *   schedule = [CALL 0 → onMatchStep([], [flashToken], [max]), DELIVER 0, ITEM 0 0 … ITEM 0 n−1,
+ *               PULL 0 0 … PULL 0 m−1]
  *   callTargets[0] = the solver, plan.profitRecipient = 0 (the residual returns to the solver)
  *
  * and `job.swaps` convert the proceeds back into the flash token. A v3 pool is `lock`ed
@@ -264,6 +265,7 @@ export const MATCH_FLASH_SOLVER_ABI = [
   { type: "error", name: "BadPath", inputs: [] },
   { type: "error", name: "BadPoolSwap", inputs: [] },
   { type: "error", name: "SwapBelowMin", inputs: [{ name: "out", type: "uint256" }, { name: "minOut", type: "uint256" }] },
+  { type: "error", name: "PartialSwap", inputs: [{ name: "consumed", type: "uint256" }, { name: "amountIn", type: "uint256" }] },
   { type: "error", name: "NotPool", inputs: [] },
   { type: "error", name: "PoolOverBudget", inputs: [{ name: "owed", type: "uint256" }, { name: "budget", type: "uint256" }] },
   { type: "error", name: "OnlyExecutor", inputs: [] },
@@ -289,14 +291,21 @@ const MAX_UINT256 = (1n << 256n) - 1n;
 
 /**
  * The canonical ONE-ORDER flash plan: `[CALL 0 → onMatchStep([], [flashToken], [max]),
- * DELIVER 0, ITEM 0 0 … ITEM 0 n−1]`, `callTargets = [solver]`, `profitRecipient = 0`.
- * No PULL step: the order's items produce (and credit) its input; the residual is swept
- * back to the solver and repays the flash.
+ * DELIVER 0, ITEM 0 0 … ITEM 0 n−1, PULL 0 0 … PULL 0 m−1]`, `callTargets = [solver]`,
+ * `profitRecipient = 0`. The order's items produce (and credit) its input; the residual is
+ * swept back to the solver and repays the flash.
+ *
+ * The trailing PULL per input leg (review 2026-10-18 F-4) draws only `owed − credit`
+ * (`Batch._stepPull`): zero — no transfer, no allowance spent — when the items credited
+ * the leg in full, and the SHORTFALL from the maker's wallet when a venue rounded the
+ * item's proceeds down (`owed − 1`), which without it reverts `LegUnfunded` every time.
+ * Placed after every ITEM, it satisfies each ItemPolicy's pull precondition.
  */
 export function buildFlashMatchPlan(a: { order: Order; sig: Hex; fillAmount: bigint; solver: Address; flashToken: Address; takerData?: Hex }): FlashMatchPlan {
   const n = a.order.items.length;
   const schedule = [packMatchStep(MatchStepKind.CALL, 0, 0), packMatchStep(MatchStepKind.DELIVER, 0, 0)];
   for (let k = 0; k < n; k++) schedule.push(packMatchStep(MatchStepKind.ITEM, 0, k));
+  for (let j = 0; j < a.order.legsIn.length; j++) schedule.push(packMatchStep(MatchStepKind.PULL, 0, j));
   return {
     orders: [a.order],
     sigs: [a.sig],

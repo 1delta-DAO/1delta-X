@@ -271,7 +271,9 @@ import {MatchRaceGuard} from "../base/MatchRaceGuard.sol";
 ///  measured shortfall against the core's live price is sent ({_topUp}), at most the
 ///  cap — so a DIRECT order naming this solver, the app's default, is servable from
 ///  inventory too; NATIVE: the unwrap may use WNATIVE inventory. `maxPay` still caps
-///  the total. It reopens none of the three invariants above: no call target is
+///  the total on PULL, NETTED and NATIVE; on DIRECT `maxPay` is ignored like everywhere
+///  else on that path, and the draw's only cap is `inventory` itself (review 2026-10-18
+///  D-1, pinned by `test_P1_direct_topUpIgnoresMaxPay`). It reopens none of the three invariants above: no call target is
 ///  added, no allowance survives the fill, and the one non-delta amount is bounded by
 ///  an explicit per-call cap that only an OPERATOR can set (only operators start fills,
 ///  and the operators can {sweep} the same balance anyway — the cap bounds what one
@@ -447,7 +449,9 @@ import {MatchRaceGuard} from "../base/MatchRaceGuard.sol";
 ///        it — any inflow of that token the fill paid here BEFORE the route (an
 ///        input leg in the same token) is netted out first (review 2026-10-05).
 ///        Ignored on a direct-delivery order (see the contract note), except a NATIVE
-///        one, where it floors the route's WNATIVE proceeds
+///        one, where it floors the route's WNATIVE proceeds. NOT COMPARED on an order
+///        with no output leg (an admitted zero-output order: there is no anchor output
+///        to measure) — `maxPay` likewise (review 2026-10-18 D-3)
 /// @param maxPay ceiling on what Settlement may pull from this contract in the
 ///        anchor output token — PER TOKEN, so two legs in it (maker + fee) must fit
 ///        under it together. `0` = no cap, meaning "up to THIS FILL's proceeds" —
@@ -469,7 +473,11 @@ import {MatchRaceGuard} from "../base/MatchRaceGuard.sol";
 ///        and the pool sweeps the unused part straight back; DIRECT: the leg-0 recipient's
 ///        measured shortfall against the core's live price is sent, at most `inventory`
 ///        ({InsufficientOutput} past it); NATIVE: the unwrap may use it. `maxPay` still
-///        caps the total. Only an operator can start a fill, and only a fill an operator
+///        caps the total — except on DIRECT, where `maxPay` is ignored and this cap
+///        alone bounds the top-up (review 2026-10-18 D-1). Inventory is drawn only
+///        ABOVE the route's own proceeds, which must first reach `minOut`
+///        ({InsufficientOutput}): with `minOut >= maxPay` (a filler's usual
+///        `owed + cost` / `owed`) a pull fill never draws. Only an operator can start a fill, and only a fill an operator
 ///        started can draw — the operators can {AggregatorFillSolver.sweep} the same
 ///        balance anyway, so the cap grants no authority they lack; it bounds what one
 ///        mis-priced call can spend. The maker's input a draw pays for is residue, split
@@ -482,6 +490,15 @@ import {MatchRaceGuard} from "../base/MatchRaceGuard.sol";
 ///        less the one wei it keeps as its self-seeded balance floor
 ///        ({AggregatorFillSolver._seedIn}) — or {NO_PATCH} to leave the calldata
 ///        exactly as the aggregator returned it.
+///        ⚠ The word AS SENT is also {AggregatorFillSolver._minOut}'s `quoted`: `minOut`
+///        is scaled down by `routed / quoted` whenever the fill routes less. So the word
+///        MUST be the amount the solver will route — the input less any same-token
+///        legs kept back — never the whole `owed` with a fee leg kept (95 → 86 with a
+///        10 % fee leg on a FULL fill), never a loose `amountInMaximum`-style ceiling
+///        (2× halves the floor), never a `type(uint256).max` placeholder (the scaling
+///        overflows and the fill reverts). An EMPTY route has no word: leave this at
+///        {NO_PATCH} there — an offset reads whatever calldata follows the empty blob
+///        (review 2026-10-18 D-2 / D-4; pinned by the P2–P5 probes).
 ///        See the ⚠ note on {AggregatorFillSolver} about resolved amounts.
 /// @param amountOutOffset byte offset within `data` of the 32-byte OUTPUT amount to
 ///        rewrite with the ANCHOR legs' live price at inclusion (the core's typed
@@ -2520,6 +2537,13 @@ contract AggregatorFillSolver is MatchRaceGuard {
     ///      without a patched input (the route then swaps its quoted figure, or fails).
     ///      The quoted figure is the word at `amountInOffset` as the operator sent it —
     ///      an unquoted placeholder (0 or below the routed amount) leaves `minOut` as is.
+    ///      ⚠ It is TRUSTED as "the amount this route was quoted for" (review 2026-10-18
+    ///      D-2): a word above the routed amount on a FULL fill — the whole `owed` with a
+    ///      same-token fee leg kept back, a loose exact-output ceiling — lowers the floor
+    ///      just the same, and `type(uint256).max` overflows the product (revert). That
+    ///      lowers only the OPERATOR's own floor (the maker is bound by the core); the
+    ///      rule for plan builders is on {RoutePlan.amountInOffset}. On an EMPTY route
+    ///      the read lands past the blob (D-4): such a plan should carry {NO_PATCH}.
     ///      The maker is untouched (the core's band binds every fill); the operator's
     ///      price protection on {executeFill} is `minBumpBps`, which the core checks.
     ///      {executeFill} ONLY: the netted path ({onMatchRoute}) keeps `minOut` absolute

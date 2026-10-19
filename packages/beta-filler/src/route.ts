@@ -658,6 +658,18 @@ export function isInputPatched(plan: RoutePlan): boolean {
   return plan.amountInOffset < NO_PATCH;
 }
 
+/**
+ * Whether a plan built from `source` may carry the v4 remainder sentinel: its input must be
+ * patched ({@link isInputPatched}) AND its only floor must be the solver's `minOut`, which
+ * `_minOut` scales pro rata to a shrunk remainder. A SUSHI route also carries its own
+ * ABSOLUTE `amountOutMin` inside the calldata, which nothing scales: a competitor's partial
+ * fill would revert inside snwap after the swap (~150–250k gas) instead of at the core's
+ * cheap `OverFill` (~15k) — review 2026-10-18 F-2. Nordstern plans patch no input.
+ */
+export function sentinelPlan(plan: RoutePlan, source: RouteCandidate["source"]): boolean {
+  return isInputPatched(plan) && source !== "sushi";
+}
+
 /** One executable route candidate. */
 export interface RouteCandidate {
   /** A local pool path (pool plan) or an API route (sandbox plan). */

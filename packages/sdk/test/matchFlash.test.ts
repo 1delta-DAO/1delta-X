@@ -68,10 +68,14 @@ describe("MatchFlashSolver ABI", () => {
     expect(sel("onMatchStep")).toBe("0xf16438ef");
   });
 
-  it("packMatchStep mirrors MatchStep.pack; the one-order plan is CALL → DELIVER → ITEM 0..n", () => {
+  it("packMatchStep mirrors MatchStep.pack; the one-order plan is CALL → DELIVER → ITEM 0..n → PULL 0..m", () => {
     expect(packMatchStep(MatchStepKind.ITEM, 0, 2)).toBe(2n | (2n << 24n));
     const p = buildFlashMatchPlan({ order: openOrder(), sig: "0x01", fillAmount: 100_000_000n, solver: SOLVER, flashToken: WRBTC });
-    expect(p.schedule).toEqual([4n, 1n, 2n]);
+    // F-4: a trailing PULL per input leg draws a venue's rounding shortfall (0 when the items credited it all).
+    expect(p.schedule).toEqual([4n, 1n, 2n, 0n]);
+    const two = openOrder();
+    const p2 = buildFlashMatchPlan({ order: { ...two, legsIn: [...two.legsIn, { ...two.legsIn[0]!, token: "0x00000000000000000000000000000000000000d2" }] }, sig: "0x01", fillAmount: 1n, solver: SOLVER, flashToken: WRBTC });
+    expect(p2.schedule.slice(-2)).toEqual([packMatchStep(MatchStepKind.PULL, 0, 0), packMatchStep(MatchStepKind.PULL, 0, 1)]);
     expect([p.callTargets, p.profitRecipient, p.takerDatas]).toEqual([[SOLVER], zeroAddress, []]);
     const d = decodeFunctionData({ abi: MATCH_FLASH_SOLVER_ABI, data: p.callDatas[0]! });
     expect(d.args).toEqual([[], [WRBTC], [(1n << 256n) - 1n]]);

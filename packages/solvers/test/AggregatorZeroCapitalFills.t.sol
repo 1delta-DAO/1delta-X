@@ -218,7 +218,8 @@ contract AggregatorZeroCapitalFillsTest is AggregatorFillSolverTest {
         assertEq(tA.balanceOf(address(router)), routerA, "no route ran");
     }
 
-    /// `maxPay` still caps the total, inventory included.
+    /// `maxPay` still caps the total, inventory included (PULL; on DIRECT it is ignored —
+    /// review 2026-10-18 D-1, `test_P1_direct_topUpIgnoresMaxPay`).
     function test_S1_maxPayCapsInventory() public {
         tB.mint(address(aggSolver), 100e18);
         Order memory o = _order(5);

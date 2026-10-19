@@ -53,7 +53,7 @@ import {
   grossUp,
   haircutBps,
   isExactInputPlan,
-  isInputPatched,
+  sentinelPlan,
   legAmounts,
   nativeToTokenAtQuote,
   nativeToUsdToken,
@@ -844,8 +844,14 @@ export class RouteFiller {
     const gate = (c: Candidate, g: bigint) =>
       routeProfitable({ quotedOut: c.out, owed, slippageBps, gasOut: g, minProfitOut: profitOut, keepPpm: this.keepPpm });
     // SOLVER v4: the inventory cap for the anchor output token (ROUTE_INVENTORY_CAPS, 0 = none).
+    // With THESE plans' floors it never draws (review 2026-10-18 D-7): the solver lends
+    // inventory only ABOVE route proceeds that already reached `minOut = owed + cost`, and
+    // `maxPay = owed` clamps the pull, so a pull plan cannot use it; a direct plan pays
+    // `owed` exactly (exact-output), so `_topUp` finds no shortfall — yet a non-zero cap
+    // switches a direct fill to the typed callback (~+6k gas). So it rides on PULL plans
+    // only, as a provision for a lowered floor; it is not an inventory-backed fill mode.
     const v4 = this.abiVersion === 4;
-    const inventory = v4 ? rc.inventoryCaps[tokenOut.toLowerCase()] ?? 0n : 0n;
+    const inventory = v4 && !direct ? rc.inventoryCaps[tokenOut.toLowerCase()] ?? 0n : 0n;
     const buildRaw = (c: Candidate, costOut: bigint): Verdict<{ plan: RoutePlan }> => {
       if (c.source === "sushi") return buildSushiPlan({ quote: c.quote, owed, costOut, profitRecipient: rc.profitRecipient, minBumpBps });
       if (c.source === "nordstern") return buildNordsternPlan({ quote: c.quote, owed, costOut, profitRecipient: rc.profitRecipient, minBumpBps });
@@ -872,18 +878,24 @@ export class RouteFiller {
     // The remainder sentinel on an input-patched executeFill plan (v4 scales `minOut` pro
     // rata to what was routed): a competitor's partial fill no longer reverts ours. Only
     // when the book's figure IS the on-chain remainder (a maker short of funds would have
-    // the sentinel pull more than they hold), never for a fill module's own units.
+    // the sentinel pull more than they hold), never for a fill module's own units, and
+    // never on a Sushi route, whose absolute in-route `amountOutMin` the scaling cannot
+    // reach (F-2, `sentinelPlan`).
     const total = order.fillTotal !== 0n ? order.fillTotal : order.side === OrderSide.BUY ? order.legsOut[0]?.start ?? 0n : order.legsIn[0]!.start;
     const sentinelOk = v4 && !itemFill && !direct && order.fillModule === zeroAddress && race0 !== undefined && fillAmount === total - BigInt(race0.filledBefore);
-    const sendAmountFor = (plan: RoutePlan) => (sentinelOk && isInputPatched(plan) ? maxUint256 : fillAmount);
+    const sendAmountFor = (plan: RoutePlan, source: Candidate["source"]) => (sentinelOk && sentinelPlan(plan, source) ? maxUint256 : fillAmount);
+    // `receipts: []` always (review 2026-10-18 D-8): no MULTI_ROUTE is built, so a SETTLE
+    // receipt is never sold — a foreign ERC-20 one stays on the solver (operator windfall),
+    // an NFT one is forwarded to the sandbox and parked. Only reachable with ITEM_FILLS +
+    // NETTED_DELIVERY_FUNDED_ITEMS on (both default off); the maker is paid in full either way.
     const guard = v4 && itemFill && race0
       ? { orderHash, expectedFilled: BigInt(race0.filledBefore), liveNonce: race0.fillOnce !== undefined, receipts: [] as Address[] }
       : undefined;
-    const simulate = async (plan: RoutePlan): Promise<Simulated> => {
+    const simulate = async (plan: RoutePlan, source: Candidate["source"]): Promise<Simulated> => {
       // An item-bearing order: the one-order matchSettle path, scheduled by the SDK
       // classifier (sources early, sinks late — policy.ts plainShape).
       const version = this.abiVersion;
-      const amount = sendAmountFor(plan);
+      const amount = sendAmountFor(plan, source);
       const data = itemFill
         ? encodeAggregatorExecuteItemFill({ order, sig, fillAmount: amount, plan, permits, lateItems: itemFill.lateItems, version, ...(guard ? { guard } : {}) })
         : encodeAggregatorExecuteFill({ order, sig, fillAmount: amount, plan, permits, version });
@@ -944,7 +956,7 @@ export class RouteFiller {
             : "sushi api";
       const tag = `${direct ? (liveOut ? "direct+live" : "direct") : "pull"}${native ? "+native" : ""}${itemFill ? `+items(late ${itemFill.lateItems})` : ""}${permits.length > 0 ? "+permit" : ""}${quoted ? ` quoted ${quoted.id}` : ""} ${orderHash} in ${received} ${order.legsIn[0]!.token} → owed ${owed} ${tokenOut} (${via}, quote ${v.c.out}, margin ${v.margin})`;
       try {
-        picked = { c: v.c, sim: await simulate(v.plan), tag, margin: v.margin };
+        picked = { c: v.c, sim: await simulate(v.plan, v.c.source), tag, margin: v.margin };
         break;
       } catch (e) {
         lastReason = `simulation reverted: ${sanitize(errorReason(e))}`;
@@ -986,7 +998,7 @@ export class RouteFiller {
       const rebuilt = build(best, g2.costOut);
       if (!rebuilt.ok) return this.skipBackoff(orderHash, `${rebuilt.reason} (re-priced at gas ${priced})`);
       try {
-        sim = await simulate(rebuilt.plan);
+        sim = await simulate(rebuilt.plan, best.source);
       } catch (e) {
         return this.skipBackoff(orderHash, `re-simulation at gas ${priced} reverted: ${sanitize(errorReason(e))}`);
       }

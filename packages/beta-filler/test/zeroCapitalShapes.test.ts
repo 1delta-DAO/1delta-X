@@ -33,7 +33,7 @@ import { flashCandidates, flashJob, flashUnavailable, pathUsesPool, v3FlashFee }
 import { Guard, RACE_HOLD_MS } from "../src/guard";
 import { entryFromJson, fetchOrders } from "../src/intake";
 import { classify, plainShape } from "../src/policy";
-import { classifyRoute, isExactInputPlan, legAmounts } from "../src/route";
+import { classifyRoute, isExactInputPlan, legAmounts, sentinelPlan } from "../src/route";
 import { MemoryStateStore } from "../src/state";
 import { planSweep, SOLVER_SWEEP_ABI, SWEEP_ALL_SELECTOR, sweepWorthIt } from "../src/sweep";
 import { FlashKind, hashOrderStruct, MATCH_FLASH_SOLVER_ABI, orderToJson } from "@1delta-x/sdk";
@@ -427,7 +427,8 @@ describe("M-3 / S-4: fused composites are flash-required", () => {
     expect(job.minProfit).toHaveLength(1);
     expect(getAddress(job.minProfit[0]!.token)).toBe(USDT0);
     expect(job.minProfit[0]!.min > 0n && job.minProfit[0]!.min < 9_000_000n).toBe(true);
-    expect([plan.schedule, plan.callTargets, plan.fillAmounts, plan.profitRecipient]).toEqual([[4n, 1n, 2n], [FLASH], [100_000_000n], zeroAddress]);
+    // CALL → DELIVER → ITEM 0 → PULL 0 (F-4: draws a venue rounding shortfall, 0 otherwise).
+    expect([plan.schedule, plan.callTargets, plan.fillAmounts, plan.profitRecipient]).toEqual([[4n, 1n, 2n, 0n], [FLASH], [100_000_000n], zeroAddress]);
     expect(e.pending).toMatchObject({ kind: "fill", strategy: "route", race: { settlement: SETTLEMENT, filledBefore: "0" } });
   });
 
@@ -627,6 +628,21 @@ describe("solver v4 (in-tree) next to v3 (live): per-instance ABI", () => {
     const forced = await engine({ AGGREGATOR_SOLVER_VERSION: "4" });
     await forced.e.tick({ fetchEntries: async () => [entry("d6", order())] });
     expect(forced.w.sent[0]!.data.slice(0, 10)).toBe("0x50358c9e");
+  });
+
+  it("D-7: the inventory cap never rides on a DIRECT plan (it could not draw; it would only add the typed callback)", async () => {
+    const { e, w } = await engine({ ROUTE_INVENTORY_CAPS: `${USDT0}:5000000` }, v4World());
+    await e.tick({ fetchEntries: async () => [entry("d7", order({ timing: withDeltaVerifyOutputs(0n), exclusiveFiller: SOLVER }))] });
+    const d = decodeV4(w.sent[0]!.data);
+    expect((d.args![3] as { inventory: bigint }).inventory).toBe(0n);
+  });
+
+  it("F-2: the remainder sentinel needs a patched input AND no absolute in-route floor (never a Sushi route)", () => {
+    const base = { minOut: 1n, maxPay: 1n, minBumpBps: 0n, profitRecipient: zeroAddress, originator: zeroAddress, originatorPpm: 0, router: STRANGER, amountOutOffset: NO_PATCH, data: "0x" as Hex };
+    expect(sentinelPlan({ ...base, amountInOffset: 4n }, "pool")).toBe(true);
+    expect(sentinelPlan({ ...base, amountInOffset: 4n }, "sushi")).toBe(false);
+    expect(sentinelPlan({ ...base, amountInOffset: NO_PATCH }, "pool")).toBe(false);
+    expect(sentinelPlan({ ...base, amountInOffset: NO_PATCH }, "nordstern")).toBe(false);
   });
 
   it("S-6: only an exact-input plan may run an item fill", () => {
