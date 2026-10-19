@@ -381,7 +381,10 @@ export interface SpotPolicy {
   chargeGas: bigint;
   /** `SPOT_FILL_GAS` (default 150000): the pre-simulation estimate of a spot fill (measured ~92k). */
   fillGas: bigint;
-  /** `SPOT_REBALANCE_GAS` (default 130000): one rebalance swap, shared pro rata by the fills that cause it. */
+  /**
+   * `SPOT_REBALANCE_GAS` (default 0): a rebalance swap's gas, charged pro rata to fills.
+   * 0 because reserves are rebalanced only by the operator, never on their own.
+   */
   rebalanceGas: bigint;
   /** `SPOT_HOURLY_USD` (default 1000): rolling one-hour spot outflow cap, USD₮0 units. */
   hourlyUsd6: bigint;
@@ -930,7 +933,7 @@ export function loadConfig(env: Env): Config {
       maxTicketUsd6: fixed(env, "SPOT_MAX_TICKET_USD", "100", USDT0_DECIMALS),
       chargeGas: posInt(env, "SPOT_CHARGE_GAS", 250_000),
       fillGas: posInt(env, "SPOT_FILL_GAS", 150_000),
-      rebalanceGas: posInt(env, "SPOT_REBALANCE_GAS", 130_000),
+      rebalanceGas: uint(env, "SPOT_REBALANCE_GAS", 0),
       hourlyUsd6: fixed(env, "SPOT_HOURLY_USD", "1000", USDT0_DECIMALS),
       slippageBps: bps(env, "SPOT_SLIPPAGE_BPS", 50),
     },

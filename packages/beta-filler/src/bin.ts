@@ -187,6 +187,10 @@ switch (cmd) {
   case "sell-rif":
     await rebalanceAction(() => engine.rebalancer.sellRifIfNeeded(true));
     break;
+  case "rebalance-spot":
+    // The SPOT reserves back inside their bands — never done on its own (INVENTORY-POLICY §9).
+    await rebalanceAction(() => engine.rebalancer.spotStep());
+    break;
   case "rebalance-rif":
     // The RIF band to its target now: each leg (swap / MoC op) awaited. A MoC op then
     // waits ~2.5 min in its queue; the next leg runs on a later `rebalance-rif` / `run`.
@@ -204,5 +208,5 @@ switch (cmd) {
     break;
   }
   default:
-    throw new Error(`unknown command ${cmd} (run | status | fill-json <file> | redeem | sell-rif | rebalance-rif | mint <amount> | settle)`);
+    throw new Error(`unknown command ${cmd} (run | status | fill-json <file> | redeem | sell-rif | rebalance-rif | rebalance-spot | mint <amount> | settle)`);
 }

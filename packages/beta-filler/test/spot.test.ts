@@ -173,6 +173,18 @@ describe("spot fill: valued at the pool, gated at the real estimate, never below
     expect(value - paid).toBeGreaterThan(0n);
   });
 
+  it("never grows a RECEIVED reserve past its band top (no automatic rebalancing sells it down)", async () => {
+    // A maker sells 0.0003 WRBTC ($30) for USD₮0; the wallet already holds $70 of WRBTC: $100 > the $90 top.
+    const received = 3n * 10n ** 14n;
+    const paid = 29_000_000n;
+    const { sent, chain } = fakeChain({ [WRBTC.toLowerCase()]: 7n * 10n ** 14n, [USD0.toLowerCase()]: 400_000_000n }, { received, paid });
+    const h = host();
+    await spot(chain).s.fill(h, entry(order(WRBTC, received, USD0, paid)) as never, WRBTC, USD0);
+    expect(h.skips[0]).toMatch(/over its band top/);
+    expect(sent).toHaveLength(0);
+    expect(await spot(chain).s.quote(WRBTC, USD0, received, GAS_PRICE)).toMatchObject({ ok: false, reason: expect.stringMatching(/band top/) });
+  });
+
   it("refuses a price that does not cover the costs (rests), and a reserve that cannot pay", async () => {
     const tight = value - 10n ** 11n; // $0.01 under the pool
     const a = fakeChain({ [WRBTC.toLowerCase()]: 6n * 10n ** 14n }, { received: 20_000_000n, paid: tight });
@@ -187,13 +199,20 @@ describe("spot fill: valued at the pool, gated at the real estimate, never below
   });
 });
 
-describe("spot rebalancing: each reserve within ±50 % of its target, against USD₮0", () => {
+describe("spot rebalancing — an operator action only (spotStep): each reserve back within ±50 % of its target", () => {
   const rebal = (bal: Record<string, bigint>, env: Record<string, string> = {}) => {
     const c = loadConfig({ ...ENV, ...env });
     const f = fakeChain(bal, { received: 1n, paid: 1n });
     return { ...f, r: new Rebalancer(c, f.chain, () => {}, new Guard(c.gas), {}, () => {}, deps.dexQuote) };
   };
   const swapOf = (data: Hex) => decodeFunctionData({ abi: SWAP_ROUTER02_ABI, data }).args[0];
+
+  it("the regular rebalancer step NEVER swaps a spot reserve (operator's rule: no swaps on their own)", async () => {
+    const low = { [WRBTC.toLowerCase()]: 2n * 10n ** 14n, [USD0.toLowerCase()]: 400_000_000n, [USDRIF.toLowerCase()]: 50n * E18 };
+    const { sent, r } = rebal(low);
+    expect(await r.step()).toBeUndefined();
+    expect(sent).toHaveLength(0);
+  });
 
   it("WRBTC at $20 (< $30): buy back to $60 with USD₮0 on the 0.3 % pool", async () => {
     const { sent, r } = rebal({ [WRBTC.toLowerCase()]: 2n * 10n ** 14n, [USD0.toLowerCase()]: 400_000_000n, [USDRIF.toLowerCase()]: 50n * E18 });
@@ -203,7 +222,7 @@ describe("spot rebalancing: each reserve within ±50 % of its target, against US
     expect(p.amountIn).toBe(60_000_000n - dex(WRBTC, USD0, 2n * 10n ** 14n));
   });
 
-  it("WRBTC at $100 (> $90): sell the excess down to $60", async () => {
+  it("admin — WRBTC at $100 (> $90): sell the excess down to $60", async () => {
     const { sent, r } = rebal({ [WRBTC.toLowerCase()]: 10n ** 15n, [USD0.toLowerCase()]: 400_000_000n, [USDRIF.toLowerCase()]: 50n * E18 });
     await r.spotStep();
     const p = swapOf(sent[0]!.data);

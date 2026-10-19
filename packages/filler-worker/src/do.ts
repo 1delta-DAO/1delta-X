@@ -626,6 +626,14 @@ export class FillerDO extends DurableObject<Env> {
       }
       if (path === "/tick" && method === "POST") return json(await this.runTick("manual"));
       if (path === "/fills" && method === "GET") return this.fills(url);
+      if (path === "/rebalance-spot" && method === "POST") {
+        // The SPOT reserves are never swapped on their own: this is the operator's lever
+        // (one tx per call: an approval or the swap of the first reserve outside its band).
+        const engine = await this.getEngine();
+        const r = await engine.rebalanceSpotNow();
+        this.log(`admin: rebalance-spot → ${r ? `${r.status}${r.reason ? ` (${r.reason})` : ""}` : "nothing to do"}`);
+        return json(r ? { ...r, ...(r.reason ? { reason: redact(r.reason, rpcUrls(this.env)) } : {}) } : { status: "nothing to do" });
+      }
       if (path === "/rebalance-rif" && method === "POST") {
         // The RIF band to its target now (one tx per call: an approval, a swap or a MoC op;
         // the next legs follow on the rebalancer steps).

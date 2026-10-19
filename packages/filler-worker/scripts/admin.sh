@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Filler admin shortcuts. Reads FILLER_ADMIN_URL + ADMIN_TOKEN from ../.admin.env
 # (gitignored) or the environment.
-#   scripts/admin.sh pause | resume | status | fills | pools [refresh] | tick | rebalance-rif | dry-run on|off
+#   scripts/admin.sh pause | resume | status | fills | pools [refresh] | tick | rebalance-rif | rebalance-spot | dry-run on|off
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f "$here/.admin.env" ] && set -a && . "$here/.admin.env" && set +a
@@ -16,6 +16,7 @@ case "${1:-}" in
   pools)   call GET "/pools${2:+?refresh=1}" ;;
   tick)    call POST /tick ;;
   rebalance-rif) call POST /rebalance-rif '{}' ;;
+  rebalance-spot) call POST /rebalance-spot '{}' ;;
   dry-run) case "${2:-}" in on) call POST /dry-run '{"on":true}' ;; off) call POST /dry-run '{"on":false}' ;; *) echo "dry-run on|off" >&2; exit 2 ;; esac ;;
-  *) echo "usage: $0 pause|resume|status|fills|pools [refresh]|tick|rebalance-rif|dry-run on|off" >&2; exit 2 ;;
+  *) echo "usage: $0 pause|resume|status|fills|pools [refresh]|tick|rebalance-rif|rebalance-spot|dry-run on|off" >&2; exit 2 ;;
 esac

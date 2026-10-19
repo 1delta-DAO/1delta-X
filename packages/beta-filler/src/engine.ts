@@ -553,6 +553,20 @@ export class Engine {
     await this.saveIfDirty();
     return r;
   }
+  /**
+   * Admin: move the first SPOT reserve outside its band back to target (rebalance.ts
+   * `spotStep`) — the ONLY way spot reserves are swapped (never on their own). At most one
+   * tx (an approval, or the swap). Refused while another tx is outstanding.
+   */
+  async rebalanceSpotNow(): Promise<RebalanceOutcome | undefined> {
+    if (this.guard.pending) return { action: "spot", status: "skipped", reason: `tx ${this.guard.pending.hash} outstanding` };
+    const r = await this.rebalancer.spotStep();
+    if (r) await this.emit({ type: "rebalance", outcome: r });
+    if (this.guard.pending) await this.emit({ type: "sent", pending: this.guard.pending });
+    await this.saveIfDirty();
+    return r;
+  }
+
 
   async tick(o: TickOptions = {}): Promise<TickReport> {
     const rep: TickReport = { pending: false, evaluated: 0, outcomes: [], errors: [] };

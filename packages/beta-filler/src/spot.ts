@@ -25,9 +25,10 @@ import type { PricedCandidate } from "./quote";
  *   • QUOTED like a route fill: the charge is `SPOT_CHARGE_GAS` (~250k, about a route fill)
  *     against the real ~92k + rebalance share, so the price stays about the DEX's and the
  *     gas gap is the margin.
- * The pool fee is neutral: the user pays it inside the DEX-equivalent price, the wallet
- * pays it back when it rebalances (and two-sided flow nets without a swap).
- * Reserves are rebalanced against USD₮0 (./rebalance.ts `spotStep`).
+ * NO SWAP RUNS ON ITS OWN (operator's rule, 2026-10-19: unpredictable gas and conversion
+ * fees). Reserves move only with the flow: a reserve that runs dry stops quoting its pair,
+ * and a fill may never lift a RECEIVED reserve past its band top. Putting one back on
+ * target is an operator action (rebalance.ts `spotStep`, `POST /rebalance-spot`).
  */
 
 /** The `Budget` key spot outflows are counted under, in USD₮0 units (6 dec). */
@@ -109,15 +110,35 @@ export class SpotFiller {
     return bal > r ? bal - r : 0n;
   }
 
-  /** This fill's share (wei) of the rebalance swap it causes: pro rata to its USD over one band's width of the reserve it moves. */
+  /**
+   * This fill's share (wei) of a rebalance swap, pro rata to its USD over one band's width.
+   * Reserves are rebalanced only by the OPERATOR (rebalance.ts `spotStep`, never on its own),
+   * so the default SPOT_REBALANCE_GAS is 0: fills charge nothing they do not cause.
+   */
   private rebalanceShareWei(gasPrice: bigint, usd6: bigint, tokenIn: Address, tokenOut: Address): bigint {
     const p = this.cfg.policy.spot;
     const res = this.reserveOf(tokenOut) ?? this.reserveOf(tokenIn);
-    if (!res) return 0n;
+    if (!res || p.rebalanceGas === 0n) return 0n;
     const width = (res.targetUsd6 * p.bandBps) / 10_000n;
     const whole = gasPrice * p.rebalanceGas;
     if (width === 0n || usd6 >= width) return whole;
     return (whole * usd6 + width - 1n) / width;
+  }
+
+  /**
+   * With no automatic rebalancing, a fill must not grow the RECEIVED reserve past its
+   * band's top (target × (1 + SPOT_BAND_BPS)) — the wallet would otherwise pile up a
+   * volatile asset nothing sells down. USD₮0 (the hub) has no cap. `addUsd6` = the fill's
+   * USD value. Returns the refusal, or undefined.
+   */
+  private async overReserve(tokenIn: Address, addUsd6: bigint): Promise<string | undefined> {
+    const res = this.reserveOf(tokenIn);
+    if (!res) return undefined;
+    const bal = await balanceOf(this.chain, tokenIn);
+    const held = bal === 0n ? 0n : await this.usd6(tokenIn, bal);
+    if (held === undefined) return "spot: cannot value the received reserve";
+    const top = (res.targetUsd6 * (10_000n + this.cfg.policy.spot.bandBps)) / 10_000n;
+    return held + addUsd6 > top ? `spot: would lift the ${tokenIn} reserve to $${fmtUnits(held + addUsd6, 6)}, over its band top $${fmtUnits(top, 6)}` : undefined;
   }
 
   /**
@@ -136,6 +157,8 @@ export class SpotFiller {
     if (usd < p.minFillUsdt0) return { ok: false, reason: "spot: below minimum fill" };
     if (usd > p.spot.maxTicketUsd6) return { ok: false, reason: `spot: above SPOT_MAX_TICKET_USD ${fmtUnits(p.spot.maxTicketUsd6, 6)}` };
     if (this.budget.remaining(SPOT_BUDGET_KEY, Date.now()) < usd) return { ok: false, reason: "spot: hourly spot budget exhausted" };
+    const over = await this.overReserve(tokenIn, usd);
+    if (over) return { ok: false, reason: over };
     const shape = gasShape("spot", "inventory", tokenIn, tokenOut, this.cfg.settlement);
     const learned = this.gasRatios.typicalEstimate(shape);
     const charge = learned !== undefined && learned > p.spot.chargeGas ? learned : p.spot.chargeGas;
@@ -174,6 +197,8 @@ export class SpotFiller {
     if (usd > p.spot.maxTicketUsd6) return host.skip(orderHash, `spot: above SPOT_MAX_TICKET_USD`, true);
     if (paid > spendable) return host.skip(orderHash, `spot: reserve ${fmtUnits(spendable, 18)} short of ${paid} ${tokenOut}`);
     if (this.budget.remaining(SPOT_BUDGET_KEY, Date.now()) < usd) return host.skip(orderHash, "spot: hourly spot budget exhausted");
+    const over = await this.overReserve(tokenIn, usd);
+    if (over) return host.skip(orderHash, over);
 
     // 3. The all-in gate at the pre-simulation estimate: value − paid ≥ gas + rebalance share + min profit.
     const shape = gasShape("spot", "inventory", tokenIn, tokenOut, cfg.settlement);

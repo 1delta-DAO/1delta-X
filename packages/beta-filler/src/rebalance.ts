@@ -93,16 +93,14 @@ export class Rebalancer {
    */
   async step(): Promise<RebalanceOutcome | undefined> {
     if (this.cfg.policy.sellRif || this.cfg.policy.buyRif) {
-      const r = await this.railStep();
-      if (r && (r.status === "sent" || r.status === "failed")) return r;
-      // The rail had nothing to send: the spot reserves' turn.
-      return (await this.spotStep()) ?? r;
+      // SPOT reserves are never rebalanced here: no swap runs on its own (operator's rule,
+      // 2026-10-19 — unpredictable gas and conversion fees). `spotStep` is an admin action.
+      return this.railStep();
     }
     const r = await this.redeemIfNeeded();
     if (r && (r.status === "sent" || r.status === "failed")) return r;
     const s = await this.sellRifIfNeeded();
-    if (s && (s.status === "sent" || s.status === "failed")) return s;
-    return (await this.spotStep()) ?? s ?? r;
+    return s ?? r;
   }
 
   /**
@@ -171,10 +169,12 @@ export class Rebalancer {
   }
 
   /**
-   * SPOT reserves (./spot.ts, INVENTORY-POLICY §9): keep each reserve inside ±SPOT_BAND_BPS
-   * of its USD target, against USD₮0 on its configured pool. Below the band: buy it back
-   * to target with USD₮0 (never USDT0_RESERVE); above: sell the excess to USD₮0. One tx
-   * per step (its router approval first — the maximum, once). Nothing under MIN_FILL_USDT0.
+   * SPOT reserves (./spot.ts, INVENTORY-POLICY §9) — an ADMIN action only (`POST
+   * /rebalance-spot`, CLI `rebalance-spot`), never part of {@link step}: the operator does
+   * not want swaps running on their own. Moves the first reserve outside ±SPOT_BAND_BPS of
+   * its USD target back to target against USD₮0 on its configured pool: below the band,
+   * buy with USD₮0 (never USDT0_RESERVE); above, sell the excess. One tx per call (its
+   * router approval first — the maximum, once). Nothing under MIN_FILL_USDT0.
    */
   async spotStep(): Promise<RebalanceOutcome | undefined> {
     const { cfg, chain } = this;

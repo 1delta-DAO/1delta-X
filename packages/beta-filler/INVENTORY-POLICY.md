@@ -148,8 +148,14 @@ amountOut = gross − ⌈gas × (1 + 3 %)⌉
 **Status:** built on branch `spot-inventory`, configured in `wrangler.toml` (`SPOT_RESERVES`),
 fork-proven (`e2e/spot-fork.sh`: a 20 USD₮0 → WRBTC order filled from the reserve against the
 live Settlement, 157k gas on the fork's Cancun schedule for a first-time maker). Live once
-merged and deployed. On the first run the rebalancer buys each reserve up to its target from
-USD₮0.
+merged and deployed.
+
+**No swap runs on its own** (operator's rule: unpredictable gas and conversion fees).
+- **Reserves move only with the flow.** A reserve that runs dry stops quoting its pair. A fill may never lift a *received* reserve past its band top (target × 1.5), so no volatile asset piles up.
+- **Re-centring is an operator action.** The operator funds the reserves and moves them back to target on demand: `scripts/admin.sh rebalance-spot` swaps the first reserve outside its band against USD₮0.
+- **No rebalance charge.** `SPOT_REBALANCE_GAS` is 0: fills charge no rebalance share they do not cause.
+
+The plan below described automatic rebalancing; that part is superseded by the rule above.
 
 **Idea:** keep a small reserve of the busiest assets in the operator wallet. Tickets under
 ~$100 are then filled from it (`fillUpTo`, ~92k gas) instead of routed (222k–409k gas), with
@@ -199,6 +205,7 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 
 | Date | Decision |
 | --- | --- |
+| 2026-10-19 | Spot reserves are never swapped on their own: they move with the flow, a fill cannot lift a received reserve past its band top, and re-centring is the operator's `rebalance-spot`. |
 | 2026-10-19 | Spot reserves planned (§9): WRBTC $60, USDRIF $50, tickets ≤ $100 from the wallet, quoted at a route-equivalent price. |
 | 2026-10-19 | Fills fall through to the next route on any failure. Heavy API routes allowed (`MAX_ROUTE_GAS` 2M) when quoted at their corrected gas (Nordstern × 2.0). |
 | 2026-10-19 | Maximum approvals to Settlement, SwapRouter02 and MoC's core. Money on Chain is treated as trusted. |

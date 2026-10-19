@@ -18,6 +18,7 @@ const ADMIN_ROUTES: Record<string, string> = {
   "/dry-run": "POST",
   "/tick": "POST",
   "/rebalance-rif": "POST",
+  "/rebalance-spot": "POST",
 };
 
 const json = (v: unknown, status: number, headers: Record<string, string> = {}) =>
