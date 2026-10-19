@@ -4,6 +4,10 @@ The Rootstock beta's filler bot. It polls the orderbook — the Cloudflare Worke
 (`@1delta-x/orderbook-worker`), as JSON (`GET /orders?fillableOnly=true`, paged) — and
 runs every order through up to two strategies, **inventory first, route second**:
 
+> **[INVENTORY-POLICY.md](INVENTORY-POLICY.md)** is the one-page summary: every fill
+> strategy and direction, the operator wallet's target ratios (RIF 15–25 % of value,
+> USD₮0 reserve, RBTC gas float), rebalancing, risk limits and approvals.
+
 | | **inventory** | **route** (DEX aggregator path) |
 |---|---|---|
 | What fills | the hot wallet itself: `Settlement.fillUpTo` | `AggregatorFillSolver.executeFill`, sent by the same EOA as operator |
