@@ -74,6 +74,15 @@ export interface NordsternConfig {
   maxPerSweep: number;
   /** Haircut on the API's `toAmount` before it is ranked, gated or quoted, bps. */
   haircutBps: bigint;
+  /**
+   * Rootstock correction on the API's `gasEstimate`, percent, on top of the docs' +20 %
+   * (`NORDSTERN_GAS_MULT_PCT`, default 200). Measured 2026-10-19: a 3-hop USD₮0 → RIF →
+   * rUSDT → USDRIF route reported 367k and SIMULATED at ~1.06M through our solver — the
+   * API's figure is not Rootstock's gas schedule (and excludes the fill around it). Taken
+   * at face value it ranked first, was quoted at the generic fill gas, then every fill
+   * was refused over MAX_ROUTE_GAS and the order expired. Absent = 100.
+   */
+  gasMultPct?: bigint;
 }
 
 /** Nordstern's AggregatorGuard on Rootstock (chain 30): `/chains` → `RouterAddress`. */
@@ -197,7 +206,7 @@ export function nordsternPricedOut(toAmount: bigint, haircutBps: bigint): bigint
 export function validateNordsternRoute(
   body: NordsternResponse | null,
   req: NordsternRequest,
-  cfg: Pick<NordsternConfig, "router" | "executors" | "haircutBps">,
+  cfg: Pick<NordsternConfig, "router" | "executors" | "haircutBps"> & Partial<Pick<NordsternConfig, "gasMultPct">>,
 ): Verdict<NordsternQuote> {
   if (!body) return { ok: false, reason: "nordstern: no response" };
   if (typeof body.error === "string") return { ok: false, reason: `nordstern: ${sanitize(body.error, 120)}` };
@@ -231,7 +240,7 @@ export function validateNordsternRoute(
     amountOut,
     apiAmountOut: apiOut,
     minAmountOut: d.minAmountOut,
-    gasUnits: (gas * GAS_MARKUP_PCT + 99n) / 100n,
+    gasUnits: (gas * GAS_MARKUP_PCT * (cfg.gasMultPct ?? 100n) + 9_999n) / 10_000n,
   };
 }
 

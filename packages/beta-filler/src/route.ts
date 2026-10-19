@@ -609,6 +609,27 @@ export interface RouteCandidate {
 export const planKind = (c: Pick<RouteCandidate, "source">): PlanKind => (c.source === "pool" ? "pool" : "sandbox");
 
 /** A candidate's own gas units for ranking: a sandbox plan pays {@link SANDBOX_ROUTE_OVERHEAD_GAS} on top of its route. */
+/**
+ * The fill AROUND an API route (executeFill, Settlement's pull and delivery, the
+ * sandbox's own transfers), on Rootstock, beyond the route's own gas — the 2026-10-19
+ * Nordstern fill simulated at ~1.06M against a corrected route figure of ~880k.
+ */
+export const API_FILL_OVERHEAD_GAS = 200_000n;
+
+/** A whole API-route fill's estimate: the route's own gas + the sandbox + the fill around it. */
+export function apiFillGas(routeGasUnits: bigint): bigint {
+  return routeGasUnits + SANDBOX_ROUTE_OVERHEAD_GAS + API_FILL_OVERHEAD_GAS;
+}
+
+/**
+ * Whether an API route's fill could ever be sent: its estimate × 1.25 (the tx gas limit
+ * the route gate sets) within MAX_ROUTE_GAS. A route that cannot is dropped BEFORE
+ * ranking — quoting it promises a fill that the gate then refuses on every attempt.
+ */
+export function apiRouteFits(routeGasUnits: bigint, maxGas: bigint): boolean {
+  return (apiFillGas(routeGasUnits) * 125n + 99n) / 100n <= maxGas;
+}
+
 export function rankingGasUnits(kind: PlanKind, routeGasUnits: bigint): bigint {
   return kind === "sandbox" ? routeGasUnits + SANDBOX_ROUTE_OVERHEAD_GAS : routeGasUnits;
 }

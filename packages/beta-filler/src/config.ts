@@ -741,6 +741,7 @@ function loadRoute(env: Env): RouteConfig | undefined {
       timeoutMs: posNum(env, "NORDSTERN_TIMEOUT_MS", 3_000),
       maxPerSweep: posNum(env, "NORDSTERN_MAX_PER_SWEEP", 10),
       haircutBps: nordsternHaircut(env),
+      gasMultPct: BigInt(rangeNum(env, "NORDSTERN_GAS_MULT_PCT", 200, 100, 1_000)),
     },
   };
 }

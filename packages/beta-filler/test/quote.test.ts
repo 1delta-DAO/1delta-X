@@ -12,7 +12,7 @@ import { loadConfig, ROOTSTOCK } from "../src/config";
 import { railRifOut } from "../src/policy";
 import { Engine } from "../src/engine";
 import { gasShape } from "../src/gasRatio";
-import { SANDBOX_ROUTE_OVERHEAD_GAS } from "../src/route";
+import { apiFillGas, apiRouteFits, SANDBOX_ROUTE_OVERHEAD_GAS } from "../src/route";
 import { MAX_QUOTES, netQuote, parseQuoteRequest, QuoteBook, quoteMatches, quoteToJson, type IssuedQuote, type QuoteRequest } from "../src/quote";
 import { MemoryStateStore, STATE_KEY, type FillerState } from "../src/state";
 import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK } from "../src/nordstern";
@@ -561,7 +561,7 @@ describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PU
    * and the calldata carries each API's floor at the requested slippage — what the
    * real APIs return (minToAmount = ⌈toAmount × (1 − slippage %)⌉).
    */
-  function apis(o: { sushiOut: bigint; nordOut: bigint }) {
+  function apis(o: { sushiOut: bigint; nordOut: bigint; nordGas?: string }) {
     const seen = { sushi: 0, nordstern: 0, referer: [] as string[] };
     const f = vi.fn(async (input: string, init?: RequestInit) => {
       const u = new URL(input);
@@ -587,7 +587,7 @@ describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PU
           "0x3f0bde25", "0x4e9e", ex, numberToHex(BigInt(p.get("amount")!), { size: 16 }), numberToHex(min, { size: 16 }), "0x05", ex,
           (p.get("from")!.toLowerCase()) as Hex, (p.get("src")!.toLowerCase()) as Hex, (p.get("dst")!.toLowerCase()) as Hex, "0xd845702af381f0405661747a6a20bde0401a19d607040201ff",
         ]);
-        return new Response(JSON.stringify({ toAmount: o.nordOut.toString(), minToAmount: min.toString(), gasEstimate: "68490", tx: { from: p.get("from"), to: NORDSTERN_GUARD_ROOTSTOCK, data, value: "0" } }));
+        return new Response(JSON.stringify({ toAmount: o.nordOut.toString(), minToAmount: min.toString(), gasEstimate: o.nordGas ?? "68490", tx: { from: p.get("from"), to: NORDSTERN_GUARD_ROOTSTOCK, data, value: "0" } }));
       }
       throw new Error(`unexpected fetch ${input}`);
     });
@@ -607,6 +607,28 @@ describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PU
     expect(v.quote.grossOut).toBe((1_001_000_000n * 9_998n) / 10_000n); // never the raw toAmount
     expect(seen).toMatchObject({ sushi: 1, nordstern: 1 });
     expect(seen.referer).toEqual(["https://1delta-x.pages.dev"]);
+  });
+
+  it("/quote: a Nordstern route is charged ITS gas (× the Rootstock correction, + the fill around it), not the generic pull figure", async () => {
+    apis({ sushiOut: 1_000_500_000n, nordOut: 1_001_000_000n });
+    const { chain } = fake();
+    const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
+    const v = await e.quote(sellReq());
+    if (!v.ok) throw new Error(v.reason);
+    expect(v.quote.route).toEqual({ source: "nordstern" });
+    // 68,490 × 1.2 × 2.0 (NORDSTERN_GAS_MULT_PCT) = 164,376 + sandbox 30k + fill 200k, priced × r 0.88.
+    expect(apiFillGas(164_376n)).toBe(394_376n);
+    expect(v.quote.gasUnits).toBeGreaterThanOrEqual((394_376n * 88n) / 100n - 1n);
+  });
+
+  it("/quote: a Nordstern route too heavy for MAX_ROUTE_GAS is dropped — the 2026-10-19 3-hop route (367k reported, ~1.06M simulated) that no fill could send", async () => {
+    // Nordstern claims a much better output, but with the real route's gasEstimate.
+    apis({ sushiOut: 1_000_500_000n, nordOut: 1_010_000_000n, nordGas: "367409" });
+    expect(apiRouteFits((367_409n * 240n) / 100n, 1_200_000n)).toBe(false);
+    const { chain } = fake();
+    const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
+    const v = await e.quote(sellReq());
+    expect(v.ok && v.quote.route).toEqual({ source: "sushi" }); // the fillable route, not the unfillable better one
   });
 
   it("/quote: a higher RAW Nordstern toAmount loses to Sushi once the haircut is applied", async () => {

@@ -40,6 +40,8 @@ import {
 } from "./poolGraph";
 import { isRevert, quotePaths, type PathQuote, type QuoteClient } from "./poolQuote";
 import {
+  apiFillGas,
+  apiRouteFits,
   buildPoolPlan,
   classifyRoute,
   extraHopGas,
@@ -520,6 +522,13 @@ export class RouteFiller {
     ]);
     for (const v of [sushi, nordstern]) {
       if (!v) continue;
+      // A route whose fill could never be sent under MAX_ROUTE_GAS is not a candidate.
+      if (v.ok && !apiRouteFits(v.gasUnits, rc.maxGas)) {
+        const reason = `${v.source}: route gas ${v.gasUnits} (+ the fill) would exceed MAX_ROUTE_GAS ${rc.maxGas}`;
+        reasons.push(reason);
+        if (orderHash) this.log(`· [route] ${orderHash} ${reason}`);
+        continue;
+      }
       if (v.ok) {
         raw.push(v.source === "sushi" ? { source: "sushi", quote: v, out: v.amountOut, gasUnits: v.gasUnits } : { source: "nordstern", quote: v, out: v.amountOut, gasUnits: v.gasUnits });
       } else {
@@ -987,7 +996,7 @@ export class RouteFiller {
     });
     for (const r of (await apiP).raw) raw.push({ source: r.source, out: r.out, gasUnits: r.gasUnits, label: r.source });
     if (raw.length === 0) return { ok: false, reason: "route: no quote from any source" };
-    const cands: Array<RouteCandidate & { hops?: number; label: string; path?: RoutePath }> = [];
+    const cands: Array<RouteCandidate & { gasUnits: bigint; hops?: number; label: string; path?: RoutePath }> = [];
     for (const r of raw) cands.push({ ...r, routeGasOut: (await this.nativeToToken(a.gasPrice * rankingGasUnits(planKind(r), r.gasUnits), a.tokenOut)) ?? 0n });
     const best = rankRoutes(cands)[0]!;
     const delivery = a.direct ? "direct" : "pull";
@@ -1009,7 +1018,11 @@ export class RouteFiller {
     const nativeAdd = a.nativeOut ? rc.nativeDirectGas : 0n;
     const fallback = (a.direct ? cfg.quote.gasEstimateDirect : cfg.quote.gasEstimatePull) + hopGas + nativeAdd;
     const base = learnedPermit ?? (learnedPlain ?? fallback) + permitAdd;
-    const floor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas + permitAdd + nativeAdd;
+    // An API route charges its OWN gas (+ the fill around it) when that is more: the
+    // generic pull estimate priced a 1.06M-gas Nordstern fill at ~380k (2026-10-19).
+    const apiFloor = best.source === "pool" ? 0n : apiFillGas(best.gasUnits) + permitAdd + nativeAdd;
+    const planFloor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas + permitAdd + nativeAdd;
+    const floor = apiFloor > planFloor ? apiFloor : planFloor;
     const estimate = base > floor ? base : floor;
     // r from the shape whose estimate was used (a learned one), else the funding's own.
     const rShape = learnedPermit !== undefined ? permitShape : learnedPlain !== undefined ? plainShape : a.permit ? permitShape : plainShape;

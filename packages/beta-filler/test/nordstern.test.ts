@@ -120,6 +120,9 @@ describe("validateNordsternRoute", () => {
     expect(v.amountOut).toBe(nordsternPricedOut(TO_AMOUNT, 2n));
     expect(v.minAmountOut).toBe(MIN);
     expect(v.gasUnits).toBe(82_188n);
+    // NORDSTERN_GAS_MULT_PCT (default 200 in the config): the API's figure is not Rootstock's.
+    const x2 = validateNordsternRoute(body(), req, { ...cfg, gasMultPct: 200n });
+    expect(x2.ok && x2.gasUnits).toBe(164_376n);
     expect(v.router).toBe(NORDSTERN_GUARD_ROOTSTOCK);
   });
   it.each([
