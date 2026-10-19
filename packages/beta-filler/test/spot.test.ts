@@ -126,6 +126,9 @@ describe("spot config and pairs", () => {
       { token: USDRIF, targetUsd6: 50_000_000n, fee: 500 },
     ]);
     expect(() => parseSpotReserves("0xnope:60:3000")).toThrow(/address/);
+    // An optional 4th field: the reserve's own band (a stablecoin's wider).
+    expect(parseSpotReserves(`${USDRIF}:100:500:10000`)).toEqual([{ token: USDRIF, targetUsd6: 100_000_000n, fee: 500, bandBps: 10_000n }]);
+    expect(() => parseSpotReserves(`${USDRIF}:100:500:20000`)).toThrow(/band/);
     expect(cfg.policy.spot).toMatchObject({ bandBps: 5000n, maxTicketUsd6: 100_000_000n, chargeGas: 250_000n });
   });
 
@@ -137,6 +140,9 @@ describe("spot config and pairs", () => {
     expect(s.isSpotPair(USD0, USDRIF)).toBe(true); // SELL_USDRIF is off
     expect(s.isSpotPair(USDRIF, USD0)).toBe(false); // BUY_USDRIF owns it
     expect(s.isSpotPair(USD0, RIF)).toBe(false); // not a reserve
+    // With the old buy side off (live since 2026-10-20), USDRIF → USD₮0 is spot's too.
+    const off = new SpotFiller(loadConfig({ ...ENV, BUY_USDRIF: "0" }), fakeChain({}, { received: 1n, paid: 1n }).chain, new Budget({}), new Guard(cfg.gas), new GasRatios(cfg.gas.defaultReceiptRatioPpm), deps);
+    expect(off.isSpotPair(USDRIF, USD0)).toBe(true);
   });
 });
 

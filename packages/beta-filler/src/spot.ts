@@ -2,7 +2,7 @@ import { decodeFillUpToResult, encodeFillUpTo, type Order } from "@1delta-x/sdk"
 import type { Address, Hex } from "viem";
 
 import { allowanceCall, balanceOf, previewBump, previewFill, type Chain } from "./chain";
-import type { Config, SpotReserve } from "./config";
+import { spotBand, type Config, type SpotReserve } from "./config";
 import type { FillOutcome } from "./filler";
 import { gasShape, type GasRatios } from "./gasRatio";
 import { broadcast, type Guard } from "./guard";
@@ -122,7 +122,7 @@ export class SpotFiller {
     const p = this.cfg.policy.spot;
     const res = this.reserveOf(tokenOut) ?? this.reserveOf(tokenIn);
     if (!res || p.rebalanceGas === 0n) return 0n;
-    const width = (res.targetUsd6 * p.bandBps) / 10_000n;
+    const width = (res.targetUsd6 * spotBand(res, p)) / 10_000n;
     const whole = gasPrice * p.rebalanceGas;
     if (width === 0n || usd6 >= width) return whole;
     return (whole * usd6 + width - 1n) / width;
@@ -140,7 +140,7 @@ export class SpotFiller {
     const bal = await balanceOf(this.chain, tokenIn);
     const held = bal === 0n ? 0n : await this.usd6(tokenIn, bal);
     if (held === undefined) return "spot: cannot value the received reserve";
-    const top = (res.targetUsd6 * (10_000n + this.cfg.policy.spot.bandBps)) / 10_000n;
+    const top = (res.targetUsd6 * (10_000n + spotBand(res, this.cfg.policy.spot))) / 10_000n;
     return held + addUsd6 > top ? `spot: would lift the ${tokenIn} reserve to $${fmtUnits(held + addUsd6, 6)}, over its band top $${fmtUnits(top, 6)}` : undefined;
   }
 

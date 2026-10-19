@@ -160,7 +160,10 @@ NORDSTERN_REFERER = "https://1delta-x.pages.dev"
 NORDSTERN_HAIRCUT_BPS = "2"
 NORDSTERN_MAX_PER_SWEEP = "10"
 NORDSTERN_TIMEOUT_MS = "3000"
-BUY_USDRIF = "1"
+# 2026-10-20: OFF — USDRIF ⇄ USD₮0 is the SPOT reserves' pair now (valued at the 0.05 % pool,
+# both directions). This direction priced the USDRIF it bought at the MoC redeem + RIF-sale exit,
+# ~0.4–0.5 % under the pool, and lost small tickets to the route (46 USDRIF: 45.16 vs 45.35).
+BUY_USDRIF = "0"
 SELL_USDRIF = "0"
 MAX_BUY_PRICE = "0.995"
 MIN_EXIT_EDGE_BPS = "30"
@@ -213,7 +216,8 @@ RAIL_USDRIF_BATCH = "100"
 # (1 + SPOT_BAND_BPS)) spot passes and the ticket is quoted and filled through the DEX route. The operator funds the reserves and re-centres them on demand
 # (`scripts/admin.sh rebalance-spot`: one swap of the first reserve outside its band,
 # token:targetUsd:fee). The USDRIF reserve's band top is left alone by the RIF rail.
-SPOT_RESERVES = "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:50:500"
+# WRBTC $60 ±50 % (volatile); USDRIF $100 ±100 % (a $1 token: room for two-sided flow).
+SPOT_RESERVES = "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d:60:3000,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37:100:500:10000"
 SPOT_BAND_BPS = "5000"
 SPOT_MAX_TICKET_USD = "100"
 SPOT_CHARGE_GAS = "250000"

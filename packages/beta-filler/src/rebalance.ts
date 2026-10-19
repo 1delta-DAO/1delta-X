@@ -20,7 +20,7 @@ import {
   SWAP_ROUTER02_ABI,
   type Chain,
 } from "./chain";
-import { MOC_FEE_BPS, type Config } from "./config";
+import { MOC_FEE_BPS, spotBand, type Config } from "./config";
 import { estimateAndBroadcast, type Guard, type TxKind } from "./guard";
 import { fmtUnits, rifBand } from "./policy";
 import { sanitize } from "./sanitize";
@@ -165,7 +165,7 @@ export class Rebalancer {
   private spotKeep18(token: Address): bigint {
     const sp = this.cfg.policy.spot;
     const r = sp.reserves.find((x) => x.token.toLowerCase() === token.toLowerCase());
-    return r ? ((r.targetUsd6 * (10_000n + sp.bandBps)) / 10_000n) * 10n ** 12n : 0n;
+    return r ? ((r.targetUsd6 * (10_000n + spotBand(r, sp))) / 10_000n) * 10n ** 12n : 0n;
   }
 
   /**
@@ -186,8 +186,8 @@ export class Rebalancer {
       const bal = await balanceOf(chain, r.token);
       const value = bal === 0n ? 0n : await this.dexQuote(r.token, usdt0, bal);
       if (value === undefined) continue;
-      const low = (r.targetUsd6 * (10_000n - sp.bandBps)) / 10_000n;
-      const high = (r.targetUsd6 * (10_000n + sp.bandBps)) / 10_000n;
+      const low = (r.targetUsd6 * (10_000n - spotBand(r, sp))) / 10_000n;
+      const high = (r.targetUsd6 * (10_000n + spotBand(r, sp))) / 10_000n;
       if (value < low) {
         const u = await balanceOf(chain, usdt0);
         const free = u > p.usdt0Reserve ? u - p.usdt0Reserve : 0n;

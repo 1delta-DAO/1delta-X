@@ -361,6 +361,13 @@ export interface SpotReserve {
   targetUsd6: bigint;
   /** Fee tier of the token/USD₮0 pool the rebalancer swaps on. */
   fee: number;
+  /** This reserve's own band (bps, 4th field), else SPOT_BAND_BPS — e.g. a stablecoin's wider. */
+  bandBps?: bigint;
+}
+
+/** A reserve's band, bps: its own, else the default. */
+export function spotBand(r: SpotReserve, sp: Pick<SpotPolicy, "bandBps">): bigint {
+  return r.bandBps ?? sp.bandBps;
 }
 
 /**
@@ -392,7 +399,7 @@ export interface SpotPolicy {
   slippageBps: bigint;
 }
 
-/** `SPOT_RESERVES`: `token:targetUsd:fee` entries (fee = the token/USD₮0 pool tier). */
+/** `SPOT_RESERVES`: `token:targetUsd:fee[:bandBps]` entries (fee = the token/USD₮0 pool tier). */
 export function parseSpotReserves(raw: string | undefined): SpotReserve[] {
   if (!raw || !raw.trim()) return [];
   return raw
@@ -400,10 +407,15 @@ export function parseSpotReserves(raw: string | undefined): SpotReserve[] {
     .map((x) => x.trim())
     .filter(Boolean)
     .map((x) => {
-      const [t, usd, fee] = x.split(":");
+      const [t, usd, fee, band] = x.split(":");
       if (!t || !isAddress(t, { strict: false })) throw new Error(`SPOT_RESERVES: not an address: ${t}`);
       if (!usd || !/^\d+(\.\d{1,6})?$/.test(usd)) throw new Error(`SPOT_RESERVES: bad USD target for ${t}: ${usd}`);
-      return { token: getAddress(t), targetUsd6: parseFixed(usd, 6), fee: parseFee(fee ?? "", "SPOT_RESERVES") };
+      let bandBps: bigint | undefined;
+      if (band !== undefined) {
+        if (!/^\d{1,5}$/.test(band) || BigInt(band) > 10_000n) throw new Error(`SPOT_RESERVES: band for ${t} must be 0..10000 bps: ${band}`);
+        bandBps = BigInt(band);
+      }
+      return { token: getAddress(t), targetUsd6: parseFixed(usd, 6), fee: parseFee(fee ?? "", "SPOT_RESERVES"), ...(bandBps !== undefined ? { bandBps } : {}) };
     });
 }
 

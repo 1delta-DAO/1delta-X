@@ -49,7 +49,7 @@ The operator EOA fills PULL orders directly (`fillUpTo`) from its own balances.
 
 | Direction | Maker does | Wallet pays → receives | Priced at | Status |
 | --- | --- | --- | --- | --- |
-| `buyUsdrif` | sells USDRIF | USD₮0 → USDRIF | ≤ `MAX_BUY_PRICE` **0.995**, and the MoC exit edge ≥ 30 bps | **on** |
+| `buyUsdrif` | sells USDRIF | USD₮0 → USDRIF | ≤ `MAX_BUY_PRICE` 0.995, and the MoC exit edge ≥ 30 bps | **off** (2026-10-20: USDRIF ⇄ USD₮0 is spot's, §9) |
 | `sellUsdrif` | buys USDRIF | USDRIF → USD₮0 | ≥ `MIN_SELL_PRICE` 1.003 | off |
 | `sellRif` (RIF rail) | buys RIF with USD₮0 | RIF → USD₮0 | MoC replacement cost: USD₮0 → USDRIF (0.05 % pool) → `redeemTP`, + 0.2 % MoC fee + **20 bps** haircut | **on** |
 | `sellRifUsdrif` | buys RIF with USDRIF | RIF → USDRIF | one `redeemTP` of the USDRIF received (no pool leg), fee + haircut | **on** |
@@ -190,7 +190,7 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 | --- | --- | --- |
 | USD₮0 | the hub; never below the 100 reserve | — |
 | WRBTC | **$60** | WRBTC/USD₮0 0.3 % (Oku) |
-| USDRIF | **$50** (`USDRIF_RESERVE` = the band's top, so the RIF rail leaves it alone) | USDRIF/USD₮0 0.05 % |
+| USDRIF | **$100 ±100 %** (2026-10-20; its own band, a $1 token). The RIF rail leaves it alone up to the band top. | USDRIF/USD₮0 0.05 % |
 | RIF | the RIF rail's 15–25 % band (§3) | MoC / pools |
 
 - **Tickets:** $5–100, any pair among these assets, PULL orders only.
@@ -209,6 +209,7 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 
 | Date | Decision |
 | --- | --- |
+| 2026-10-20 | USDRIF ⇄ USD₮0 handed to spot (`BUY_USDRIF` off: its MoC-exit pricing lost small tickets to the route). USDRIF reserve $100 ±100 %; bands per reserve. |
 | 2026-10-19 | Spot reserves are never swapped on their own: they move with the flow, a fill cannot lift a received reserve past its band top, and re-centring is the operator's `rebalance-spot`. |
 | 2026-10-19 | Spot reserves planned (§9): WRBTC $60, USDRIF $50, tickets ≤ $100 from the wallet, quoted at a route-equivalent price. |
 | 2026-10-19 | Fills fall through to the next route on any failure. Heavy API routes allowed (`MAX_ROUTE_GAS` 2M) when quoted at their corrected gas (Nordstern × 2.0). |
