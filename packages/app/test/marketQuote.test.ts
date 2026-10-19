@@ -36,7 +36,7 @@ import {
 import type { Level } from "../src/lib/types";
 
 const WRBTC = getAddress(pinnedToken(30, "WRBTC")!.address);
-const USD0 = getAddress(pinnedToken(30, "USD0")!.address);
+const USD0 = getAddress(pinnedToken(30, "USD₮0")!.address);
 const USDRIF = getAddress(pinnedToken(30, "USDRIF")!.address);
 const MAKER = "0x00000000000000000000000000000000000000bb" as Address;
 const SOLVER = "0x00000000000000000000000000000000000050a1" as Address;
@@ -172,8 +172,8 @@ describe("fetchQuote: the request the app sends, the errors it maps", () => {
 describe("slippage: auto 10 bps on stable pairs, 30 bps otherwise; custom within [1, 500]", () => {
   it("defaults", () => {
     expect(SLIPPAGE_DEFAULT_BPS).toEqual({ stable: 10, volatile: 30 });
-    expect(defaultSlippageBps(30, "USDRIF", "USD0")).toBe(10);
-    expect(defaultSlippageBps(30, "WRBTC", "USD0")).toBe(30);
+    expect(defaultSlippageBps(30, "USDRIF", "USD₮0")).toBe(10);
+    expect(defaultSlippageBps(30, "WRBTC", "USD₮0")).toBe(30);
     expect(defaultSlippageBps(30, "WETH", "WRBTC")).toBe(30);
   });
   it("auto widens with gas's share of the ticket: the 2026-10-12 $16 USDRIF ticket vs $1,000", () => {
@@ -226,7 +226,7 @@ describe("the quoted market order: a Dutch order that starts AT the quote", () =
     expect(quoteMatches(issued, order, NOW + 10, 120)).toBe(true);
   });
 
-  it("BUY ($20 USD0 → WRBTC): fixed output = the quote's minimum, the input RISES from the quoted rate to the full $20", () => {
+  it("BUY ($20 USD₮0 → WRBTC): fixed output = the quote's minimum, the input RISES from the quoted rate to the full $20", () => {
     const json = sellJson({ side: "buy", tokenIn: USD0, tokenOut: WRBTC, amountIn: "20000000", amountOut: "198898988000000", grossOut: "200000000000000", gasChargeOut: "1101012000000" });
     const req = { ...sellReq, side: "buy" as const, tokenIn: USD0, tokenOut: WRBTC, amountIn: 20_000_000n };
     const fq = parseQuote(json, req, NOW);
@@ -246,10 +246,10 @@ describe("the quoted market order: a Dutch order that starts AT the quote", () =
     expect(quoteMatches(issued, order, NOW, 120)).toBe(true);
   });
 
-  it("USDRIF→USD0 (stable, pull): auto slippage 10 bps; pull delivery (exclusiveFiller 0)", () => {
+  it("USDRIF→USD₮0 (stable, pull): auto slippage 10 bps; pull delivery (exclusiveFiller 0)", () => {
     const json = sellJson({ tokenIn: USDRIF, tokenOut: USD0, amountIn: "20000000000000000000", amountOut: "19858000", grossOut: "19960000", delivery: "pull" });
     const fq = parseQuote(json, { chainId: 30, tokenIn: USDRIF, tokenOut: USD0, amountIn: 20n * 10n ** 18n }, NOW);
-    const terms = quotedTerms(fq, { payDecimals: 18, recvDecimals: 6, slippageBps: defaultSlippageBps(30, "USDRIF", "USD0") });
+    const terms = quotedTerms(fq, { payDecimals: 18, recvDecimals: 6, slippageBps: defaultSlippageBps(30, "USDRIF", "USD₮0") });
     expect(terms).toEqual({ amountIn: 20, targetOut: 19.858, minOut: 19.838142, slippageBps: 10 });
     const { order } = buildOrder({
       maker: MAKER, side: "sell", pay: { address: USDRIF, decimals: 18 }, recv: { address: USD0, decimals: 6 },

@@ -7,7 +7,7 @@ const ADDR: Record<string, string> = {
   USD0: "0x779ded0c9e1022225f8e0630b35a9b54be713736",
   RIF: "0x2acc95758f8b5f583470ba265eb685a8f45fc9d5",
 };
-const ctx = (mid: number | null, base = "WRBTC", quote = "USD0"): UsdContext => ({ chainId: 30, addressOf: (s) => ADDR[s], market: { base, quote, mid } });
+const ctx = (mid: number | null, base = "WRBTC", quote = "USD₮0"): UsdContext => ({ chainId: 30, addressOf: (s) => ADDR[s], market: { base, quote, mid } });
 
 describe("USD reference prices: Sushi's price API, else a heuristic, else nothing", () => {
   it("parses only finite positive prices under addresses", () => {
@@ -21,7 +21,7 @@ describe("USD reference prices: Sushi's price API, else a heuristic, else nothin
   });
 
   it("fallback: stables are $1, the market's other leg goes through its mid; unknown → undefined", () => {
-    expect(usdPrice({}, ctx(83_000), "USD0")).toBe(1);
+    expect(usdPrice({}, ctx(83_000), "USD₮0")).toBe(1);
     expect(usdPrice({}, ctx(83_000), "WRBTC")).toBe(83_000);
     expect(usdPrice({ [ADDR.WRBTC!]: 80_000 }, ctx(0.000001, "RIF", "WRBTC"), "RIF")).toBeCloseTo(0.08, 9);
     expect(usdPrice({}, ctx(null), "WRBTC")).toBeUndefined();

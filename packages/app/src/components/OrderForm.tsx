@@ -247,6 +247,62 @@ function WalletGlyph() {
 /** Pay-amount presets, as fractions of the spendable balance (percent). */
 const QUICK_PCTS = [25, 50] as const;
 
+/** Slippage step of the −/+ buttons, bps. */
+const SLIPPAGE_STEP_BPS = 5;
+
+/**
+ * The market ticket's max slippage, as its OWN visible row (it used to hide inside the
+ * collapsed Details): Auto (the computed band) or a custom percentage with our −/+ stepper
+ * (no browser spinner). The explanation is the info tooltip.
+ */
+function SlippageRow({ slippage, note }: { slippage: OrderFormProps["slippage"]; note: string }) {
+  const custom = slippage.setting.mode === "custom";
+  const step = (dir: 1 | -1) => {
+    const bps = Math.min(MAX_SLIPPAGE_BPS, Math.max(1, Math.round(slippage.bps / SLIPPAGE_STEP_BPS) * SLIPPAGE_STEP_BPS + dir * SLIPPAGE_STEP_BPS));
+    slippage.set({ mode: "custom", bps });
+  };
+  const high = slippage.bps > 300;
+  return (
+    <div className={`sliprow${high ? " high" : ""}`}>
+      <span className="sl">
+        Max slippage
+        <span className="info" tabIndex={0} role="img" aria-label={note} title={note}>
+          i
+        </span>
+      </span>
+      <div className="slctl">
+        {/* "Auto" alone: the stepper shows the auto band as its (dimmed) placeholder. */}
+        <button type="button" aria-pressed={!custom} title={`Auto: ${(slippage.autoBps / 100).toFixed(2)}% for this ticket`} onClick={() => slippage.set({ mode: "auto" })}>
+          Auto
+        </button>
+        <span className={`slstep${custom ? " on" : ""}`}>
+          <button type="button" aria-label="Lower the slippage" disabled={slippage.bps <= 1} onClick={() => step(-1)}>
+            −
+          </button>
+          <input
+            type="number"
+            inputMode="decimal"
+            min="0.01"
+            max={MAX_SLIPPAGE_BPS / 100}
+            step="0.01"
+            aria-label="Custom slippage, percent"
+            placeholder={(slippage.autoBps / 100).toFixed(2)}
+            value={custom ? String(slippage.bps / 100) : ""}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              slippage.set(e.target.value === "" || !Number.isFinite(v) || v <= 0 ? { mode: "auto" } : { mode: "custom", bps: Math.round(v * 100) });
+            }}
+          />
+          <span className="pc">%</span>
+          <button type="button" aria-label="Raise the slippage" disabled={slippage.bps >= MAX_SLIPPAGE_BPS} onClick={() => step(1)}>
+            +
+          </button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function OrderForm(props: OrderFormProps) {
   const {
     ticket,
@@ -836,6 +892,23 @@ export function OrderForm(props: OrderFormProps) {
           </div>
         )}
 
+        {isMarket && quoteStatus !== "off" && (
+          <SlippageRow
+            slippage={slippage}
+            note={
+              quoteStatus === "quoted"
+                ? `The order starts at the filler's quote and can only decay to this much below it, over 3.5 minutes.${
+                    slippage.setting.mode === "auto" && figures?.networkFeeBps && figures.networkFeeBps > 50
+                      ? " Auto is wider on small orders: gas is a bigger share, and the band has to absorb a gas estimate that comes in high."
+                      : ""
+                  }`
+                : quoteStatus === "loading"
+                  ? "Asking the filler for a quote…"
+                  : `Filler quote unavailable${quoteError ? ` (${quoteError.slice(0, 80)})` : ""} — the order uses the gas-sized floor.`
+            }
+          />
+        )}
+
         <div className={`details${detailsOpen ? " open" : ""}`}>
           <button type="button" className="dtoggle" aria-expanded={detailsOpen} onClick={toggleDetails}>
             <span className="lbl">Details</span>
@@ -855,49 +928,6 @@ export function OrderForm(props: OrderFormProps) {
                     </div>
                   ))}
                 </dl>
-              )}
-              {isMarket && quoteStatus !== "off" && (
-                <div className="slip">
-                  <span className="sl">Slippage</span>
-                  <div className="slctl">
-                    <button
-                      type="button"
-                      aria-pressed={slippage.setting.mode === "auto"}
-                      onClick={() => slippage.set({ mode: "auto" })}
-                    >
-                      Auto {(slippage.autoBps / 100).toFixed(2)}%
-                    </button>
-                    <span className="slin">
-                      <input
-                        type="number"
-                        min="0.01"
-                        max={MAX_SLIPPAGE_BPS / 100}
-                        step="0.01"
-                        aria-label="Custom slippage, percent"
-                        placeholder="custom"
-                        value={slippage.setting.mode === "custom" ? String(slippage.bps / 100) : ""}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          slippage.set(
-                            e.target.value === "" || !Number.isFinite(v) || v <= 0 ? { mode: "auto" } : { mode: "custom", bps: Math.round(v * 100) },
-                          );
-                        }}
-                      />
-                      %
-                    </span>
-                  </div>
-                  <span className="capnote dim">
-                    {quoteStatus === "quoted"
-                      ? `The order starts at the filler's quote and can only decay to this much below it, over 3.5 minutes.${
-                          slippage.setting.mode === "auto" && figures?.networkFeeBps && figures.networkFeeBps > 50
-                            ? " Auto is wider on small orders: gas is a bigger share, and the band has to absorb a gas estimate that comes in high."
-                            : ""
-                        }`
-                      : quoteStatus === "loading"
-                        ? "Asking the filler for a quote…"
-                        : `Filler quote unavailable${quoteError ? ` (${quoteError.slice(0, 80)})` : ""} — the order uses the gas-sized floor.`}
-                  </span>
-                </div>
               )}
               {isMarket && figures?.basis === "ladder" && floor && quote && amount > 0 && floor.gasBound && (
                 <span className={floor.bps > GAS_NOTE_BPS ? "capnote" : "capnote dim"} style={{ lineHeight: 1.5 }}>

@@ -25,8 +25,8 @@ function pool(mid: number, L: number, feeBps: number, rungs = 60): { bids: Level
 }
 
 // WRBTC/USD0 ~83,000 (0.3 %), USDRIF/USD0 ~0.998 (0.05 %): the live shape of the route.
-const wrbtcUsd0: HopBook = { base: "WRBTC", quote: "USD0", ...pool(83_000, 9e3, 30) };
-const usdrifUsd0: HopBook = { base: "USDRIF", quote: "USD0", ...pool(0.998, 3e5, 5) };
+const wrbtcUsd0: HopBook = { base: "WRBTC", quote: "USD₮0", ...pool(83_000, 9e3, 30) };
+const usdrifUsd0: HopBook = { base: "USDRIF", quote: "USD₮0", ...pool(0.998, 3e5, 5) };
 const HOPS = [wrbtcUsd0, usdrifUsd0];
 
 const seqSell = (wrbtc: number) => {
@@ -42,10 +42,10 @@ const bps = (a: number, b: number) => Math.abs(a / b - 1) * 10_000;
 describe("synthetic books: composed from the hops a route walks", () => {
   const book = composeBook(HOPS, "WRBTC", "USDRIF");
 
-  it("the route: WRBTC → USD0 → USDRIF; a hop that does not connect is refused", () => {
-    expect(routeTokens(HOPS, "WRBTC")).toEqual(["WRBTC", "USD0", "USDRIF"]);
+  it("the route: WRBTC → USD₮0 → USDRIF; a hop that does not connect is refused", () => {
+    expect(routeTokens(HOPS, "WRBTC")).toEqual(["WRBTC", "USD₮0", "USDRIF"]);
     expect(() => routeTokens([usdrifUsd0, wrbtcUsd0], "WRBTC")).toThrow(/does not connect/);
-    expect(() => composeBook(HOPS, "WRBTC", "USD0")).toThrow(/does not end at USD0/);
+    expect(() => composeBook(HOPS, "WRBTC", "USD₮0")).toThrow(/does not end at USD₮0/);
   });
 
   it("touch and mid: the product of the hops' fee-net touches (fees compound), mid ≈ 83,000 / 0.998", () => {
@@ -88,7 +88,7 @@ describe("synthetic books: composed from the hops a route walks", () => {
   });
 
   it("a thin hop caps the route: the composed depth stops where that hop runs out", () => {
-    const thin: HopBook = { base: "USDRIF", quote: "USD0", ...pool(0.998, 2e3, 5, 10) };
+    const thin: HopBook = { base: "USDRIF", quote: "USD₮0", ...pool(0.998, 2e3, 5, 10) };
     const capped = composeBook([wrbtcUsd0, thin], "WRBTC", "USDRIF");
     const depthUsdrif = capped.bids.reduce((n, l) => n + l.size * l.price, 0);
     const thinAsk = thin.asks.reduce((n, l) => n + l.size, 0);

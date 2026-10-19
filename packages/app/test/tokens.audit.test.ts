@@ -8,7 +8,7 @@ import { resolveMarket } from "../src/lib/poolbook";
 import { TOKEN_CACHE_TTL_MS, parseTokenCache } from "../src/lib/tokens";
 
 const BAD = "0xbad0000000000000000000000000000000000bad" as const;
-const USD0 = TOKENS[30]!.USD0!.address;
+const USD0 = TOKENS[30]!["USD₮0"]!.address;
 const USDRIF = TOKENS[30]!.USDRIF!.address;
 const RSK = CHAINS.find((c) => c.chainId === 30)!;
 const USDRIF_MARKET = marketById("rsk-30-usdrif-usd0");
@@ -24,7 +24,7 @@ function poisonedMeta(): PoolMeta {
     pool: USDRIF_MARKET.pools[0]!.address,
     fee: 500,
     token0: { address: USDRIF, symbol: "USDRIF", name: "USDRIF", decimals: 18 },
-    token1: { address: BAD, symbol: "USD0", name: "USD0", decimals: 0 },
+    token1: { address: BAD, symbol: "USD₮0", name: "USD₮0", decimals: 0 },
     tvlUsd: 0,
   };
 }
@@ -33,10 +33,10 @@ describe("G-TS_SIGN-1 — signed token identity is pinned, not indexer-sourced",
   it("test_audit_G_TS_SIGN_1_tokenIndexIgnoresPoisonedFeeds", () => {
     // A poisoned token list says USD0 has 0 decimals and lives at 0xBAD.
     const index = buildTokenIndex(30, [
-      { address: BAD, symbol: "USD0", name: "USD0", decimals: 0, logoURI: "https://evil/logo.png" },
+      { address: BAD, symbol: "USD₮0", name: "USD₮0", decimals: 0, logoURI: "https://evil/logo.png" },
       { address: USD0, symbol: "USD₮0", name: "USDT0", decimals: 0, logoURI: "https://ok/usd0.png" },
     ]);
-    const v = index.view("USD0");
+    const v = index.view("USD₮0");
     expect(v.address).toBe(USD0);
     expect(v.decimals).toBe(6);
     // Logo matched by the pinned ADDRESS only.
@@ -75,7 +75,7 @@ describe("G-TS_SIGN-1 — signed token identity is pinned, not indexer-sourced",
                   t0_decimals: 18,
                   t1: BAD,
                   t1_name: "x",
-                  t1_symbol: "USD0",
+                  t1_symbol: "USD₮0",
                   t1_decimals: 6,
                   tvl_usd: 0,
                 },

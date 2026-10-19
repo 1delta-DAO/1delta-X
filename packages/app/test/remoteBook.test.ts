@@ -24,7 +24,7 @@ function signedOrder(nonce = 1n, deployed = true, now = 1_700_000_000): SignedOr
     maker: MAKER,
     side: "sell",
     pay: pinnedToken(30, "USDRIF")!,
-    recv: pinnedToken(30, "USD0")!,
+    recv: pinnedToken(30, "USD₮0")!,
     amountIn: 100,
     targetOut: 100,
     minOut: 99.5,

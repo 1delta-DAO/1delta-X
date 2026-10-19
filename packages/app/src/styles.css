@@ -254,8 +254,9 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
   font-family: var(--mono); font-size: 21px; font-variant-numeric: tabular-nums; letter-spacing: -.02em;
 }
 .inp input:focus { outline: none; }
-.inp input::-webkit-outer-spin-button, .inp input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-.inp input[type=number] { -moz-appearance: textfield; }
+/* No browser spinners anywhere: our own −/+ where a stepper helps (slippage). */
+input[type=number]::-webkit-outer-spin-button, input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .inp .unit { font-family: var(--mono); font-size: 11px; color: var(--faint); white-space: nowrap; }
 
 .route { display: flex; flex-direction: column; gap: 9px; }
@@ -657,19 +658,39 @@ main.reading .md .mdquote { margin-bottom: 26px; }
   display: inline-block; font-family: var(--mono); font-size: 10.5px; padding: 2px 9px;
   border-radius: 999px; border: 1px solid var(--violet); color: var(--violet);
 }
-.slip { display: flex; flex-direction: column; gap: 8px; }
-.slip .sl { font-size: 12.5px; color: var(--dim); }
-.slctl { display: flex; gap: 6px; }
-.slctl button, .slin {
-  border: 1px solid var(--line); background: none; color: var(--dim); border-radius: 999px;
-  font-family: var(--mono); font-size: 11px; padding: 6px 12px;
+/* Max slippage: its own row on a market ticket (no longer inside the collapsed Details). */
+.sliprow {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px 8px 14px;
 }
-.slctl button[aria-pressed="true"] { border-color: var(--ink); color: var(--ink); }
-.slin { display: flex; align-items: center; gap: 4px; flex: 1; }
-.slin:focus-within { border-color: var(--lime); }
-.slin input { flex: 1; min-width: 0; border: 0; background: none; font-family: var(--mono); font-size: 11px; padding: 0; text-align: right; }
-.slin input:focus { outline: none; }
-.slip .capnote.dim, .dbody > .capnote.dim { text-align: left; }
+.sliprow .sl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink); white-space: nowrap; }
+.sliprow.high { border-color: var(--orange); }
+.sliprow.high .slstep.on input, .sliprow.high .slstep.on .pc { color: var(--orange); }
+.slctl { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.slctl > button {
+  border: 1px solid var(--line); background: none; color: var(--dim); border-radius: 999px;
+  font-family: var(--mono); font-size: 11px; padding: 6px 12px; white-space: nowrap;
+}
+.slctl > button[aria-pressed="true"] { border-color: var(--lime); color: var(--lime); }
+.slstep {
+  display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px;
+  font-family: var(--mono); font-size: 11px; color: var(--dim); overflow: hidden;
+}
+.slstep.on { border-color: var(--lime); color: var(--ink); }
+.slstep:focus-within { border-color: var(--lime); }
+.slstep button {
+  border: 0; background: none; color: var(--dim); font-family: var(--mono); font-size: 13px; line-height: 1;
+  width: 26px; padding: 6px 0;
+}
+.slstep button:hover:not(:disabled) { color: var(--lime); background: var(--raise); }
+.slstep button:disabled { opacity: .3; cursor: not-allowed; }
+.slstep input {
+  width: 42px; border: 0; background: none; font-family: var(--mono); font-size: 11px; padding: 6px 0;
+  text-align: right; color: inherit;
+}
+.slstep input:focus { outline: none; }
+.slstep .pc { padding-right: 2px; }
+.dbody > .capnote.dim { text-align: left; }
 
 /* ── the active market quote, drawn into the ladder ───── */
 .qmark {

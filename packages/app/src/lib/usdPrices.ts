@@ -17,7 +17,7 @@ export const USD_POLL_MS = 60_000;
 /** Give the API this long, ms, then fall back. */
 export const USD_TIMEOUT_MS = 6_000;
 /** $1 tokens per chain (beyond the floor profile's `usd` list). */
-const STABLES: Record<number, string[]> = { 30: ["USD0", "USDT", "USDC.e", "USDRIF", "DOC"] };
+const STABLES: Record<number, string[]> = { 30: ["USD₮0", "USDT", "USDC.e", "USDRIF", "DOC"] };
 
 export type UsdTable = Record<string, number>;
 

@@ -123,7 +123,7 @@ export interface FloorProfile {
 export const FLOOR_PROFILES: Readonly<Record<number, FloorProfile>> = Object.freeze({
   30: {
     native: "WRBTC",
-    usd: ["USD0", "USDRIF"],
+    usd: ["USD₮0", "USDRIF"],
     nativeUsdMarket: "rsk-30-wrbtc-usd0",
     minGasPriceWei: ROOTSTOCK_MIN_GAS_PRICE_WEI,
     fallbackGasPriceWei: ROOTSTOCK_FALLBACK_GAS_PRICE_WEI,

@@ -108,20 +108,20 @@ describe("marketFloor — the formula", () => {
 
 describe("marketFloor — inputs", () => {
   it("haircut: stable only when BOTH legs are $1 tokens", () => {
-    expect(haircutBps(30, "USDRIF", "USD0")).toBe(FILLER_STABLE_HAIRCUT_BPS);
-    expect(haircutBps(30, "WRBTC", "USD0")).toBe(FILLER_HAIRCUT_BPS);
+    expect(haircutBps(30, "USDRIF", "USD₮0")).toBe(FILLER_STABLE_HAIRCUT_BPS);
+    expect(haircutBps(30, "WRBTC", "USD₮0")).toBe(FILLER_HAIRCUT_BPS);
     expect(haircutBps(30, "WETH", "WRBTC")).toBe(FILLER_HAIRCUT_BPS);
   });
 
   it("native price per receive token", () => {
     const ctx = { marketId: "rsk-30-wrbtc-usd0", mid: RBTC_USD, nativeUsd: RBTC_USD };
     expect(nativeInToken(30, "WRBTC", ctx)).toBe(1);
-    expect(nativeInToken(30, "USD0", ctx)).toBe(RBTC_USD);
+    expect(nativeInToken(30, "USD₮0", ctx)).toBe(RBTC_USD);
     expect(nativeInToken(30, "USDRIF", { ...ctx, marketId: "rsk-30-usdrif-usd0", mid: 1 })).toBe(RBTC_USD);
     expect(nativeInToken(30, "USDRIF", { ...ctx, marketId: "rsk-30-usdrif-usd0", mid: 1, nativeUsd: null })).toBeNull();
     // An absurd pool read is no price at all.
-    expect(nativeInToken(30, "USD0", { ...ctx, nativeUsd: 3 })).toBeNull();
-    expect(nativeInToken(30, "USD0", { ...ctx, nativeUsd: Number.POSITIVE_INFINITY })).toBeNull();
+    expect(nativeInToken(30, "USD₮0", { ...ctx, nativeUsd: 3 })).toBeNull();
+    expect(nativeInToken(30, "USD₮0", { ...ctx, nativeUsd: Number.POSITIVE_INFINITY })).toBeNull();
     // WETH/WRBTC at 0.05 WRBTC per WETH ⇒ 1 RBTC = 20 WETH.
     expect(nativeInToken(30, "WETH", { marketId: "rsk-30-weth-wrbtc", mid: 0.05, nativeUsd: null })).toBeCloseTo(20);
     expect(nativeInToken(1, "USDC", ctx)).toBeNull();

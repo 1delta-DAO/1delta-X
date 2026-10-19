@@ -103,7 +103,7 @@ function signedOrder(ttlSeconds = 300, nonce = 1n, fillOnce = false): SignedOrde
     maker: MAKER,
     side: "sell",
     pay: pinnedToken(30, "USDRIF")!,
-    recv: pinnedToken(30, "USD0")!,
+    recv: pinnedToken(30, "USD₮0")!,
     amountIn: 100,
     targetOut: 100,
     minOut: 99.5,

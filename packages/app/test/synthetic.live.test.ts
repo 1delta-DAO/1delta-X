@@ -38,7 +38,7 @@ describe.skipIf(!process.env.LIVE_RSK)("synthetic WRBTC/USDRIF: composed book vs
 
     const c = createPublicClient({ transport: http(RPC) });
     const W = pinnedToken(30, "WRBTC")!;
-    const U = pinnedToken(30, "USD0")!;
+    const U = pinnedToken(30, "USD₮0")!;
     const R = pinnedToken(30, "USDRIF")!;
     const quoteOut = async (path: `0x${string}`, amountIn: bigint) =>
       (await c.simulateContract({ address: QUOTER, abi: quoterAbi, functionName: "quoteExactInput", args: [path, amountIn] })).result[0];

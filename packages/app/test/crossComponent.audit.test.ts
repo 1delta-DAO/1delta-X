@@ -139,8 +139,8 @@ describe("APP-FLOOR-1 — the app's floor mirrors the filler's haircut table", (
     const { FILLER_HAIRCUT_BPS, FILLER_STABLE_HAIRCUT_BPS, haircutBps } = await import("../src/lib/marketFloor");
     expect(FILLER_HAIRCUT_BPS).toBe(tomlVar("ROUTE_SLIPPAGE_BPS"));
     expect(FILLER_STABLE_HAIRCUT_BPS).toBe(tomlVar("ROUTE_STABLE_SLIPPAGE_BPS"));
-    expect(haircutBps(30, "USDRIF", "USD0")).toBe(tomlVar("ROUTE_STABLE_SLIPPAGE_BPS"));
-    expect(haircutBps(30, "WRBTC", "USD0")).toBe(tomlVar("ROUTE_SLIPPAGE_BPS"));
+    expect(haircutBps(30, "USDRIF", "USD₮0")).toBe(tomlVar("ROUTE_STABLE_SLIPPAGE_BPS"));
+    expect(haircutBps(30, "WRBTC", "USD₮0")).toBe(tomlVar("ROUTE_SLIPPAGE_BPS"));
   });
 
   it("test_audit_APP_FLOOR1_haircutsMatchFillerDefaults", async () => {

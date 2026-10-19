@@ -93,7 +93,7 @@ describe("planFunding with a wrap source", () => {
     expect(plan.blocked).not.toBeNull();
   });
 
-  it("no wrap source → unchanged behaviour (USD0 / USDRIF tickets)", () => {
+  it("no wrap source → unchanged behaviour (USD₮0 / USDRIF tickets)", () => {
     const plan = planFunding(UNFUNDED, 500n, 300, NOW);
     expect(plan.steps.map((s) => s.kind)).toEqual(["erc20-approve", "permit3-grant"]);
     expect(plan.blocked).toBeNull();

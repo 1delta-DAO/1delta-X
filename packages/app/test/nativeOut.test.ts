@@ -23,7 +23,7 @@ const SOLVER = getAddress("0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1");
 const base = { maker: MAKER, pay: USD0, recv: WRBTC, amountIn: 50, targetOut: 0.0006, minOut: 0.00059, ttlSeconds: 300, decaySeconds: 60, now: 1_800_000_000 };
 
 describe("buildOrder: native-out", () => {
-  it("SELL USD0 → raw RBTC: the WRBTC leg to the module, one MAKE item (amount 0, leg-0 pre-fund reference, payout = maker), ORDERED (zero-capital fillable after task 31), pull", () => {
+  it("SELL USD₮0 → raw RBTC: the WRBTC leg to the module, one MAKE item (amount 0, leg-0 pre-fund reference, payout = maker), ORDERED (zero-capital fillable after task 31), pull", () => {
     const { order } = buildOrder({ ...base, side: "buy", nativeOut: { module: MODULE } });
     expect(order.legsOut).toHaveLength(1);
     expect(order.legsOut[0]).toMatchObject({ token: WRBTC.address, recipient: MODULE });
@@ -80,7 +80,7 @@ describe("deployment config + quote", () => {
 const NB = getAddress("0x00000000000000000000000000000000000a7b01");
 
 describe("buildOrder: native-out through the NativeBalance view (task 30)", () => {
-  it("SELL USD0 → raw RBTC: leg 0 is the view (to the maker), DIRECT to the solver, no item, no item policy", () => {
+  it("SELL USD₮0 → raw RBTC: leg 0 is the view (to the maker), DIRECT to the solver, no item, no item policy", () => {
     const { order } = buildOrder({ ...base, side: "buy", solver: SOLVER, nativeOut: { nativeBalance: NB } });
     expect(order.legsOut).toEqual([{ token: NB, start: order.legsOut[0]!.start, end: 0n, recipient: zeroAddress }]);
     expect(order.legsOut[0]!.start).toBe(590_000_000_000_000n); // minOut, 18-dec wei
@@ -152,8 +152,8 @@ describe("book rows: a NativeBalance order shows as RBTC", () => {
   });
 
   it("labels the wrapped side with the native coin", () => {
-    expect(rowSymbols("rsk-30-wrbtc-usd0", true)).toEqual({ base: "RBTC", quote: "USD0" });
-    expect(rowSymbols("rsk-30-wrbtc-usd0", false)).toEqual({ base: "WRBTC", quote: "USD0" });
+    expect(rowSymbols("rsk-30-wrbtc-usd0", true)).toEqual({ base: "RBTC", quote: "USD₮0" });
+    expect(rowSymbols("rsk-30-wrbtc-usd0", false)).toEqual({ base: "WRBTC", quote: "USD₮0" });
     expect(rowSymbols("rsk-30-rif-wrbtc", true)).toEqual({ base: "RIF", quote: "RBTC" });
   });
 });

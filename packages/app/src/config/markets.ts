@@ -109,7 +109,7 @@ export interface PinnedToken {
 export const TOKENS: Record<number, Record<string, PinnedToken>> = {
   30: {
     WRBTC: { address: "0x542fda317318ebf1d3deaf76e0b632741a7e677d", decimals: 18 },
-    USD0: { address: "0x779ded0c9e1022225f8e0630b35a9b54be713736", decimals: 6 },
+    "USD₮0": { address: "0x779ded0c9e1022225f8e0630b35a9b54be713736", decimals: 6 },
     WETH: { address: "0x2f6f07cdcf3588944bf4c42ac74ff24bf56e7590", decimals: 18 },
     USDRIF: { address: "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37", decimals: 18 },
     // RIF (ERC-677, no ERC-2612 permit) — decimals() = 18, read on-chain 2026-10-12.
@@ -184,7 +184,7 @@ export const MARKETS: Market[] = [
       { dex: "sushiswap-v3", address: "0x6d778c369cb386d50f4ee676c5c264374c52fd71", feeBps: 3000 },
     ],
     base: "WRBTC",
-    quote: "USD0",
+    quote: "USD₮0",
   },
   {
     id: "rsk-30-weth-wrbtc",
@@ -201,7 +201,7 @@ export const MARKETS: Market[] = [
     chainId: 30,
     pools: [{ dex: "uniswap-v3", address: "0xd845702af381f0405661747a6a20bde0401a19d6", feeBps: 500 }],
     base: "USDRIF",
-    quote: "USD0",
+    quote: "USD₮0",
   },
   // RIF markets (2026-10-12): the deepest tier on each factory — Oku RIF/USD₮0 0.3 %
   // (~$85k), RIF/WRBTC 0.3 % on Oku (~$35k) and Sushi v3 (~$58k). Other tiers hold dust.
@@ -210,7 +210,7 @@ export const MARKETS: Market[] = [
     chainId: 30,
     pools: [{ dex: "uniswap-v3", address: "0x57079b2d3071eb06cce6dbafb9b0306bcc49b020", feeBps: 3000 }],
     base: "RIF",
-    quote: "USD0",
+    quote: "USD₮0",
   },
   {
     id: "rsk-30-rif-wrbtc",
@@ -244,7 +244,7 @@ export const MARKETS: Market[] = [
     chainId: 30,
     pools: [{ dex: "uniswap-v3", address: "0xbbb5bc594f1551a0ea0758a99cf721951f280f5a", feeBps: 100 }],
     base: "USDC.e",
-    quote: "USD0",
+    quote: "USD₮0",
   },
   {
     id: "rsk-30-rifp-rif",
@@ -268,10 +268,10 @@ export const MARKETS: Market[] = [
 /** Market id prefix per chain (`rsk-30-…`). */
 const CHAIN_PREFIX: Record<number, string> = { 1: "eth-1", 56: "bsc-56", 30: "rsk-30" };
 /** Hubs tried in order when a pair has no pool of its own. */
-const HUBS: Record<number, string[]> = { 30: ["USD0", "WRBTC", "RIF"], 1: ["ETH", "USDC"], 56: ["WBNB", "USDT"] };
+const HUBS: Record<number, string[]> = { 30: ["USD₮0", "WRBTC", "RIF"], 1: ["ETH", "USDC"], 56: ["WBNB", "USDT"] };
 /** Which side quotes a derived pair: the first of these the pair holds is the QUOTE. */
 const QUOTE_RANK: Record<number, string[]> = {
-  30: ["USD0", "USDT", "USDC.e", "USDRIF", "WRBTC", "RIF", "WETH"],
+  30: ["USD₮0", "USDT", "USDC.e", "USDRIF", "WRBTC", "RIF", "WETH"],
   1: ["USDC", "USDT", "ETH", "WBTC"],
   56: ["USDT", "WBNB", "BTCB", "ETH"],
 };

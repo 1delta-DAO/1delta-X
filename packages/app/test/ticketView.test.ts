@@ -248,9 +248,9 @@ describe("route attribution: mixed venues and the solver hover", () => {
     const { sourceName, routeHover } = await import("../src/lib/ticketView");
     expect(sourceName("oku+sushi-v3")).toBe("Uniswap + Sushi");
     expect(sourceName("oku")).toBe("Uniswap");
-    const sym: Record<string, string> = { "0xa": "USD0", "0xb": "RIF", "0xc": "RIFP" };
+    const sym: Record<string, string> = { "0xa": "USD₮0", "0xb": "RIF", "0xc": "RIFP" };
     expect(routeHover("oku+sushi-v3", { tokens: ["0xa", "0xb", "0xc"], fees: [3000, 3000], venues: ["oku", "sushi-v3"] }, (a) => sym[a]!)).toBe(
-      "Filled by the 1delta solver: USD0 → RIF on Uniswap v3 (0.30 %) → RIFP on SushiSwap v3 (0.30 %)",
+      "Filled by the 1delta solver: USD₮0 → RIF on Uniswap v3 (0.30 %) → RIFP on SushiSwap v3 (0.30 %)",
     );
     expect(routeHover("nordstern", undefined, () => "?")).toBe("Filled by the 1delta solver via Nordstern");
   });

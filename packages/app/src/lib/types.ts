@@ -83,7 +83,7 @@ export interface PoolBook {
   bids: Level[];
   asks: Level[];
   mid: number;
-  /** Synthetic markets: the hub tokens the route passes through (["USD0"]). Absent on a pool market. */
+  /** Synthetic markets: the hub tokens the route passes through (["USD₮0"]). Absent on a pool market. */
   via?: string[];
 }
 

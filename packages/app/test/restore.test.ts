@@ -23,7 +23,7 @@ const T0 = 1_700_000_000;
 
 function order(side: "sell" | "buy", nonce: bigint, maker: `0x${string}` = MAKER, amountIn = 100): Order {
   const usdrif = pinnedToken(30, "USDRIF")!;
-  const usd0 = pinnedToken(30, "USD0")!;
+  const usd0 = pinnedToken(30, "USD₮0")!;
   return buildOrder({
     maker,
     side,
