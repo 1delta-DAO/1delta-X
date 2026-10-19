@@ -32,7 +32,12 @@ export interface RebalanceState {
   pendingOpAt?: number;
 }
 
-/** Approval headroom, in batches: an approval covers this many REDEEM_MIN_USDRIF / RIF_SELL_MIN (bounded, never unlimited). */
+/**
+ * Approval headroom, in batches, for a spender that is NOT approved for the maximum: an
+ * approval covers this many REDEEM_MIN_USDRIF / RIF_SELL_MIN. Every spender the
+ * rebalancer uses today (MoC's core, SwapRouter02) gets the maximum instead
+ * (chain.ts `maxApprovalSpender`, 2026-10-19), so this is only the bounded fallback.
+ */
 export const APPROVAL_BATCHES = 4n;
 
 const maxOf = (a: bigint, b: bigint) => (a > b ? a : b);
@@ -65,7 +70,9 @@ export interface RebalanceOutcome {
  * allowance is below one batch, then to `max(balance, APPROVAL_BATCHES × batch)`.
  * It used to approve exactly the current balance; every fill in between grew the
  * balance past it, so the next step reset the allowance to 0, re-approved, and was
- * outgrown again — approvals churned and no redemption was ever sent.
+ * outgrown again — approvals churned and no redemption was ever sent. Since
+ * 2026-10-19 its spenders (MoC's core, SwapRouter02) are approved for the MAXIMUM,
+ * once (chain.ts `maxApprovalSpender`): the bounded rule above is the fallback.
  */
 export class Rebalancer {
   constructor(
@@ -310,7 +317,7 @@ export class Rebalancer {
 
   /**
    * Approval first (its own tx) when the allowance is below `needed`, to `target`
-   * (bounded; the maximum for the router — chain.ts `maxApprovalSpender`) — else the action, through the Guard.
+   * (the maximum for the router and MoC — chain.ts `maxApprovalSpender`) — else the action, through the Guard.
    */
   private async act(
     action: RebalanceOutcome["action"],

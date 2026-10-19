@@ -492,16 +492,19 @@ export async function quoteWrbtcToUsdt0(c: Chain, cfg: Config, amountIn: bigint,
  * is immutable (no proxy: verified on chain 30, the EIP-1967 implementation slot is
  * empty and the runtime is the contract itself):
  *   • Settlement — `_deliverOutputs` pulls output legs from `ctx.filler == msg.sender`;
- *   • SwapRouter02 — the payer of every swap is `msg.sender`.
- * The per-action exact approvals they replace churned: a refill approved 239.29 →
- * reset → 239.81 → reset → 240.06 USD₮0 (USD₮0 refuses non-zero → non-zero) before its
- * one swap, ~170k gas (2026-10-14). Money on Chain's core is an UPGRADEABLE proxy, so
- * it keeps bounded approvals. The AggregatorFillSolver contract approves nothing at all
+ *   • SwapRouter02 — the payer of every swap is `msg.sender`;
+ *   • Money on Chain's core — `redeemTP` / `mintTP` pull from (and pay) `msg.sender`.
+ *     It is an UPGRADEABLE proxy (its governance can change the code); the operator
+ *     accepts that trust (2026-10-19: "we can consider Money on Chain safe") — the rail
+ *     already depends on it for every redemption.
+ * The per-action approvals they replace churned: a refill approved 239.29 → reset →
+ * 239.81 → reset → 240.06 USD₮0 (USD₮0 refuses non-zero → non-zero) before its one swap,
+ * ~170k gas (2026-10-14). The AggregatorFillSolver contract approves nothing at all
  * (it pays pools in their callbacks; aggregator routes run in its sandbox).
  */
-export function maxApprovalSpender(cfg: Pick<Config, "settlement" | "uniswap">, spender: Address): boolean {
+export function maxApprovalSpender(cfg: Pick<Config, "settlement" | "uniswap" | "moc">, spender: Address): boolean {
   const s = spender.toLowerCase();
-  return s === cfg.settlement.toLowerCase() || s === cfg.uniswap.router.toLowerCase();
+  return s === cfg.settlement.toLowerCase() || s === cfg.uniswap.router.toLowerCase() || s === cfg.moc.core.toLowerCase();
 }
 
 /**

@@ -211,7 +211,7 @@ describe("the RIF band: RIF stays a minority (15–25 %, target 20 %) of the wal
   });
 });
 
-describe("approvals (2026-10-19): the maximum, once, to the immutable spenders; bounded to MoC", () => {
+describe("approvals (2026-10-19): the maximum, once, to Settlement, the router and MoC", () => {
   const approveOf = (data: Hex) => decodeFunctionData({ abi: erc20Abi, data });
 
   it("a refill approves the ROUTER for the maximum (no per-swap exact approvals to churn)", async () => {
@@ -223,20 +223,19 @@ describe("approvals (2026-10-19): the maximum, once, to the immutable spenders; 
     ]);
   });
 
-  it("a redemption approves Money on Chain's (upgradeable) core a BOUNDED amount", async () => {
+  it("a redemption approves Money on Chain's core for the maximum too (trusted by the operator)", async () => {
     // USDRIF on hand below the band: the redeem leg, approval first.
     const { sent, chain } = fakeChain(wallet(330_000_000n, 100n * E18, 0n), undefined, 0n);
     expect(await rebalancer(chain).step()).toMatchObject({ action: "redeem", approval: true });
     const a = approveOf(sent[0]!.data);
-    expect((a.args[0] as string).toLowerCase()).toBe(cfg.moc.core.toLowerCase());
-    expect(a.args[1]).toBeLessThan(maxUint256);
+    expect([(a.args[0] as string).toLowerCase(), a.args[1]]).toEqual([cfg.moc.core.toLowerCase(), maxUint256]);
   });
 
-  it("only Settlement and the router qualify; anything else is refused an unlimited approval", async () => {
-    expect(maxApprovalSpender(cfg, cfg.settlement)).toBe(true);
-    expect(maxApprovalSpender(cfg, cfg.uniswap.router)).toBe(true);
-    expect(maxApprovalSpender(cfg, cfg.moc.core)).toBe(false);
+  it("only Settlement, the router and MoC qualify; anything else is refused an unlimited approval", async () => {
+    for (const s of [cfg.settlement, cfg.uniswap.router, cfg.moc.core]) expect(maxApprovalSpender(cfg, s)).toBe(true);
+    const stranger = "0x00000000000000000000000000000000000000dd" as Address;
+    expect(maxApprovalSpender(cfg, stranger)).toBe(false);
     const { chain } = fakeChain({}, undefined, 0n);
-    await expect(allowanceCall(chain, T.usdt0, cfg.moc.core, 1n, maxUint256)).rejects.toThrow(/unlimited/);
+    await expect(allowanceCall(chain, T.usdt0, stranger, 1n, maxUint256)).rejects.toThrow(/unlimited/);
   });
 });

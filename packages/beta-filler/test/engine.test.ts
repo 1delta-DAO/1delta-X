@@ -3,7 +3,7 @@
  * ticks, state in an injected StateStore, the rebalancer under the shared Guard.
  */
 import { AGGREGATOR_FILL_SOLVER_ABI, bumpBps, currentAmountInAt, currentAmountOutAt, OrderSide, packTiming, type Order } from "@1delta-x/sdk";
-import { decodeFunctionData, encodeFunctionResult, erc20Abi, keccak256, parseTransaction, TransactionNotFoundError, zeroAddress, type Address, type Hex } from "viem";
+import { decodeFunctionData, encodeFunctionResult, erc20Abi, keccak256, maxUint256, parseTransaction, TransactionNotFoundError, zeroAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -633,10 +633,10 @@ describe("M2: the rebalancer does not churn approvals", () => {
     expect(t2.rebalance?.approval).toBeUndefined();
     const redeem = decodeFunctionData({ abi: MOC_CORE_ABI, data: w.sent[1]!.data });
     expect(redeem.functionName).toBe("redeemTP");
-    expect(redeem.args[1]).toBe(USDRIF(160)); // min(balance 160, allowance 200)
-    // One approval, to a bounded headroom — max(balance, 4 × REDEEM_MIN_USDRIF), never
-    // unlimited — and no reset to 0.
-    expect(w.approvals).toEqual([USDRIF(200)]);
+    expect(redeem.args[1]).toBe(USDRIF(160)); // the whole balance: the allowance is the maximum
+    // One approval — the maximum, to MoC's core (chain.ts `maxApprovalSpender`, 2026-10-19) —
+    // and no reset to 0.
+    expect(w.approvals).toEqual([maxUint256]);
   });
 
   it("redeems only what the allowance covers, and re-approves only once it is below one batch", async () => {
@@ -648,18 +648,18 @@ describe("M2: the rebalancer does not churn approvals", () => {
     expect(t1.rebalance).toMatchObject({ action: "redeem", status: "sent" });
     expect(decodeFunctionData({ abi: MOC_CORE_ABI, data: w.sent[0]!.data }).args[1]).toBe(USDRIF(120));
     // Mined (and executed by the MoC queue): 180 USDRIF left, allowance 0 < one batch
-    // → re-approve, to max(180, 4 × 50) = 200.
+    // → re-approve, once, for the maximum.
     w.receipt = "success";
     w.firstOperId = 100n;
     const t2 = await e.tick({ fetchEntries: async () => [] });
     expect(t2.resolution?.status).toBe("success");
     expect(t2.rebalance).toMatchObject({ action: "redeem", status: "sent", approval: true });
-    expect(decodeFunctionData({ abi: erc20Abi, data: w.sent[1]!.data }).args).toEqual([ROOTSTOCK.mocCore, USDRIF(200)]);
+    expect(decodeFunctionData({ abi: erc20Abi, data: w.sent[1]!.data }).args).toEqual([ROOTSTOCK.mocCore, maxUint256]);
     // The approval mines: the rest is redeemed.
     const t3 = await e.tick({ fetchEntries: async () => [] });
     expect(t3.rebalance).toMatchObject({ action: "redeem", status: "sent" });
     expect(decodeFunctionData({ abi: MOC_CORE_ABI, data: w.sent[2]!.data }).args[1]).toBe(USDRIF(180));
-    expect(w.approvals).toEqual([USDRIF(200)]);
+    expect(w.approvals).toEqual([maxUint256]);
   });
 });
 
