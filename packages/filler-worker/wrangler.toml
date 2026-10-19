@@ -223,10 +223,9 @@ SPOT_BAND_BPS = "5000"
 SPOT_MAX_TICKET_USD = "100"
 SPOT_CHARGE_GAS = "150000"
 SPOT_FEE_SHARE_BPS = "5000"
-SPOT_FILL_GAS = "150000"
 SPOT_REBALANCE_GAS = "0"   # no automatic rebalance swaps: fills charge none
-SPOT_HOURLY_USD = "1000"
-SPOT_SLIPPAGE_BPS = "50"
+# At their defaults, unset (Cloudflare caps a Worker at 128 text bindings):
+# SPOT_FILL_GAS 150000, SPOT_HOURLY_USD 1000, SPOT_SLIPPAGE_BPS 50.
 USDRIF_PEG_TOLERANCE_BPS = "50"
 
 # ── gas policy (shared by both strategies and the rebalancer) ───────────────
