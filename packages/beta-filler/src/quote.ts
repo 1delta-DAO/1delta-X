@@ -439,11 +439,11 @@ export class Quoter {
             .catch((e: unknown) => ({ ok: false as const, reason: `route: ${(e as Error).message?.split("\n")[0] ?? e}` }))
         : undefined,
       // The inventory EOA fills PULL orders only (an EOA cannot run a delta-verify callback).
-      // ...nor a permit-funded one (no executeFill to carry the permit).
+      // A permit-funded one only through spot, which relays the permit first (./spot.ts).
       // ...nor a native-out one (its item shape is the route's alone).
-      inventory && req.delivery !== "direct" && req.funding !== "permit" && !req.nativeOut
+      inventory && req.delivery !== "direct" && !req.nativeOut
         ? inventory
-            .quoteInventory(req.tokenIn, req.tokenOut, req.amountIn, gasPrice)
+            .quoteInventory(req.tokenIn, req.tokenOut, req.amountIn, gasPrice, req.funding === "permit")
             .then((r) => (r.ok ? { ...r, candidate: { ...r.candidate, delivery: "pull" as const } } : r))
             .catch((e: unknown) => ({ ok: false as const, reason: `inventory: ${(e as Error).message?.split("\n")[0] ?? e}` }))
         : undefined,

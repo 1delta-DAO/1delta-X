@@ -474,6 +474,22 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(off.ok && off.quote.strategy).toBe("route");
   });
 
+  it("SPOT for a GASLESS maker (funding permit): quoted from the reserve with the relayed permit's gas on top", async () => {
+    const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1", SPOT_RESERVES: `${WRBTC}:60:3000` });
+    const { chain } = fake({ balances: { [WRBTC.toLowerCase()]: 6n * 10n ** 14n } });
+    const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
+    const req = sellReq({ tokenIn: USDT0, tokenOut: WRBTC, amountIn: 20_000_000n, side: "buy", delivery: "auto" });
+    const plain = await e.quote(req);
+    const v = await e.quote({ ...req, amountIn: 20_000_001n, funding: "permit" });
+    if (!plain.ok || !v.ok) throw new Error("no quote");
+    expect(v.quote).toMatchObject({ strategy: "inventory", delivery: "pull", route: { source: "inventory-spot" } });
+    expect(v.quote.gasUnits).toBe(plain.quote.gasUnits + 88_000n); // + SPOT_PERMIT_GAS 100k × r
+    expect(v.quote.permitChargeOut).toBeGreaterThan(0n);
+    // Not a spot pair: a permit-funded order is never the inventory EOA's.
+    const rail = await (await Engine.create({ cfg: loadConfig({ ...ENV, INVENTORY_ENABLED: "1", SELL_RIF: "1" }), chain: fake({ balances: { [RIF.toLowerCase()]: 3_000n * 10n ** 18n } }).chain, store: new MemoryStateStore(), log: () => {} })).quote({ ...sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn: 50_000_000n, side: "buy", delivery: "auto" }), funding: "permit" });
+    expect(rail.ok && rail.quote.strategy).toBe("route");
+  });
+
   it("inventory refuses what it could not fill (wallet balance): the route quote stands", async () => {
     const { chain } = fake({ usdt0Balance: 1_000_000n });
     const e = await Engine.create({ cfg: loadConfig({ ...ENV, INVENTORY_ENABLED: "1" }), chain, store: new MemoryStateStore(), log: () => {} });

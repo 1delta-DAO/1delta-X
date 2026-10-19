@@ -52,7 +52,7 @@ const deps = {
   // RBTC wei → token units at $100k / RBTC.
   nativeToToken: async (wei: bigint, t: Address) => {
     const p = PX[t.toLowerCase()]!;
-    return (wei * 100_000n * 10n ** BigInt(p.dec)) / BigInt(Math.round(p.usd * 1e6)) / 10n ** 18n * 1_000_000n / 1_000_000n;
+    return (wei * 100_000n * 1_000_000n * 10n ** BigInt(p.dec)) / BigInt(Math.round(p.usd * 1e6)) / 10n ** 18n;
   },
 };
 
@@ -311,5 +311,51 @@ describe("RIF as a spot reserve (2026-10-20): spot shares the RIF rail's pairs �
     fill.attachSpot(stub({ status: "pending", tx: "0x01", final: true }) as never);
     expect(await fill.consider(e as never)).toMatchObject({ status: "pending" });
     expect(gasPriceReads).toBe(0);
+  });
+});
+
+describe("gasless makers (2026-10-20): spot relays the maker's ERC-2612 permit, then fills", () => {
+  const permit = { token: USD0, spender: getAddress(ENV.SETTLEMENT), value: 20_000_000n, nonce: 0n, deadline: 2_000_000_000n, v: 27, r: ("0x" + "aa".repeat(32)) as Hex, s: ("0x" + "11".repeat(32)) as Hex };
+  const PERMIT_SELECTOR = "0xd505accf";
+
+  it("quote: the permit's gas (SPOT_PERMIT_GAS × r) comes on top of the fill's, and is reported as such", async () => {
+    const { s } = spot(fakeChain({ [WRBTC.toLowerCase()]: 6n * 10n ** 14n }, { received: 1n, paid: 1n }).chain);
+    const plain = await s.quote(USD0, WRBTC, 20_000_000n, GAS_PRICE);
+    const gasless = await s.quote(USD0, WRBTC, 20_000_000n, GAS_PRICE, true);
+    if (!plain.ok || !gasless.ok) throw new Error("no quote");
+    expect(cfg.policy.spot.permitGas).toBe(100_000n);
+    expect(gasless.candidate.permitGasUnits).toBe(88_000n); // 100k × r 0.88
+    expect(gasless.candidate.gasUnits).toBe(plain.candidate.gasUnits + 88_000n);
+    expect(gasless.candidate.costOut).toBeGreaterThan(plain.candidate.costOut);
+  });
+
+  it("classify takes a permit-funded order (for Settlement, on the input token)", () => {
+    const { s } = spot(fakeChain({}, { received: 1n, paid: 1n }).chain);
+    const e = { ...entry(order(USD0, 20_000_000n, WRBTC, 193n * 10n ** 12n)), fillPermit: permit };
+    expect(s.classify(e as never, ACCOUNT.address)).toMatchObject({ ok: true, permit });
+    expect(s.classify({ ...e, fillPermit: { ...permit, spender: MAKER } } as never, ACCOUNT.address)).toMatchObject({ ok: false });
+  });
+
+  it("fill: once the gate passes WITH the permit's gas, the permit is relayed (its own tx) and the fill waits for it", async () => {
+    const paid = 193n * 10n ** 12n;
+    const { sent, chain } = fakeChain({ [WRBTC.toLowerCase()]: 6n * 10n ** 14n }, { received: 20_000_000n, paid });
+    const h = host();
+    const e = { ...entry(order(USD0, 20_000_000n, WRBTC, paid)), fillPermit: permit };
+    const out = await spot(chain).s.fill(h, e as never, USD0, WRBTC, permit);
+    expect(out, h.skips.join("; ")).toMatchObject({ status: "pending", reason: "permit relayed", final: true });
+    expect(sent).toHaveLength(1);
+    expect([sent[0]!.to.toLowerCase(), sent[0]!.data.slice(0, 10)]).toEqual([USD0.toLowerCase(), PERMIT_SELECTOR]);
+    // A price that covers the fill but not the permit too: nothing is relayed.
+    // Edge $0.45: above the fill's pre-estimate ($0.34 + $0.02 min profit), below it + the permit ($0.23).
+    const tight = feeShared(dex(USD0, WRBTC, 20_000_000n), 3000, 5000n) - 45n * 10n ** 11n;
+    const t = fakeChain({ [WRBTC.toLowerCase()]: 6n * 10n ** 14n }, { received: 20_000_000n, paid: tight });
+    const h2 = host();
+    const refused = await spot(t.chain).s.fill(h2, { ...entry(order(USD0, 20_000_000n, WRBTC, tight)), fillPermit: permit } as never, USD0, WRBTC, permit);
+    expect(refused).toMatchObject({ status: "skipped" });
+    expect(h2.skips[0]).toMatch(/unprofitable.*\+permit/);
+    // The same price for a maker who approved: it fills.
+    const ok = fakeChain({ [WRBTC.toLowerCase()]: 6n * 10n ** 14n }, { received: 20_000_000n, paid: tight });
+    expect(await spot(ok.chain).s.fill(host(), entry(order(USD0, 20_000_000n, WRBTC, tight)) as never, USD0, WRBTC)).toMatchObject({ status: "pending" });
+    expect(t.sent).toHaveLength(0);
   });
 });

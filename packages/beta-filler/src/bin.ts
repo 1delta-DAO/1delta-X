@@ -87,17 +87,21 @@ function outcomeOf(r: Resolution, sent: FillOutcome): FillOutcome {
  * fill is awaited and its resolution printed.
  */
 async function fillJson(file: string) {
-  let entry: BookEntry = entryFromFile(file);
+  const raw: BookEntry = entryFromFile(file);
   // A gasless order's ERC-2612 permit goes through the same stage the book sweep runs
   // (engine.stagePermit): fill WITH the permit, or with the allowance it already made.
-  if (entry.announce.erc2612Permit) {
-    const st = await permitStage(chain, cfg, entry, BigInt(Math.floor(Date.now() / 1000)));
-    const base = { ok: true, status: entry.state?.status ?? "Fillable", validatorsPass: true };
-    if (st.kind === "permit") entry = { ...entry, state: { ...base, fillableAmount: st.fillable }, fillPermit: st.permit };
-    else if (st.kind === "funded") entry = { ...entry, state: { ...base, fillableAmount: st.fillable } };
-    else if (st.kind === "dead") throw new Error(`permit: ${st.reason}`);
+  // Re-staged after every mined non-fill tx (spot relays the permit itself, ./spot.ts).
+  const stage = async (): Promise<BookEntry> => {
+    if (!raw.announce.erc2612Permit) return raw;
+    const st = await permitStage(chain, cfg, raw, BigInt(Math.floor(Date.now() / 1000)));
+    const base = { ok: true, status: raw.state?.status ?? "Fillable", validatorsPass: true };
     log(`permit stage: ${st.kind}`);
-  }
+    if (st.kind === "permit") return { ...raw, state: { ...base, fillableAmount: st.fillable }, fillPermit: st.permit };
+    if (st.kind === "funded") return { ...raw, state: { ...base, fillableAmount: st.fillable } };
+    if (st.kind === "dead") throw new Error(`permit: ${st.reason}`);
+    return raw;
+  };
+  let entry = await stage();
   log(`beta-filler ${chain.me} ${cfg.dryRun ? "DRY RUN" : "LIVE"} — one order from ${file}: ${entry.orderHash}`);
   if (engine.pending) log(`waiting for the outstanding tx ${engine.pending.hash} first`);
   await settle();
@@ -113,7 +117,8 @@ async function fillJson(file: string) {
       out = r ? outcomeOf(r, out) : out;
       break;
     }
-    // An approval (or a reset) was mined: try the fill again.
+    // An approval (or a reset, or a relayed permit) was mined: try the fill again.
+    entry = await stage();
   }
   log(`outcome: ${json(out)}`);
   if (!out || out.status === "failed" || out.status === "pending") process.exitCode = 1;

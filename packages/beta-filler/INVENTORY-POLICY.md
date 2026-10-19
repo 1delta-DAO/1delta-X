@@ -59,7 +59,7 @@ Every inventory fill also has to pass:
 - **Size:** `MIN_FILL_USDT0` **5** to `MAX_FILL_USDT0` **500** USD₮0 per fill.
 - **Profit:** edge ≥ gas + its share of the rebalance it causes + `INVENTORY_MIN_PROFIT_USDT0` 0.02.
 - **Money on Chain guard:** for every RIF-delivering direction, MoC must not be paused or liquidated and its reserve must exceed 10× the fill.
-- **What it cannot fill:** DIRECT orders (no callback) and orders funded only by an ERC-2612 permit. Those belong to the route.
+- **What it cannot fill:** DIRECT orders (no callback). Orders funded only by an ERC-2612 permit belong to the route, except spot tickets (§9: the wallet relays the permit first).
 
 ## 3. Target ratios: the operator wallet
 
@@ -203,7 +203,7 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 - **Quote:** that value less `SPOT_CHARGE_GAS` (150k, about a direct DEX swap's 86–132k) of gas + min profit. The fill really burns ~92k; the gas gap is the margin.
 - **Against the DEX** (2026-10-20): on a 0.3 % pool (WRBTC) the maker gets ~0.15 % more than the pool gives, gasless, with no RBTC — better than swapping on Uniswap themselves. On the 0.05 % USDRIF pool the fee share is worth only ~0.025 %: about DEX parity, the case there is gasless and one signature.
 - **Rebalancing:** a reserve below 50 % of its target is bought back to target from USD₮0; one above 150 % is sold down to target.
-- **Gasless makers (follow-up):** relay their ERC-2612 permit (`permit()` is public, ~50k gas) before `fillUpTo`. That turns their $0.61–0.82 route fill into ~$0.28.
+- **Gasless makers (built 2026-10-20):** an order funded only by its maker's ERC-2612 permit is quoted with the permit's gas on top (`SPOT_PERMIT_GAS` 100k; 92k measured on the fork). Once the gate passes with that gas, the wallet relays the permit in its own tx (`permit()` is public) and fills on the next tick: ~200–260k gas in two txs against the route's 303–409k. Fork proof: `SPOT_TOKEN=RIF FUNDING=permit2612 e2e/spot-fork.sh`. Worst case (the maker moves the funds after the relay): the permit's gas, ~$0.20.
 
 **Risks.**
 - Idle capital (~$110).
@@ -214,6 +214,7 @@ the fee share from 4.5–8 % (route) to ~2.6 %.
 
 | Date | Decision |
 | --- | --- |
+| 2026-10-20 | Spot serves gasless (ERC-2612 permit) makers: it relays the permit in its own tx, then fills; the quote charges `SPOT_PERMIT_GAS` 100k on top. Most app makers are gasless, so before this spot never saw them. |
 | 2026-10-20 | RIF is a spot reserve ($96 ±25 %): spot takes RIF tickets ≤ $100 at the pool price, the rail the larger ones (it charged small tickets 260k gas + most of a refill: $1.80 vs the route's $0.53). The RIF band no longer re-centres on its own: only `rebalance-rif`, whose legs the step then carries. |
 | 2026-10-20 | Spot beats the DEX: `SPOT_CHARGE_GAS` 250k → 150k (about a direct swap), and the price is the pool's pre-fee rate with half the fee handed to the maker (`SPOT_FEE_SHARE_BPS` 5000). |
 | 2026-10-20 | USDRIF ⇄ USD₮0 handed to spot (`BUY_USDRIF` off: its MoC-exit pricing lost small tickets to the route). USDRIF reserve $100 ±100 %; bands per reserve. |

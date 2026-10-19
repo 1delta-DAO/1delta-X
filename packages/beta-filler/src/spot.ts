@@ -1,4 +1,4 @@
-import { decodeFillUpToResult, encodeFillUpTo, type Order } from "@1delta-x/sdk";
+import { decodeFillUpToResult, encodeErc2612Permit, encodeFillUpTo, type Erc2612Permit, type Order } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
 import { allowanceCall, balanceOf, previewBump, previewFill, type Chain } from "./chain";
@@ -28,6 +28,11 @@ import type { PricedCandidate } from "./quote";
  *   • QUOTED at that value less `SPOT_CHARGE_GAS` (150k, about a direct DEX swap's
  *     86–132k) against the real ~92k: on a 0.3 % pool the maker gets ~0.15 % more than
  *     swapping on the DEX themselves, gasless; the gas gap is the margin.
+ * GASLESS MAKERS (2026-10-20): an order funded only by its maker's ERC-2612 permit
+ * (`permit(maker, Settlement, …)`, ./permit.ts) cannot be carried by an EOA `fillUpTo`, so
+ * the wallet RELAYS the permit in its own tx first (`permit()` is public; SPOT_PERMIT_GAS,
+ * 100k; 92k on the fork) once the gate passes with that gas included, and fills on the next tick, when the
+ * lens reports the order funded — ~200–260k gas in two txs against the route's 303–409k.
  * NO SWAP RUNS ON ITS OWN (operator's rule, 2026-10-19: unpredictable gas and conversion
  * fees). Reserves move only with the flow. At a threshold — the paid reserve cannot cover
  * the ticket, or the fill would lift the RECEIVED reserve past its band top — spot passes,
@@ -98,20 +103,22 @@ export class SpotFiller {
     return this.enabled && lc(tokenIn) !== lc(tokenOut) && this.isSpotToken(tokenIn) && this.isSpotToken(tokenOut) && !claimedPair(tokenIn, tokenOut, this.cfg);
   }
 
-  /** Zero-RPC classification: the plain shape, PULL, fillable by us now, a spot pair. */
-  classify(entry: BookEntry, me: Address): Verdict<{ tokenIn: Address; tokenOut: Address }> {
+  /** Zero-RPC classification: the plain shape, PULL, fillable by us now, a spot pair; `permit` = a gasless maker's to relay first. */
+  classify(entry: BookEntry, me: Address): Verdict<{ tokenIn: Address; tokenOut: Address; permit?: Erc2612Permit }> {
     const order = entry.announce.order;
     const shape = plainShape(order, { hasPermitBatch: !!entry.announce.permitBatch, sigless: !!entry.announce.sigless });
     if (!shape.ok) return shape;
     if (shape.nativeOut) return { ok: false, reason: "spot: native-out orders are not spot's" };
     if (isDeltaVerify(order)) return { ok: false, reason: "spot: delta-verify order needs a callback filler" };
-    if (entry.fillPermit) return { ok: false, reason: "spot: funded only by the maker's permit (route only)" };
+    const permit = entry.fillPermit;
+    if (permit && lc(permit.spender) !== lc(this.cfg.settlement)) return { ok: false, reason: "spot: the maker's permit is not for Settlement" };
     const ex = exclusivityFor(order, me, BigInt(Math.floor(Date.now() / 1000)));
     if (ex.kind === "hard") return { ok: false, reason: "spot: exclusive to another filler" };
     const tokenIn = order.legsIn[0]!.token;
     const tokenOut = order.legsOut[0]!.token;
     if (!this.isSpotPair(tokenIn, tokenOut)) return { ok: false, reason: "spot: not a spot pair" };
-    return { ok: true, tokenIn, tokenOut };
+    if (permit && lc(permit.token) !== lc(tokenIn)) return { ok: false, reason: "spot: the maker's permit is not for the input token" };
+    return { ok: true, tokenIn, tokenOut, ...(permit ? { permit } : {}) };
   }
 
   /** The maker's price for `amount` of `tokenIn` in `tokenOut`: the pool output with SPOT_FEE_SHARE_BPS of its fee handed back, and the raw pool output. */
@@ -169,9 +176,10 @@ export class SpotFiller {
   /**
    * The spot QUOTE candidate (pull, no permit): gross = the pool quote for `amountIn` with
    * SPOT_FEE_SHARE_BPS of the pool fee handed back (`value`), cost = SPOT_CHARGE_GAS + the
-   * min profit, capped by the paid token's spendable balance.
+   * min profit, capped by the paid token's spendable balance. `permit`: a gasless maker —
+   * the relayed permit's gas (SPOT_PERMIT_GAS) is charged on top (`permitGasUnits`).
    */
-  async quote(tokenIn: Address, tokenOut: Address, amountIn: bigint, gasPrice: bigint): Promise<Verdict<{ candidate: PricedCandidate }>> {
+  async quote(tokenIn: Address, tokenOut: Address, amountIn: bigint, gasPrice: bigint, permit = false): Promise<Verdict<{ candidate: PricedCandidate }>> {
     if (!this.isSpotPair(tokenIn, tokenOut)) return { ok: false, reason: "spot: not a spot pair" };
     const p = this.cfg.policy;
     const [q, spendable] = await Promise.all([this.value(tokenIn, tokenOut, amountIn), this.spendable(tokenOut)]);
@@ -188,16 +196,35 @@ export class SpotFiller {
     const shape = gasShape("spot", "inventory", tokenIn, tokenOut, this.cfg.settlement);
     const learned = this.gasRatios.typicalEstimate(shape);
     const charge = learned !== undefined && learned > p.spot.chargeGas ? learned : p.spot.chargeGas;
-    const gasUnits = this.gasRatios.priced(shape, charge);
+    const permitGasUnits = permit ? this.permitUnits(tokenIn) : 0n;
+    const gasUnits = this.gasRatios.priced(shape, charge) + permitGasUnits;
     const [gasOut, profitOut] = await Promise.all([this.deps.nativeToToken(gasPrice * gasUnits, tokenOut), Promise.resolve(usd === 0n ? 0n : (p.minProfitUsdt0 * dexOut) / usd)]);
     if (gasOut === undefined) return { ok: false, reason: "spot: cannot price gas" };
     const costOut = gasOut + profitOut;
     if (spendable < q.value - costOut) return { ok: false, reason: "spot: reserve too small for this ticket" };
-    return { ok: true, candidate: { strategy: "inventory", grossOut: q.value, capOut: spendable, costOut, gasUnits, source: "inventory-spot" } };
+    return { ok: true, candidate: { strategy: "inventory", grossOut: q.value, capOut: spendable, costOut, gasUnits, ...(permitGasUnits > 0n ? { permitGasUnits } : {}), source: "inventory-spot" } };
   }
 
-  /** Fill one spot order from the wallet (the inventory Filler calls this; it holds the busy lock and the guard admission). */
-  async fill(host: SpotHost, entry: BookEntry, tokenIn: Address, tokenOut: Address): Promise<FillOutcome> {
+  /** The relayed permit's gas shape (learned from its receipts). */
+  private permitShape(token: Address): string {
+    return gasShape("spot-permit", "inventory", token, token, this.cfg.settlement);
+  }
+
+  /** A relayed permit's gas, priced (estimate × r): SPOT_PERMIT_GAS, or the learned estimate when higher. */
+  private permitUnits(token: Address): bigint {
+    const shape = this.permitShape(token);
+    const learned = this.gasRatios.typicalEstimate(shape);
+    const gas = this.cfg.policy.spot.permitGas;
+    return this.gasRatios.priced(shape, learned !== undefined && learned > gas ? learned : gas);
+  }
+
+  /**
+   * Fill one spot order from the wallet (the inventory Filler calls this; it holds the busy
+   * lock and the guard admission). `permit`: the order is funded only by its maker's
+   * ERC-2612 permit — once the gate passes (permit gas included) the permit is RELAYED and
+   * the fill follows on a later tick, when the order reads as funded.
+   */
+  async fill(host: SpotHost, entry: BookEntry, tokenIn: Address, tokenOut: Address, permit?: Erc2612Permit): Promise<FillOutcome> {
     const { cfg, chain } = this;
     const p = cfg.policy;
     const order: Order = entry.announce.order;
@@ -231,13 +258,17 @@ export class SpotFiller {
     const shape = gasShape("spot", "inventory", tokenIn, tokenOut, cfg.settlement);
     const rebalanceWei = this.rebalanceShareWei(gasPrice, usd, tokenIn, tokenOut);
     const profitOut = (p.minProfitUsdt0 * value) / usd;
-    const costAt = async (gasUnits: bigint) => this.deps.nativeToToken(gasPrice * this.gasRatios.priced(shape, gasUnits) + rebalanceWei, tokenOut);
+    const permitWei = permit ? gasPrice * this.permitUnits(tokenIn) : 0n;
+    const costAt = async (gasUnits: bigint) => this.deps.nativeToToken(gasPrice * this.gasRatios.priced(shape, gasUnits) + rebalanceWei + permitWei, tokenOut);
     const preCost = await costAt(p.spot.fillGas);
     if (preCost === undefined) return host.skip(orderHash, "spot: cannot price gas");
     const edge = value - paid;
     if (edge < preCost + profitOut) {
-      return host.skip(orderHash, `spot: unprofitable: value ${value} − paid ${paid} = ${edge} < gas+rebalance ${preCost} + min profit ${profitOut}`, true);
+      return host.skip(orderHash, `spot: unprofitable: value ${value} − paid ${paid} = ${edge} < gas+rebalance${permit ? "+permit" : ""} ${preCost} + min profit ${profitOut}`, true);
     }
+
+    // 3b. A gasless maker: relay the permit (its own tx); the fill follows once it is mined.
+    if (permit) return this.relayPermit(host, order, orderHash, permit, gasPrice);
 
     // 4. Settlement may pull what we pay: the maximum, once (chain.ts `maxApprovalSpender`).
     const appr = await allowanceCall(chain, tokenOut, cfg.settlement, paid, paid, undefined, true);
@@ -301,6 +332,46 @@ export class SpotFiller {
         host.onSpend();
         host.log(`→ [inventory] sent ${tag} tx ${r.tx} (gas limit ${gas} @ ${gasPrice} wei, estimate ${est})`);
         return { orderHash, status: "pending", tx: r.tx, paid: simPaid, received: simReceived, strategy: "inventory", final: true };
+    }
+  }
+
+  /** Send the maker's ERC-2612 permit (`permit(maker, Settlement, …)`) from the wallet. */
+  private async relayPermit(host: SpotHost, order: Order, orderHash: Hex, permit: Erc2612Permit, gasPrice: bigint): Promise<FillOutcome> {
+    const { cfg, chain } = this;
+    const data = encodeErc2612Permit(order.maker, permit);
+    if (cfg.dryRun) {
+      host.log(`[dry-run] [inventory] would relay the maker's permit for ${orderHash} (${permit.value} of ${permit.token})`);
+      return { orderHash, status: "dry-run", strategy: "inventory" };
+    }
+    let est: bigint;
+    try {
+      est = await chain.pub.estimateGas({ account: chain.me, to: permit.token, data, gasPrice });
+    } catch (e) {
+      // Spent (front-run — the next tick reads the order as funded), expired or revoked.
+      return host.skip(orderHash, `spot: the maker's permit does not run: ${e instanceof Error ? e.message.split("\n")[0] : e}`);
+    }
+    const gas = (est * GAS_LIMIT_PCT + 99n) / 100n;
+    const r = await broadcast(chain, this.guard, {
+      to: permit.token,
+      data,
+      gas,
+      gasPrice,
+      kind: "permit",
+      strategy: "inventory",
+      orderHash,
+      expiry: order.expiry,
+      gasMeter: { shape: this.permitShape(permit.token), estimate: est.toString() },
+      info: { note: `relay ${order.maker}'s permit of ${permit.value} ${permit.token} to Settlement for ${orderHash}` },
+    });
+    switch (r.kind) {
+      case "refused":
+        return host.skip(orderHash, r.reason);
+      case "failed":
+        throw new Error(r.reason);
+      case "sent":
+        host.onSpend();
+        host.log(`→ [inventory] relayed the maker's permit for spot ${orderHash} tx ${r.tx} (gas limit ${gas}) — the fill follows once it is mined`);
+        return { orderHash, status: "pending", reason: "permit relayed", tx: r.tx, strategy: "inventory", final: true };
     }
   }
 }

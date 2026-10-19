@@ -46,6 +46,8 @@ RIF=0x2AcC95758f8b5F583470ba265EB685a8F45fC9D5
 RIF_HOLDER=0x57079b2d3071eb06cce6dbafb9b0306bcc49b020
 # SPOT_TOKEN=RIF: the ticket is USD₮0 → RIF with the RIF RAIL ON (SELL_RIF / BUY_RIF) and
 # RIF a spot reserve — spot takes it from the rail (2026-10-20). Default WRBTC.
+# FUNDING=permit2612: a GASLESS maker (no approval, an ERC-2612 permit next to the order):
+# the wallet relays the permit, then fills (2026-10-20).
 SPOT_TOKEN=${SPOT_TOKEN:-WRBTC}
 cast rpc anvil_impersonateAccount $OP_WRBTC_HOLDER --rpc-url "$RPC" >/dev/null
 cast send $USDT0 "transfer(address,uint256)" "$OPERATOR" 300000000 --from $OP_WRBTC_HOLDER --unlocked --rpc-url "$RPC" >/dev/null
@@ -68,7 +70,7 @@ KEY=0x$(printf 'c0de%060x' 31); MAKER=$(cast wallet address "$KEY")
 cast rpc anvil_setBalance "$MAKER" 0xDE0B6B3A7640000 --rpc-url "$RPC" >/dev/null
 echo ">> maker $MAKER signs 20 USD₮0 → $SPOT_TOKEN (pull) at ${PRICE_PCT:-98} % of the pool quote"
 (cd "$PKG" && env RPC_URL=$RPC SETTLEMENT=$SETTLEMENT PERMIT3=$PERMIT3 AGGREGATOR_SOLVER=$SOLVER MAKER_KEY=$KEY MODE=pull \
-  TOKEN_IN=USDT0 TOKEN_OUT=$SPOT_TOKEN FUNDING=direct AMOUNT=20 NONCE=256 PRICE_PCT=${PRICE_PCT:-98} OUT="$WORK/spot.json" npx tsx e2e/sim-order.ts | tail -1)
+  TOKEN_IN=USDT0 TOKEN_OUT=$SPOT_TOKEN FUNDING=${FUNDING:-direct} AMOUNT=20 NONCE=256 PRICE_PCT=${PRICE_PCT:-98} OUT="$WORK/spot.json" npx tsx e2e/sim-order.ts | tail -1)
 B0=$(cast call $OUT_TOKEN 'balanceOf(address)(uint256)' "$MAKER" --rpc-url "$RPC" | awk '{print $1}')
 echo ">> the real filler (inventory with SPOT_RESERVES) fills it from the reserve"
 (cd "$PKG" && env PRIVATE_KEY=$OPERATOR_KEY RPC_URL=$RPC ORDERBOOK_URL=http://unused.invalid DRY_RUN=0 STATE_FILE="$WORK/state.json" \
@@ -80,6 +82,10 @@ grep -E "spot|outcome" "$WORK/fill.out" | cut -c1-260 | tail -4
 grep -q '"status":"filled"' "$WORK/fill.out" || { echo "!! not filled (see $WORK/fill.out)"; exit 1; }
 grep -q '"strategy":"inventory"' "$WORK/fill.out" || { echo "!! filled, but not from the reserve (see $WORK/fill.out)"; exit 1; }
 grep -q 'sent spot' "$WORK/fill.out" || { echo "!! filled from inventory, but not by spot (see $WORK/fill.out)"; exit 1; }
+if [ "${FUNDING:-direct}" = permit2612 ]; then
+  grep -q "relayed the maker's permit" "$WORK/fill.out" || { echo "!! gasless maker, but no permit relayed (see $WORK/fill.out)"; exit 1; }
+  grep -E "permit" "$WORK/fill.out" | cut -c1-200 | head -4
+fi
 B1=$(cast call $OUT_TOKEN 'balanceOf(address)(uint256)' "$MAKER" --rpc-url "$RPC" | awk '{print $1}')
 echo "   maker $SPOT_TOKEN +$(echo "$B1 - $B0" | bc) wei; operator $SPOT_TOKEN $(cast call $OUT_TOKEN 'balanceOf(address)(uint256)' $OPERATOR --rpc-url "$RPC" | awk '{print $1}'), USD₮0 $(cast call $USDT0 'balanceOf(address)(uint256)' $OPERATOR --rpc-url "$RPC" | awk '{print $1}')"
 echo "OK"

@@ -400,6 +400,12 @@ export interface SpotPolicy {
   /** `SPOT_FILL_GAS` (default 150000): the pre-simulation estimate of a spot fill (measured ~92k). */
   fillGas: bigint;
   /**
+   * `SPOT_PERMIT_GAS` (default 100000; 92k measured on the fork): a GASLESS maker's ERC-2612 permit, relayed by the
+   * wallet in its own tx before the spot fill (an EOA fill cannot carry it). Charged to the
+   * quote and the gate on top of the fill's gas; a learned estimate replaces it when higher.
+   */
+  permitGas: bigint;
+  /**
    * `SPOT_REBALANCE_GAS` (default 0): a rebalance swap's gas, charged pro rata to fills.
    * 0 because reserves are rebalanced only by the operator, never on their own.
    */
@@ -957,6 +963,7 @@ export function loadConfig(env: Env): Config {
       chargeGas: posInt(env, "SPOT_CHARGE_GAS", 150_000),
       feeShareBps: bps(env, "SPOT_FEE_SHARE_BPS", 5000),
       fillGas: posInt(env, "SPOT_FILL_GAS", 150_000),
+      permitGas: posInt(env, "SPOT_PERMIT_GAS", 100_000),
       rebalanceGas: uint(env, "SPOT_REBALANCE_GAS", 0),
       hourlyUsd6: fixed(env, "SPOT_HOURLY_USD", "1000", USDT0_DECIMALS),
       slippageBps: bps(env, "SPOT_SLIPPAGE_BPS", 50),

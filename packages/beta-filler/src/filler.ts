@@ -1,4 +1,4 @@
-import { decodeFillUpToResult, encodeFillUpTo, isFillOnce, type Order } from "@1delta-x/sdk";
+import { decodeFillUpToResult, encodeFillUpTo, isFillOnce, type Erc2612Permit, type Order } from "@1delta-x/sdk";
 import type { BookEntry } from "./intake";
 import type { Address, Hex } from "viem";
 
@@ -177,7 +177,7 @@ export class Filler {
     // (above SPOT_MAX_TICKET_USD, a reserve at its threshold) on to the rail below.
     const sc = this.spot?.classify(entry, this.chain.me);
     if (sc?.ok) {
-      const out = await this.considerSpot(entry, sc.tokenIn, sc.tokenOut);
+      const out = await this.considerSpot(entry, sc.tokenIn, sc.tokenOut, sc.permit);
       if (!cls.ok || out.status !== "skipped" || out.reason === "busy" || out.final) return out;
     }
     if (!cls.ok) return this.skip(orderHash, cls.reason, true);
@@ -206,7 +206,7 @@ export class Filler {
   }
 
   /** A spot ticket: the same lock, admission and failure handling as {@link consider}. */
-  private async considerSpot(entry: BookEntry, tokenIn: Address, tokenOut: Address): Promise<FillOutcome> {
+  private async considerSpot(entry: BookEntry, tokenIn: Address, tokenOut: Address, permit?: Erc2612Permit): Promise<FillOutcome> {
     const { orderHash } = entry;
     if ((entry.state?.fillableAmount ?? 0n) === 0n) return this.skip(orderHash, "nothing fillable", true);
     if (this.busy) return { orderHash, status: "skipped", reason: "busy", strategy: "inventory" };
@@ -220,7 +220,7 @@ export class Filler {
         onSpend: () => this.onSpend(),
         log: (m: string) => this.log(m),
       };
-      return await this.spot!.fill(host, entry, tokenIn, tokenOut);
+      return await this.spot!.fill(host, entry, tokenIn, tokenOut, permit);
     } catch (e) {
       if (isAuctionNotStarted(e)) return this.skip(orderHash, "auction not started at the latest block");
       this.guard.onSimFail(orderHash, "inventory", Date.now());
@@ -265,10 +265,15 @@ export class Filler {
    * Refused when the ticket is outside MIN_FILL / MAX_FILL, or the wallet or the hourly
    * budget could not pay it. USDT0 → RIF is the RIF rail ({@link quoteRail}).
    */
-  async quoteInventory(tokenIn: Address, tokenOut: Address, amountIn: bigint, gasPrice: bigint): Promise<Verdict<{ candidate: PricedCandidate }>> {
+  async quoteInventory(tokenIn: Address, tokenOut: Address, amountIn: bigint, gasPrice: bigint, permit = false): Promise<Verdict<{ candidate: PricedCandidate }>> {
     const { cfg, chain } = this;
     const p = cfg.policy;
     const t = cfg.tokens;
+    // A gasless (permit-funded) maker: only spot relays the permit (./spot.ts); the directions below cannot.
+    if (permit) {
+      if (!this.spot?.isSpotPair(tokenIn, tokenOut)) return { ok: false, reason: "inventory: permit funding is filled by spot only" };
+      return this.spot.quote(tokenIn, tokenOut, amountIn, gasPrice, true);
+    }
     // A spot pair (not claimed by a direction below): the spot reserves' quote. A RIF rail
     // pair shared with spot (RIF a spot reserve) falls back to the rail when spot passes.
     if (this.spot?.isSpotPair(tokenIn, tokenOut)) {

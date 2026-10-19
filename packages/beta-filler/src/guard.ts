@@ -74,7 +74,7 @@ export interface SimBackoffEntry {
 }
 
 /** What a sent tx was for. */
-export type TxKind = "fill" | "approve" | "redeem" | "sell-rif" | "mint" | "refill" | "drain" | "spot";
+export type TxKind = "fill" | "approve" | "permit" | "redeem" | "sell-rif" | "mint" | "refill" | "drain" | "spot";
 /** Who sent it. */
 export type TxStrategy = "inventory" | "route" | "rebalance";
 
