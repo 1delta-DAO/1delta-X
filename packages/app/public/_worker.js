@@ -42,15 +42,32 @@ const PROXY_PREFIX = "/api/oku/";
  * (src/lib/usdPrices.ts, display only). `public-node.rsk.co`: Rootstock's public node,
  * read directly for the dashboard's pool hops (src/hooks/useTxHops.ts) and the USD₮0
  * on-ramp's arrival check while the wallet sits on the source chain (Bridge.tsx).
+ * BRIDGE_RPC_ORIGINS: the on-ramp's source-chain public RPCs (src/config/bridge.ts
+ * `sourceRpc`, pinned there; a test keeps the two in step), for the balance views and
+ * the fee/gas quote before the wallet switches chains — reads only.
  * Every other read and every write goes through the wallet's own provider.
  */
+const BRIDGE_RPC_ORIGINS = [
+  "https://arb1.arbitrum.io",
+  "https://ethereum-rpc.publicnode.com",
+  "https://polygon.drpc.org",
+  "https://rpc.hyperliquid.xyz",
+  "https://rpc.plasma.to",
+  "https://rpc.monad.xyz",
+  "https://mainnet.optimism.io",
+  "https://mainnet.unichain.org",
+  "https://rpc.berachain.com",
+  "https://rpc-gel.inkonchain.com",
+  "https://rpc.mantle.xyz",
+];
+
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com https://api.sushi.com https://public-node.rsk.co",
+  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com https://api.sushi.com https://public-node.rsk.co " + BRIDGE_RPC_ORIGINS.join(" "),
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

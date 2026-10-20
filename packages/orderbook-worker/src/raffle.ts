@@ -3,7 +3,6 @@ import {
   canonicalAnswers,
   participationTypedData,
   validateAnswers,
-  withoutPersonal,
   PARTICIPATION_QUESTIONS,
   type ParticipationAnswers,
 } from "@1delta-x/sdk";
@@ -40,8 +39,8 @@ import { count, getMeta, setMeta, type Sql } from "./store";
  * Whether an entrant QUALIFIES for a day (volume, exclusions) is decided by the draw
  * tool (the admin page / scripts/raffle-draw.ts), which saves its record here.
  *
- * Personal data: `contact` (optional) is stored in its own column, never served by a
- * public route, and `POST /raffle/admin/purge-contacts` blanks it after payout.
+ * No personal data: the form asks none (a winner is the wallet address the draw picks,
+ * and is paid to it). The table's old `contact` column is always NULL (store.ts).
  */
 
 /** A signed form older or newer than this (vs the worker clock) is refused. */
@@ -70,7 +69,6 @@ interface EntryRow {
   updated_at: number;
   issued_at: number;
   answers: string;
-  contact: string | null;
   signature: string;
   source: string;
   note: string | null;
@@ -273,21 +271,19 @@ async function postEntry(ctx: RaffleContext, r: RaffleConfig | undefined, reques
   // Synchronous from here: re-read the row the awaits may have raced.
   const current = entryOf(ctx, r.id, e.participant);
   if (current && current.source === "signed" && Number(e.issuedAt) <= current.issued_at) return json({ error: "a newer form from this address is already on file" }, 409);
-  const contact = typeof e.answers.contact === "string" && e.answers.contact !== "" ? e.answers.contact : null;
   // A signed form supersedes a manual entry (keeps its original entry time and note).
   ctx.sql.exec(
-    `INSERT INTO raffle_entries (promotion, address, entered_at, updated_at, issued_at, answers, contact, signature, source)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'signed')
+    `INSERT INTO raffle_entries (promotion, address, entered_at, updated_at, issued_at, answers, signature, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'signed')
      ON CONFLICT(promotion, address) DO UPDATE SET
        updated_at = excluded.updated_at, issued_at = excluded.issued_at,
-       answers = excluded.answers, contact = excluded.contact, signature = excluded.signature, source = 'signed'`,
+       answers = excluded.answers, signature = excluded.signature, source = 'signed'`,
     r.id,
     e.participant,
     now,
     now,
     Number(e.issuedAt),
-    canonicalAnswers(withoutPersonal(e.answers)),
-    contact,
+    canonicalAnswers(e.answers),
     e.signature,
   );
   const row = entryOf(ctx, r.id, e.participant)!;
@@ -397,15 +393,6 @@ async function adminRoute(ctx: RaffleContext, sub: string, method: string, reque
     return json({ address: a, promotion: promotion ?? null, fills, firstFillAt: first, entered: !!entry, ...(entry ? { entry: entryJson(entry) } : {}) });
   }
 
-  if (sub === "/purge-contacts") {
-    if (method !== "POST") return notAllowed("POST");
-    const promotion = promotionOf(ctx, url);
-    if (!promotion) return json({ error: "no promotion: pass ?promotion=" }, 400);
-    const n = count(ctx.sql, `SELECT COUNT(*) AS n FROM raffle_entries WHERE promotion = ? AND contact IS NOT NULL`, promotion);
-    ctx.sql.exec(`UPDATE raffle_entries SET contact = NULL WHERE promotion = ?`, promotion);
-    return json({ promotion, purged: n });
-  }
-
   if (sub === "/reset") {
     if (method !== "POST") return notAllowed("POST");
     const b = await body(ctx, request);
@@ -478,7 +465,6 @@ function entryJson(e: EntryRow) {
     updatedAt: e.updated_at,
     issuedAt: e.issued_at,
     answers: JSON.parse(e.answers) as unknown,
-    contact: e.contact,
     signature: e.signature,
     source: e.source,
     note: e.note,
@@ -508,7 +494,6 @@ async function manualEntry(ctx: RaffleContext, promotion: string, request: Reque
     const bad = validateAnswers(answers);
     if (bad) return json({ error: bad }, 400);
   }
-  const contact = typeof answers.contact === "string" && answers.contact !== "" ? answers.contact : null;
   const now = ctx.deps.now();
   const enteredAt = b.enteredAt === undefined ? now : Number(b.enteredAt);
   if (!Number.isSafeInteger(enteredAt) || enteredAt < 0) return json({ error: "enteredAt must be unix seconds" }, 400);
@@ -517,17 +502,16 @@ async function manualEntry(ctx: RaffleContext, promotion: string, request: Reque
     return json({ error: "this address has a signed entry; pass overwrite: true to replace its answers by hand" }, 409);
   }
   ctx.sql.exec(
-    `INSERT INTO raffle_entries (promotion, address, entered_at, updated_at, issued_at, answers, contact, signature, source, note)
-     VALUES (?, ?, ?, ?, 0, ?, ?, '', 'manual', ?)
+    `INSERT INTO raffle_entries (promotion, address, entered_at, updated_at, issued_at, answers, signature, source, note)
+     VALUES (?, ?, ?, ?, 0, ?, '', 'manual', ?)
      ON CONFLICT(promotion, address) DO UPDATE SET
        entered_at = excluded.entered_at, updated_at = excluded.updated_at, answers = excluded.answers,
-       contact = excluded.contact, signature = '', issued_at = 0, source = 'manual', note = excluded.note`,
+       signature = '', issued_at = 0, source = 'manual', note = excluded.note`,
     promotion,
     address,
     enteredAt,
     now,
-    canonicalAnswers(withoutPersonal(answers)),
-    contact,
+    canonicalAnswers(answers),
     note,
   );
   return json({ promotion, entry: entryJson(entryOf(ctx, promotion, address)!) }, existing ? 200 : 201);

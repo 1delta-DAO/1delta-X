@@ -1,6 +1,6 @@
 import { erc20Abi, maxUint256, pad, type Address, type Hex } from "viem";
 
-import { ROOTSTOCK_USDT0, type BridgeSource } from "../config/bridge";
+import { APPROVE_GAS_FALLBACK, ROOTSTOCK_USDT0, SEND_GAS_FALLBACK, type BridgeSource } from "../config/bridge";
 
 /** The slice of LayerZero's IOFT (v2) the on-ramp calls. */
 export const OFT_ABI = [
@@ -117,9 +117,18 @@ export function minReceived(amountLD: bigint, quotedReceivedLD: bigint, floorBps
 /** LayerZero recommends headroom over `quoteSend`'s fee; the excess is refunded to the sender. */
 export const withFeeBuffer = (nativeFee: bigint): bigint => nativeFee + nativeFee / 10n;
 
+/**
+ * Headroom on the source-chain gas figure: the gas price moves between quote and send,
+ * and on OP-stack chains the L1 data fee is charged on top of `gasUsed × gasPrice`.
+ */
+export const withGasBuffer = (cost: bigint): bigint => cost + cost / 5n;
+
 /** The reads and writes the panel's steps make; injected so tests drive them without a wallet. */
 export interface BridgeClient {
   read<T>(args: { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] }): Promise<T>;
+  estimateGas(args: { account: Address; address: Address; abi: readonly unknown[]; functionName: string; args: readonly unknown[]; value?: bigint }): Promise<bigint>;
+  gasPrice(): Promise<bigint>;
+  nativeBalance(owner: Address): Promise<bigint>;
   write(args: { address: Address; abi: readonly unknown[]; functionName: string; args: readonly unknown[]; value?: bigint }): Promise<Hex>;
   waitForReceipt(hash: Hex): Promise<{ status: "success" | "reverted" }>;
 }
@@ -133,13 +142,36 @@ export interface BridgeQuote {
   approvalRequired: boolean;
   allowance: bigint;
   balance: bigint;
+  /** Approval txs before the send: 0, 1, or 2 (USDT's zero-reset first). */
+  approvals: number;
+  /** Source-chain gas for the approvals plus the send, buffered ({@link withGasBuffer}). */
+  gasCost: bigint;
+  /** Whether the send's gas came from `eth_estimateGas` (else {@link SEND_GAS_FALLBACK}). */
+  gasEstimated: boolean;
+  /** The sender's native balance on the source chain. */
+  nativeBalance: bigint;
 }
 
-/** Everything the confirm step shows, from the source chain. */
+/** All the source chain's native coin the bridge takes: the LayerZero fee plus gas. */
+export const nativeNeeded = (q: Pick<BridgeQuote, "nativeFee" | "gasCost">): bigint => q.nativeFee + q.gasCost;
+
+/** The approval txs `approveForBridge` will send. */
+export function approvalsNeeded(approvalRequired: boolean, allowance: bigint, amountLD: bigint): number {
+  if (!approvalRequired || allowance >= amountLD) return 0;
+  return allowance > 0n ? 2 : 1;
+}
+
+/**
+ * Everything the confirm step shows, from the source chain: what lands, the LayerZero
+ * fee, and the gas the approval(s) and the send will burn. The send's gas is estimated
+ * live when it can run (no approval pending); otherwise the measured fallbacks apply.
+ */
 export async function quoteBridge(c: BridgeClient, src: BridgeSource, owner: Address, amountLD: bigint): Promise<BridgeQuote> {
-  const [balance, approvalRequired] = await Promise.all([
+  const [balance, approvalRequired, nativeBalance, gasPrice] = await Promise.all([
     c.read<bigint>({ address: src.token, abi: erc20Abi, functionName: "balanceOf", args: [owner] }),
     c.read<boolean>({ address: src.oft, abi: OFT_ABI, functionName: "approvalRequired" }).catch(() => true),
+    c.nativeBalance(owner),
+    c.gasPrice(),
   ]);
   const allowance = approvalRequired ? await c.read<bigint>({ address: src.token, abi: erc20Abi, functionName: "allowance", args: [owner, src.oft] }) : maxUint256;
   const [, , receipt] = await c.read<readonly [unknown, unknown, { amountReceivedLD: bigint }]>({
@@ -156,12 +188,32 @@ export async function quoteBridge(c: BridgeClient, src: BridgeSource, owner: Add
     functionName: "quoteSend",
     args: [sendParamFor(owner, amountLD, minAmountLD), false],
   });
-  return { amountLD, minAmountLD, nativeFee: withFeeBuffer(fee.nativeFee), approvalRequired, allowance, balance };
+  const nativeFee = withFeeBuffer(fee.nativeFee);
+  const approvals = approvalsNeeded(approvalRequired, allowance, amountLD);
+  let sendGas = SEND_GAS_FALLBACK;
+  let gasEstimated = false;
+  if (approvals === 0 && balance >= amountLD && nativeBalance >= nativeFee) {
+    try {
+      sendGas = await c.estimateGas({
+        account: owner,
+        address: src.oft,
+        abi: OFT_ABI,
+        functionName: "send",
+        args: [sendParamFor(owner, amountLD, minAmountLD), { nativeFee, lzTokenFee: 0n }, owner],
+        value: nativeFee,
+      });
+      gasEstimated = true;
+    } catch {
+      // A node that will not simulate: the fallback stands.
+    }
+  }
+  const gasCost = withGasBuffer((sendGas + APPROVE_GAS_FALLBACK * BigInt(approvals)) * gasPrice);
+  return { amountLD, minAmountLD, nativeFee, approvalRequired, allowance, balance, approvals, gasCost, gasEstimated, nativeBalance };
 }
 
 /** Approve exactly `amountLD` to the OFT adapter (only where `approvalRequired`). USDT needs a zero reset first. */
 export async function approveForBridge(c: BridgeClient, src: BridgeSource, q: BridgeQuote): Promise<void> {
-  if (!q.approvalRequired || q.allowance >= q.amountLD) return;
+  if (approvalsNeeded(q.approvalRequired, q.allowance, q.amountLD) === 0) return;
   // Ethereum USDT reverts on approve(x) while a non-zero allowance stands.
   if (q.allowance > 0n) {
     const reset = await c.write({ address: src.token, abi: erc20Abi, functionName: "approve", args: [src.oft, 0n] });

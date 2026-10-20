@@ -142,6 +142,13 @@ describe("worker /api/book proxy — allowlisted routes", () => {
     expect(res.headers.get("content-security-policy")).toMatch(/connect-src [^;]*https:\/\/public-node\.rsk\.co/);
   });
 
+  it("the CSP admits every on-ramp source RPC (balance views and quotes read them directly)", async () => {
+    const { BRIDGE_SOURCES, sourceRpc } = await import("../src/config/bridge");
+    const csp = (await call("/api/book/fills")).headers.get("content-security-policy")!;
+    const connect = csp.split(";").find((d) => d.trim().startsWith("connect-src"))!.trim().split(/\s+/);
+    for (const s of BRIDGE_SOURCES) expect(connect).toContain(new URL(sourceRpc(s)).origin);
+  });
+
   it("no x-forwarded-for when Cloudflare supplied no client address", async () => {
     await call("/api/book/fills");
     expect(seen[0]!.headers.get("x-forwarded-for")).toBeNull();

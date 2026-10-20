@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { maxUint256, type Address, type Hex } from "viem";
 
-import { BRIDGE_SOURCES, bridgeSource, ROOTSTOCK_USDT0 } from "../src/config/bridge";
+import { APPROVE_GAS_FALLBACK, BRIDGE_SOURCES, bridgeSource, NATIVE_USD_REF, ROOTSTOCK_USDT0, SEND_GAS_FALLBACK } from "../src/config/bridge";
 import { TOKENS } from "../src/config/markets";
-import { approveForBridge, arrived, minReceived, quoteBridge, sendParamFor, sendToRootstock, toBytes32, withFeeBuffer, type BridgeClient } from "../src/lib/bridge";
+import { approveForBridge, approvalsNeeded, arrived, minReceived, nativeNeeded, quoteBridge, sendParamFor, sendToRootstock, toBytes32, withFeeBuffer, withGasBuffer, type BridgeClient } from "../src/lib/bridge";
 
 const OWNER = "0x00000000000000000000000000000000000000a1" as Address;
 
@@ -40,9 +40,17 @@ describe("send parameters", () => {
 });
 
 /** A scripted chain: records writes, answers reads. */
-function fake(over: { approvalRequired?: boolean; allowance?: bigint; received?: bigint } = {}) {
+function fake(over: { approvalRequired?: boolean; allowance?: bigint; received?: bigint; estimate?: bigint | "revert"; native?: bigint } = {}) {
   const writes: Array<{ functionName: string; args: readonly unknown[]; value?: bigint }> = [];
+  const estimates: Array<{ functionName: string; value?: bigint }> = [];
   const c: BridgeClient = {
+    async estimateGas(a) {
+      estimates.push({ functionName: a.functionName, value: a.value });
+      if (over.estimate === "revert") throw new Error("execution reverted");
+      return over.estimate ?? 300_000n;
+    },
+    gasPrice: async () => 10n,
+    nativeBalance: async () => over.native ?? 10n ** 18n,
     async read<T>(a: { functionName: string; args?: readonly unknown[] }): Promise<T> {
       switch (a.functionName) {
         case "balanceOf":
@@ -66,7 +74,7 @@ function fake(over: { approvalRequired?: boolean; allowance?: bigint; received?:
     },
     waitForReceipt: async () => ({ status: "success" }),
   };
-  return { c, writes };
+  return { c, writes, estimates };
 }
 
 describe("bridge steps", () => {
@@ -98,6 +106,36 @@ describe("bridge steps", () => {
     const enough = fake({ approvalRequired: true, allowance: 30_000_000n });
     await approveForBridge(enough.c, eth, await quoteBridge(enough.c, eth, OWNER, 25_000_000n));
     expect(enough.writes).toEqual([]);
+  });
+
+  it("prices gas: a live send estimate when it can run, the measured fallbacks otherwise", async () => {
+    const live = fake({ estimate: 300_000n });
+    const q = await quoteBridge(live.c, arb, OWNER, 25_000_000n);
+    expect(live.estimates).toEqual([{ functionName: "send", value: 1_100n }]);
+    expect(q).toMatchObject({ approvals: 0, gasEstimated: true, gasCost: withGasBuffer(300_000n * 10n), nativeBalance: 10n ** 18n });
+    expect(nativeNeeded(q)).toBe(1_100n + withGasBuffer(3_000_000n));
+
+    // Pending approval: the send would revert, so nothing is simulated.
+    const stale = fake({ approvalRequired: true, allowance: 3n });
+    const q2 = await quoteBridge(stale.c, eth, OWNER, 25_000_000n);
+    expect(stale.estimates).toEqual([]);
+    expect(q2).toMatchObject({ approvals: 2, gasEstimated: false, gasCost: withGasBuffer((SEND_GAS_FALLBACK + 2n * APPROVE_GAS_FALLBACK) * 10n) });
+
+    // A node that will not simulate, and a wallet too poor to: fallback, not an error.
+    expect(await quoteBridge(fake({ estimate: "revert" }).c, arb, OWNER, 25_000_000n)).toMatchObject({ gasEstimated: false, gasCost: withGasBuffer(SEND_GAS_FALLBACK * 10n) });
+    const poor = fake({ native: 0n });
+    expect(await quoteBridge(poor.c, arb, OWNER, 25_000_000n)).toMatchObject({ gasEstimated: false, nativeBalance: 0n });
+    expect(poor.estimates).toEqual([]);
+
+    expect([approvalsNeeded(false, 0n, 5n), approvalsNeeded(true, 0n, 5n), approvalsNeeded(true, 1n, 5n), approvalsNeeded(true, 5n, 5n)]).toEqual([0, 1, 2, 0]);
+  });
+
+  it("every source's native coin has a USD reference, except Mantle's (unlisted)", () => {
+    for (const s of BRIDGE_SOURCES) {
+      const ref = NATIVE_USD_REF[s.chain.nativeCurrency.symbol];
+      if (s.key === "mantle") expect(ref).toBeUndefined();
+      else expect(ref?.token).toBe(ref?.token.toLowerCase());
+    }
   });
 
   it("refuses to send when the quote credits suspiciously little", async () => {

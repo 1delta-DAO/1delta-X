@@ -20,7 +20,6 @@ const ANSWERS: ParticipationAnswers = {
   ease: 4,
   fill: 4,
   friction: "none",
-  contact: "@alice",
 };
 
 let ipSeq = 0;
@@ -86,8 +85,8 @@ describe("prize draw — participation entries", () => {
     expect(after.body).toMatchObject({ traded: true, entered: true });
     const list = await call(book, "GET", "/raffle/entrants", undefined, ip());
     expect(list.body).toMatchObject({ promotion: PROMOTION, count: 1, entrants: [{ address: alice.address.toLowerCase() }] });
-    // The public list carries no answers and no contact.
-    expect(JSON.stringify(list.body)).not.toContain("@alice");
+    // The public list carries no answers.
+    expect(JSON.stringify(list.body)).not.toContain("answers");
     expect((await call(book, "GET", "/raffle", undefined, ip())).body).toMatchObject({ live: true, entrants: 1 });
   });
 
@@ -112,7 +111,7 @@ describe("prize draw — participation entries", () => {
     const book = await bookWithFill(alice);
     const first = await form(alice, { issuedAt: now() - 60 });
     expect((await call(book, "POST", "/raffle/entries", first, ip())).status).toBe(201);
-    const second = await form(alice, { answers: { ...ANSWERS, ease: 2, contact: "" } });
+    const second = await form(alice, { answers: { ...ANSWERS, ease: 2 } });
     const res = await call(book, "POST", "/raffle/entries", second, ip());
     expect(res.status).toBe(200);
     expect(res.body.updated).toBe(true);
@@ -123,20 +122,18 @@ describe("prize draw — participation entries", () => {
     const entries = exp.body.entries as Array<Record<string, unknown>>;
     expect(entries).toHaveLength(1);
     expect(entries[0]!.answers).toMatchObject({ ease: 2 });
-    expect(entries[0]!.contact).toBeNull();
   });
 
-  it("keeps the contact out of the answers, exports it to the admin only, and purges it", async () => {
+  it("takes no personal data: a contact field is refused, the export has none, and only an admin reads it", async () => {
     const book = await bookWithFill(alice);
-    await call(book, "POST", "/raffle/entries", await form(alice), ip());
+    const refused = await call(book, "POST", "/raffle/entries", await form(alice, { answers: { ...ANSWERS, contact: "@alice" } }), ip());
+    expect(refused.status).toBe(400);
+    expect(String(refused.body.error)).toMatch(/unknown question "contact"/);
+    expect((await call(book, "POST", "/raffle/entries", await form(alice), ip())).status).toBe(201);
     expect((await call(book, "GET", "/raffle/admin/entries", undefined, ip())).status).toBe(403);
-    const exp = await admin(book, "GET", "/raffle/admin/entries");
-    const e = (exp.body.entries as Array<Record<string, unknown>>)[0]!;
-    expect(e.contact).toBe("@alice");
-    expect((e.answers as Record<string, unknown>).contact).toBeUndefined();
-    expect((await call(book, "POST", "/raffle/admin/purge-contacts", "{}", ip())).status).toBe(403);
-    expect((await admin(book, "POST", "/raffle/admin/purge-contacts")).body).toMatchObject({ purged: 1 });
-    expect(((await admin(book, "GET", "/raffle/admin/entries")).body.entries as Array<Record<string, unknown>>)[0]!.contact).toBeNull();
+    const e = ((await admin(book, "GET", "/raffle/admin/entries")).body.entries as Array<Record<string, unknown>>)[0]!;
+    expect("contact" in e).toBe(false);
+    expect((await admin(book, "POST", "/raffle/admin/purge-contacts")).status).toBe(404);
   });
 
   it("closes entries at RAFFLE_ENDS_AT", async () => {

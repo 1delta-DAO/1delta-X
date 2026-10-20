@@ -134,8 +134,8 @@ export function ParticipateSheet({
                 ))}
               </fieldset>
               <p className="pqfine">
-                Stored with your address: your answers, the signature and the time. The contact field is optional, used
-                only to reach a winner, never published, and deleted after the payout. Answers are never published.
+                Stored with your address: your answers, the signature and the time — nothing personal. Answers are
+                never published. Winners are announced by wallet address and paid to it.
               </p>
               {error && <p className="signerr">{error}</p>}
               {!signer && <p className="warn pqfine">Switch your wallet to Rootstock to sign.</p>}

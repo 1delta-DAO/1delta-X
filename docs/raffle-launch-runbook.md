@@ -3,7 +3,7 @@
 **Day to day, use the operator console. It is a separate Pages project (`packages/raffle-admin`, behind Cloudflare Access), not part of the app.** It needs the
 orderbook worker's `RAFFLE_ADMIN_TOKEN`. It has four tabs:
 
-- **Setup & tests**: configure, switch on/off, run checks, reset a promotion, purge contacts.
+- **Setup & tests**: configure, switch on/off, run checks, reset a promotion.
 - **Feedback**: tallies, every entry, CSV download.
 - **Support**: look up an address, add an entry by hand with a note, remove an entry.
 - **Draws**: compute qualifiers, dry-run draw, save and fix the draw block, draw, exclude and redraw.
@@ -70,7 +70,7 @@ Steps from your wallet (real funds, small):
 
 Do this from a fresh wallet that holds **no RBTC on Rootstock**:
 
-1. Open the app, then **Bring USD₮0** → Arbitrum → 10 USD₮0 → Bridge. Expect about 0.00045 ETH in fees, and arrival in under 3 minutes.
+1. Open the app, then **Bring USD₮0** → Arbitrum → 10 USD₮0 → Bridge. The summary should show the LayerZero fee (about $1.2), Arbitrum gas (a few cents) and the total in ETH and USD. Expect arrival in about 23 minutes.
 2. Switch back to Rootstock. Sell 5 USD₮0 for **RBTC** (market order), using the gasless permit path.
    - Expected: native RBTC arrives through solver v3 + NativeBalance, and the wallet never paid gas.
    - This combination (permit-funded order + native RBTC out) has not been filled live before. If it fails, the bridge still works and RBTC delivery is the thing to fix.
@@ -99,13 +99,8 @@ ambassadors run on their own pool). One address per line.
 
 ## 5. Close
 
-After the last payout or forfeit:
-
-On the console, use **Purge contacts**, or run:
-`curl -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}' https://<orderbook-worker>/raffle/admin/purge-contacts`.
-
-This is the deletion TC §4.7 promises. Then pull the feedback for the
-freeze-backlog triage:
+After the last payout or forfeit, pull the feedback for the freeze-backlog triage.
+The form collects no contact details, so there is nothing personal to delete.
 
 Use **Download CSV** under Feedback, or call `GET /raffle/admin/entries`.
 

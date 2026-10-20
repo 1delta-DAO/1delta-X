@@ -94,10 +94,7 @@ export function FeedbackTab({ api, promotion }: { api: AdminApi; promotion: stri
                 <th>Address</th>
                 <th>Entered</th>
                 <th>Source</th>
-                <th>Contact</th>
-                {data.questions
-                  .filter((q) => q.id !== "contact")
-                  .map((q) => (
+                {data.questions.map((q) => (
                     <th key={q.id} title={q.label}>
                       {q.id}
                     </th>
@@ -112,10 +109,7 @@ export function FeedbackTab({ api, promotion }: { api: AdminApi; promotion: stri
                   </td>
                   <td className="m">{utc(e.enteredAt)}</td>
                   <td title={e.note ?? ""}>{e.source === "manual" ? `manual: ${e.note ?? ""}` : "signed"}</td>
-                  <td>{e.contact ?? ""}</td>
-                  {data.questions
-                    .filter((q) => q.id !== "contact")
-                    .map((q) => {
+                  {data.questions.map((q) => {
                       const v = e.answers[q.id];
                       return <td key={q.id}>{v === undefined ? "" : Array.isArray(v) ? v.join(", ") : String(v)}</td>;
                     })}

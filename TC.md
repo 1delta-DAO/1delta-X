@@ -47,7 +47,7 @@
 
 4.6. The participation form asks for feedback on the 1delta interface and for the eligibility confirmations described in Section 3. By signing it you confirm that the statements in it are true. 1delta may treat an entry made with false confirmations as invalid at any time, including after a draw.
 
-4.7. 1delta stores the signed form, its answers, the wallet address and the time of entry to operate the Promotion and to improve its products. Answers are not published. A contact detail, if you choose to give one, is used only to contact a selected winner, is not published, and is deleted after the related prize has been paid or forfeited.
+4.7. 1delta stores the signed form, its answers, the wallet address and the time of entry to operate the Promotion and to improve its products. The form asks for no personal contact details. Answers are not published.
 
 ## 5. Exclusion and Fair Play
 
@@ -89,7 +89,7 @@
 
 ## 8. Winner Announcement
 
-8.1. Winning wallet addresses may be announced publicly through 1delta's official communication channels.
+8.1. Winning wallet addresses may be announced publicly through 1delta's official communication channels. Because 1delta holds no contact details for participants, this announcement is how a winner is notified, and any request under Section 7.5 is made through the same channels. Prizes are paid to the winning wallet address.
 
 8.2. 1delta may publish a wallet address in full, in shortened form, or in another form sufficient to identify the winning address.
 

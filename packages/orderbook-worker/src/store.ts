@@ -24,9 +24,10 @@ export interface Sql {
  *   billed        orders / cancels already charged to their maker
  *   raffle_entries prize-draw participation forms (src/raffle.ts), one per
  *                 (promotion, address); `answers` holds the canonical JSON the
- *                 signature commits to, `contact` the personal field split out
+ *                 signature commits to. `contact` is a retired column (the form
+ *                 dropped its contact field 2026-10-20): always NULL, scrubbed on start
  *   raffle_draws  the daily draw records the admin page saves (snapshot → result),
- *                 one per (promotion, UTC day); served publicly without contacts
+ *                 one per (promotion, UTC day); served publicly
  *
  * Amounts are decimal TEXT (uint256 does not fit a SQLite integer); block numbers
  * and unix seconds are INTEGER.
@@ -116,6 +117,8 @@ export const SCHEMA = [
     note TEXT,
     PRIMARY KEY (promotion, address)
   )`,
+  // The contact field was dropped (2026-10-20): erase any value a rehearsal stored.
+  `UPDATE raffle_entries SET contact = NULL WHERE contact IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS raffle_draws (
     promotion TEXT NOT NULL,
     day TEXT NOT NULL,

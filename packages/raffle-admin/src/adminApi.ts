@@ -36,7 +36,6 @@ export interface AdminEntry {
   updatedAt: number;
   issuedAt: number;
   answers: ParticipationAnswers;
-  contact: string | null;
   signature: string;
   source: "signed" | "manual";
   note: string | null;
@@ -104,7 +103,6 @@ export class AdminApi {
       undefined,
       promotion,
     );
-  purgeContacts = (promotion?: string) => this.req<{ purged: number }>("POST", "/raffle/admin/purge-contacts", {}, promotion);
   reset = (promotion: string, confirm: string) => this.req<{ entriesRemoved: number; drawsRemoved: number }>("POST", "/raffle/admin/reset", { promotion, confirm });
   draws = (promotion?: string) => this.req<{ promotion: string; draws: SavedDraw[] }>("GET", "/raffle/admin/draws", undefined, promotion);
   saveDraw = (s: Snapshot) => this.req<{ saved: boolean }>("PUT", `/raffle/admin/draws/${s.day}`, s, s.promotion);
@@ -141,7 +139,6 @@ export type Tally =
 
 export function tallyFeedback(questions: readonly Question[], entries: readonly AdminEntry[]): Tally[] {
   return questions
-    .filter((q) => !(q.kind === "text" && q.personal))
     .map((q): Tally => {
       const values = entries.map((e) => ({ address: e.address, v: e.answers[q.id] })).filter((x) => x.v !== undefined);
       if (q.kind === "choice" || q.kind === "multi") {
@@ -164,9 +161,9 @@ export function entriesCsv(questions: readonly Question[], entries: readonly Adm
     const s = v === undefined || v === null ? "" : Array.isArray(v) ? v.join(" | ") : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const head = ["address", "enteredAt", "updatedAt", "source", "note", "contact", ...questions.filter((q) => q.id !== "contact").map((q) => q.id)];
+  const head = ["address", "enteredAt", "updatedAt", "source", "note", ...questions.map((q) => q.id)];
   const rows = entries.map((e) =>
-    [e.address, new Date(e.enteredAt * 1000).toISOString(), new Date(e.updatedAt * 1000).toISOString(), e.source, e.note, e.contact, ...questions.filter((q) => q.id !== "contact").map((q) => e.answers[q.id])].map(cell).join(","),
+    [e.address, new Date(e.enteredAt * 1000).toISOString(), new Date(e.updatedAt * 1000).toISOString(), e.source, e.note, ...questions.map((q) => e.answers[q.id])].map(cell).join(","),
   );
   return [head.join(","), ...rows].join("\n") + "\n";
 }

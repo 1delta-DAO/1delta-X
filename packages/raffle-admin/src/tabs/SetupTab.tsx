@@ -222,21 +222,6 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
           >
             Reset promotion
           </button>
-          <p className="pqfine">After the last payout: delete the contact field of every entry of the selected promotion (TC §4.7).</p>
-          <button
-            type="button"
-            className="cta line"
-            disabled={busy || !config.effective}
-            onClick={() =>
-              window.confirm("Delete every contact detail of the running promotion?") &&
-              run(async () => {
-                const r = await api.purgeContacts();
-                setNote(`${r.purged} contact detail(s) deleted.`);
-              })
-            }
-          >
-            Purge contacts (running promotion)
-          </button>
         </div>
       </section>
     </div>

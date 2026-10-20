@@ -61,6 +61,36 @@ export const BRIDGE_SOURCES: readonly BridgeSource[] = [
   { key: "mantle", label: "Mantle", chain: mantle, eid: 30181, token: "0x779ded0c9e1022225f8e0630b35a9b54be713736", symbol: "USD₮0", decimals: 6, oft: "0xcb768e263fb1c62214e7cab4aa8d036d76dc59cc" },
 ];
 
+/**
+ * Where each source chain's native coin is priced in USD (Sushi's price API, display
+ * only): the wrapped native on the chain whose table lists it. The ETH L2s all price
+ * off mainnet WETH. Mantle's WMNT is not listed (checked 2026-10-20), so MNT fees show
+ * no USD figure rather than a guess.
+ */
+export const NATIVE_USD_REF: Readonly<Record<string, { chainId: number; token: Address }>> = {
+  ETH: { chainId: 1, token: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" },
+  POL: { chainId: 137, token: "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270" },
+  HYPE: { chainId: 999, token: "0x5555555555555555555555555555555555555555" },
+  XPL: { chainId: 9745, token: "0x6100e367285b01f48d07953803a2d8dca5d19873" },
+  MON: { chainId: 143, token: "0x3bd359c1119da7da1d913d1c4d2b7c461115433a" },
+  BERA: { chainId: 80094, token: "0x6969696969696969696969696969696969696969" },
+};
+
+/**
+ * Typical source-send → Rootstock-credit time, minutes. Observed ~23 min (2026-10-20):
+ * the DVNs wait out the source chain's block confirmations before Rootstock credits it.
+ */
+export const BRIDGE_ETA_MINUTES = 23;
+
+/**
+ * Source-chain gas, in gas units, when `eth_estimateGas` cannot run yet (before the
+ * approval exists, the send would revert). A plain USDT0 OFT `send` measured 320–330k
+ * on Arbitrum, Ethereum, Plasma, Optimism and Mantle (OFTSent receipts, 2026-10-20);
+ * USDT's `approve` is ~46k.
+ */
+export const SEND_GAS_FALLBACK = 350_000n;
+export const APPROVE_GAS_FALLBACK = 60_000n;
+
 /** Where Tron / TON / any unlisted chain is sent. */
 export const USDT0_APP_URL = "https://usdt0.to/transfer";
 

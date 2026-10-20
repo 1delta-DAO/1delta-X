@@ -64,14 +64,15 @@ export type Question =
   | { id: string; kind: "choice"; label: string; options: readonly string[]; required: boolean }
   | { id: string; kind: "multi"; label: string; options: readonly string[]; required: boolean }
   | { id: string; kind: "scale"; label: string; low: string; high: string; required: boolean }
-  | { id: string; kind: "text"; label: string; max: number; required: boolean; personal?: boolean };
+  | { id: string; kind: "text"; label: string; max: number; required: boolean };
 
 /**
  * About a minute, and about the product: four 1–5 ratings (overall, ease, how
  * safe a pending order felt, the fill), then optional detail. Nothing the chain
  * already says (what was traded, how much, when) is asked, and nothing about where
- * a user's funds come from — a question crypto users read as a reason not to answer. `contact` is the only personal field and is optional: it is kept
- * apart from everything published and deleted after payout.
+ * a user's funds come from — a question crypto users read as a reason not to answer.
+ * No personal data either: a winner is known by the wallet address the draw picked
+ * and is paid to it, so a contact field would only be data that could leak.
  */
 export const PARTICIPATION_QUESTIONS: readonly Question[] = [
   { id: "rating", kind: "scale", label: "Overall, how would you rate the app?", low: "Poor", high: "Excellent", required: true },
@@ -106,14 +107,6 @@ export const PARTICIPATION_QUESTIONS: readonly Question[] = [
     label: "Which order types would you use next?",
     options: ["Limit orders", "Scheduled / TWAP", "Take-profit / stop-loss", "Orders on lending positions", "None of these"],
     required: false,
-  },
-  {
-    id: "contact",
-    kind: "text",
-    label: "Telegram handle or email — optional, only to contact you if you win",
-    max: 120,
-    required: false,
-    personal: true,
   },
 ];
 
@@ -184,10 +177,4 @@ export function answersHash(answers: ParticipationAnswers, questions: readonly Q
 /** keccak256 of a Terms text, as the `terms` field carries it. */
 export function termsHash(text: string): Hex {
   return keccak256(toBytes(text));
-}
-
-/** The answers without the personal fields — what an export or analysis may see without the contact data. */
-export function withoutPersonal(answers: ParticipationAnswers, questions: readonly Question[] = PARTICIPATION_QUESTIONS): ParticipationAnswers {
-  const personal = new Set(questions.filter((q) => q.kind === "text" && q.personal).map((q) => q.id));
-  return Object.fromEntries(Object.entries(answers).filter(([k]) => !personal.has(k)));
 }

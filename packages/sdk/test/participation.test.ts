@@ -10,7 +10,6 @@ import {
   PARTICIPATION_STATEMENT,
   termsHash,
   validateAnswers,
-  withoutPersonal,
 } from "../src";
 
 const account = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
@@ -22,7 +21,6 @@ const valid = {
   ease: 4,
   fill: 3,
   friction: "The approval step",
-  contact: "@someone",
 };
 
 describe("participation form", () => {
@@ -39,13 +37,13 @@ describe("participation form", () => {
     expect(validateAnswers({ ...valid, purpose: ["Narnia"] })).toMatch(/options/);
     expect(validateAnswers({ ...valid, purpose: ["Get RBTC", "Get RBTC"] })).toMatch(/repeated/);
     expect(validateAnswers({ ...valid, friction: "x".repeat(1001) })).toMatch(/1000/);
-    expect(validateAnswers({ ...valid, contact: " @padded" })).toMatch(/spaces/);
+    expect(validateAnswers({ ...valid, friction: " padded" })).toMatch(/spaces/);
     expect(validateAnswers(null)).toMatch(/object/);
     expect(validateAnswers([])).toMatch(/object/);
   });
 
   it("hashes independently of key order, click order and blank optionals", () => {
-    const reordered = { contact: "@someone", fill: 3, ease: 4, purpose: ["Exit USDRIF", "Get RBTC"], rating: 4, safety: 3, friction: "The approval step", next: [] };
+    const reordered = { fill: 3, ease: 4, purpose: ["Exit USDRIF", "Get RBTC"], rating: 4, safety: 3, friction: "The approval step", next: [] };
     expect(canonicalAnswers(reordered)).toBe(canonicalAnswers(valid));
     expect(answersHash(reordered)).toBe(answersHash(valid));
     expect(answersHash({ ...valid, ease: 5 })).not.toBe(answersHash(valid));
@@ -53,11 +51,9 @@ describe("participation form", () => {
     expect(JSON.parse(canonicalAnswers(valid)).purpose).toEqual(["Exit USDRIF", "Get RBTC"]);
   });
 
-  it("strips only the personal field", () => {
-    const stripped = withoutPersonal(valid);
-    expect(stripped.contact).toBeUndefined();
-    expect(stripped.friction).toBe(valid.friction);
-    expect(PARTICIPATION_QUESTIONS.filter((q) => q.kind === "text" && q.personal).map((q) => q.id)).toEqual(["contact"]);
+  it("asks nothing personal", () => {
+    expect(PARTICIPATION_QUESTIONS.map((q) => q.id)).not.toContain("contact");
+    expect(validateAnswers({ ...valid, contact: "@someone" })).toMatch(/unknown question/);
   });
 
   it("signs the fixed statement and recovers the participant", async () => {

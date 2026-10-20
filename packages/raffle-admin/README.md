@@ -6,7 +6,7 @@ bundle. The app's `/api/book` proxy cannot reach a `/raffle/admin/*` route.
 
 | Tab | What it does |
 |---|---|
-| Setup & tests | Edit the draw's config: promotion id, Terms hash, window, qualifier, exclusions. This overrides the orderbook's `RAFFLE_*` without a deploy. Also: switch the draw off, revert to the deploy defaults, run checks, **reset** a promotion (deletes its entries and draws), purge contacts. |
+| Setup & tests | Edit the draw's config: promotion id, Terms hash, window, qualifier, exclusions. This overrides the orderbook's `RAFFLE_*` without a deploy. Also: switch the draw off, revert to the deploy defaults, run checks, **reset** a promotion (deletes its entries and draws). |
 | Feedback | Per-question tallies, every entry with its answers, CSV download. |
 | Support | Look up an address (fills, first fill, entry). Add an entry by hand with a required note, e.g. "I signed up but I'm not listed". Remove an entry. |
 | Draws | For a UTC day: compute the qualifiers, run a dry-run draw, save the list and fix a future draw block, then draw from that block's hash. Exclude a winner and redraw. Records are public at `GET /raffle/draws`. |
