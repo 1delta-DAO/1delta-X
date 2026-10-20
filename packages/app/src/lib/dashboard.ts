@@ -144,19 +144,61 @@ export function fillerName(chainId: number, solver: string): string {
 export interface Breakdown {
   key: string;
   fills: number;
-  usd: number;
+  /** Netted USD exchanged ({@link nettedUsd}). */
+  volume: number;
+  /** Every fill's USD, summed. */
+  turnover: number;
+}
+
+/**
+ * VOLUME vs TURNOVER (2026-10-20). TURNOVER sums every fill: two opposite orders
+ * matched against each other in one transaction count twice. VOLUME is the USD that
+ * really changed hands: per transaction and per token pair, the two directions net —
+ * only the larger side counts (opposite flows offset each other; fills in the same
+ * direction add up). Outside a matched transaction every fill is volume and turnover
+ * alike. Returns each fill's share of the volume, by `id` (the larger side keeps its
+ * USD, the smaller side 0).
+ */
+export function nettedUsd(fills: readonly DashFill[]): Map<string, number> {
+  const groups = new Map<
+    string,
+    { a: DashFill[]; b: DashFill[]; ua: number; ub: number }
+  >();
+  for (const f of fills) {
+    if (f.usd === undefined) continue;
+    const [x, y] = f.pay < f.recv ? [f.pay, f.recv] : [f.recv, f.pay];
+    const key = `${f.tx || f.id}|${x}|${y}`;
+    const g = groups.get(key) ?? { a: [], b: [], ua: 0, ub: 0 };
+    if (f.pay === x) {
+      g.a.push(f);
+      g.ua += f.usd;
+    } else {
+      g.b.push(f);
+      g.ub += f.usd;
+    }
+    groups.set(key, g);
+  }
+  const out = new Map<string, number>();
+  for (const g of groups.values()) {
+    const keep = g.ua >= g.ub ? g.a : g.b;
+    for (const f of [...g.a, ...g.b])
+      out.set(f.id, keep.includes(f) ? f.usd! : 0);
+  }
+  return out;
 }
 
 export interface DashStats {
   fills: number;
   /** Fills with a USD size (the rest: no served order / no amount / no price). */
   sized: number;
-  usd: number;
-  usd24h: number;
+  volume: number;
+  turnover: number;
+  volume24h: number;
+  turnover24h: number;
   fills24h: number;
   makers: number;
-  /** Daily USD volume, oldest first, one entry per UTC day in the window (zeros included). */
-  daily: { day: number; usd: number; fills: number }[];
+  /** Daily USD, oldest first, one entry per UTC day in the window (zeros included). */
+  daily: { day: number; volume: number; turnover: number; fills: number }[];
   pairs: Breakdown[];
   fillers: Breakdown[];
 }
@@ -166,11 +208,13 @@ const DAY = 86_400_000;
 function tally(
   map: Map<string, Breakdown>,
   key: string,
-  usd: number | undefined,
+  volume: number,
+  turnover: number,
 ) {
-  const b = map.get(key) ?? { key, fills: 0, usd: 0 };
+  const b = map.get(key) ?? { key, fills: 0, volume: 0, turnover: 0 };
   b.fills += 1;
-  b.usd += usd ?? 0;
+  b.volume += volume;
+  b.turnover += turnover;
   map.set(key, b);
 }
 
@@ -185,47 +229,53 @@ export function dashStats(
   const first = today - (days - 1) * DAY;
   const daily = Array.from({ length: days }, (_, i) => ({
     day: first + i * DAY,
-    usd: 0,
+    volume: 0,
+    turnover: 0,
     fills: 0,
   }));
+  const netted = nettedUsd(fills);
   const pairs = new Map<string, Breakdown>();
   const fillers = new Map<string, Breakdown>();
   const makers = new Set<string>();
-  let usd = 0;
-  let usd24h = 0;
-  let fills24h = 0;
-  let sized = 0;
+  const st = {
+    volume: 0,
+    turnover: 0,
+    volume24h: 0,
+    turnover24h: 0,
+    fills24h: 0,
+    sized: 0,
+  };
   for (const f of fills) {
-    if (f.usd !== undefined) {
-      usd += f.usd;
-      sized++;
-    }
+    const t = f.usd ?? 0;
+    const v = netted.get(f.id) ?? 0;
+    if (f.usd !== undefined) st.sized++;
+    st.volume += v;
+    st.turnover += t;
     if (f.maker) makers.add(f.maker);
     if (f.at !== null) {
       if (now - f.at < DAY) {
-        fills24h++;
-        usd24h += f.usd ?? 0;
+        st.fills24h++;
+        st.volume24h += v;
+        st.turnover24h += t;
       }
       const i = Math.floor((f.at - first) / DAY);
       if (i >= 0 && i < days) {
         daily[i]!.fills++;
-        daily[i]!.usd += f.usd ?? 0;
+        daily[i]!.volume += v;
+        daily[i]!.turnover += t;
       }
     }
-    tally(pairs, `${f.pay} → ${f.recv}`, f.usd);
-    tally(fillers, fillerName(chainId, f.solver), f.usd);
+    tally(pairs, `${f.pay} → ${f.recv}`, v, t);
+    tally(fillers, fillerName(chainId, f.solver), v, t);
   }
-  const byUsd = (a: Breakdown, b: Breakdown) =>
-    b.usd - a.usd || b.fills - a.fills;
+  const byVolume = (a: Breakdown, b: Breakdown) =>
+    b.volume - a.volume || b.turnover - a.turnover || b.fills - a.fills;
   return {
     fills: fills.length,
-    sized,
-    usd,
-    usd24h,
-    fills24h,
+    ...st,
     makers: makers.size,
     daily,
-    pairs: [...pairs.values()].sort(byUsd),
-    fillers: [...fillers.values()].sort(byUsd),
+    pairs: [...pairs.values()].sort(byVolume),
+    fillers: [...fillers.values()].sort(byVolume),
   };
 }

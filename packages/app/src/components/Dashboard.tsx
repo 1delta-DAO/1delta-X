@@ -66,10 +66,10 @@ function Kpi({
 function DailyChart({
   daily,
 }: {
-  daily: { day: number; usd: number; fills: number }[];
+  daily: { day: number; volume: number; turnover: number; fills: number }[];
 }) {
   const [hover, setHover] = useState<number | null>(null);
-  const max = Math.max(0, ...daily.map((d) => d.usd));
+  const max = Math.max(0, ...daily.map((d) => d.volume));
   const h = hover === null ? null : daily[hover];
   return (
     <div className="chart">
@@ -79,7 +79,7 @@ function DailyChart({
         </span>
         <span className="m tip">
           {h
-            ? `${day(h.day)} · ${usd(h.usd)} · ${h.fills} fill${h.fills === 1 ? "" : "s"}`
+            ? `${day(h.day)} · volume ${usd(h.volume)} · turnover ${usd(h.turnover)} · ${h.fills} fill${h.fills === 1 ? "" : "s"}`
             : `peak ${usd(max)}`}
         </span>
       </div>
@@ -97,10 +97,10 @@ function DailyChart({
             onMouseEnter={() => setHover(i)}
             onClick={() => setHover(i)}
           >
-            {d.usd > 0 && (
+            {d.volume > 0 && (
               <i
                 className={hover === i ? "on" : undefined}
-                style={{ height: `${max > 0 ? (d.usd / max) * 100 : 0}%` }}
+                style={{ height: `${max > 0 ? (d.volume / max) * 100 : 0}%` }}
               />
             )}
           </div>
@@ -138,24 +138,26 @@ function BreakdownTable({
               <th>{title.replace(/^By /, "")}</th>
               <th>Fills</th>
               <th>Volume</th>
+              <th>Turnover</th>
               <th>Share</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td className="empty" colSpan={4}>
+                <td className="empty" colSpan={5}>
                   No fills yet.
                 </td>
               </tr>
             ) : (
               rows.map((r) => {
-                const share = total > 0 ? r.usd / total : 0;
+                const share = total > 0 ? r.volume / total : 0;
                 return (
                   <tr key={r.key}>
                     <td>{r.key}</td>
                     <td>{r.fills}</td>
-                    <td>{usd(r.usd)}</td>
+                    <td>{usd(r.volume)}</td>
+                    <td className="faint">{usd(r.turnover)}</td>
                     <td>
                       <span className="share">
                         <i style={{ width: `${Math.round(share * 100)}%` }} />
@@ -281,40 +283,47 @@ export function Dashboard({ chainId, usdOf }: DashboardProps) {
         </div>
         <div className="kpis">
           <Kpi
-            label="Total volume"
-            value={usd(stats.usd)}
-            sub={`${stats.fills} fills`}
+            label="Volume"
+            value={usd(stats.volume)}
+            sub={`netted · ${stats.fills} fills`}
+          />
+          <Kpi
+            label="Turnover"
+            value={usd(stats.turnover)}
+            sub="every fill, summed"
           />
           <Kpi
             label="Last 24 h"
-            value={usd(stats.usd24h)}
-            sub={`${stats.fills24h} fills`}
+            value={usd(stats.volume24h)}
+            sub={`volume · ${stats.fills24h} fills`}
           />
           <Kpi
             label="Makers"
             value={String(stats.makers)}
             sub="distinct wallets"
           />
-          <Kpi
-            label="Avg fill"
-            value={stats.sized > 0 ? usd(stats.usd / stats.sized) : "—"}
-            sub="per sized fill"
-          />
         </div>
         <DailyChart daily={stats.daily} />
         <p className="dnote">
-          Volume is the exactly-filled leg of each order (what a seller paid,
-          what a buyer received) at today&apos;s USD price.
+          Each fill is sized on the exactly-filled leg of its order (what a
+          seller paid, what a buyer received) at today&apos;s USD price.
+          Turnover sums every fill; volume nets opposite fills settled in the
+          same transaction (two matched orders count once), so it is the USD
+          that really changed hands.
           {unsized > 0 &&
             ` ${unsized} older fill${unsized === 1 ? "" : "s"} could not be sized (the orderbook no longer holds the order).`}
         </p>
       </div>
       <div className="dgrid">
-        <BreakdownTable title="By pair" rows={stats.pairs} total={stats.usd} />
+        <BreakdownTable
+          title="By pair"
+          rows={stats.pairs}
+          total={stats.volume}
+        />
         <BreakdownTable
           title="By filler"
           rows={stats.fillers}
-          total={stats.usd}
+          total={stats.volume}
         />
       </div>
       <RecentTable chainId={chainId} fills={fills.slice(0, RECENT)} />

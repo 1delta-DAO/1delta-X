@@ -3,7 +3,7 @@ import { hashOrderStruct, orderToJson, type Order } from "@1delta-x/sdk";
 import { zeroAddress } from "viem";
 
 import { pinnedToken } from "../src/config/markets";
-import { dashStats, fillerName, toDashFill, type FillWire } from "../src/lib/dashboard";
+import { dashStats, fillerName, nettedUsd, toDashFill, type FillWire } from "../src/lib/dashboard";
 import { buildOrder } from "../src/lib/order";
 
 /** The dashboard (2026-10-20): every indexed fill, sized on its anchor leg, priced in USD. */
@@ -74,11 +74,27 @@ describe("dashboard fills", () => {
       toDashFill(30, { orderHash: `0x${"22".repeat(32)}`, txHash: "0x01", at: T0 }, usd), // unsized
     ];
     const s = dashStats(30, fills, now, 7);
-    expect([s.fills, s.sized, s.usd, s.usd24h, s.fills24h, s.makers]).toEqual([3, 2, 70, 50, 1, 1]);
+    expect([s.fills, s.sized, s.volume, s.turnover, s.volume24h, s.fills24h, s.makers]).toEqual([3, 2, 70, 70, 50, 1, 1]);
     expect(s.daily).toHaveLength(7);
-    expect(s.daily.reduce((a, d) => a + d.usd, 0)).toBe(70);
-    expect(s.pairs[0]).toEqual({ key: "USDRIF → USD₮0", fills: 2, usd: 70 });
+    expect(s.daily.reduce((a, d) => a + d.volume, 0)).toBe(70);
+    expect(s.pairs[0]).toEqual({ key: "USDRIF → USD₮0", fills: 2, volume: 70, turnover: 70 });
     expect(s.fillers.map((f) => f.key)).toEqual(["1delta inventory", "1delta solver v3", "unknown"]);
     expect(fillerName(30, "0x00000000000000000000000000000000000000bb")).toBe("0x0000…00bb");
+  });
+
+  it("VOLUME nets opposite fills in one transaction (turnover counts both); same-direction fills add up", () => {
+    const tx = { txHash: `0x${"ab".repeat(32)}` };
+    const sell = toDashFill(30, wire(order("sell", 6n), 60n * 10n ** 18n, T0, { ...tx, logIndex: 1 }), usd); // USDRIF → USD₮0, $60
+    const buy = toDashFill(30, wire(order("buy", 7n), 40n * 10n ** 18n, T0, { ...tx, logIndex: 2 }), usd); // USD₮0 → USDRIF, $40
+    const net = nettedUsd([sell, buy]);
+    expect([net.get(sell.id), net.get(buy.id)]).toEqual([60, 0]); // $40 of it offset: $60 changed hands
+    const s = dashStats(30, [sell, buy], (T0 + 60) * 1000, 7);
+    expect([s.volume, s.turnover]).toEqual([60, 100]);
+    // Two sells in one transaction (a batch of independent orders): both are volume.
+    const sell2 = toDashFill(30, wire(order("sell", 8n), 10n * 10n ** 18n, T0, { ...tx, logIndex: 3 }), usd);
+    expect(dashStats(30, [sell, sell2], (T0 + 60) * 1000, 7).volume).toBe(70);
+    // The same orders in separate transactions: nothing nets.
+    const apart = toDashFill(30, wire(order("buy", 9n), 40n * 10n ** 18n, T0 + 1), usd);
+    expect(dashStats(30, [sell, apart], (T0 + 60) * 1000, 7).volume).toBe(100);
   });
 });
