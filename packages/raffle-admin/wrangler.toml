@@ -1,0 +1,17 @@
+# Cloudflare Pages project for the raffle operator console — NOT the trading app's
+# project. `wrangler pages deploy` (pnpm deploy) and a Git-connected build with root
+# directory `packages/raffle-admin` both read this file; while it exists it is the
+# source of truth for the project's bindings (the dashboard shows them read-only).
+name = "raffle-admin-1delta"
+pages_build_output_dir = "./dist"
+compatibility_date = "2025-09-01"
+
+# The orderbook worker (packages/orderbook-worker, `name = "orderbook-1delta-rsk"`).
+# The console proxies /api/book/* to it; the worker checks the RAFFLE_ADMIN_TOKEN.
+[[services]]
+binding = "ORDERBOOK"
+service = "orderbook-1delta-rsk"
+
+# Secret, optional (same value as the app's and the worker's BINDING_KEY), so the
+# orderbook's per-IP limits bill the operator rather than the console:
+#   echo "$KEY" | npx wrangler pages secret put ORDERBOOK_BINDING_KEY --project-name raffle-admin-1delta
