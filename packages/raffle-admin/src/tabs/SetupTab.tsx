@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 
 import { NO_END, type AdminApi, type AdminConfig, type RaffleConfig } from "../adminApi";
 import { errorText, parseAddresses, rsk, utc } from "../AdminApp";
+import { DateTimeField, useZone, ZoneSwitch } from "../DateTimeField";
+import { toUnix, fromUnix } from "../time";
 
-/** `<input type="datetime-local">` value ↔ unix seconds, read as UTC. */
-const toInput = (sec: number) => (sec <= 0 || sec >= NO_END ? "" : new Date(sec * 1000).toISOString().slice(0, 16));
-const fromInput = (v: string, empty: number) => (v ? Math.floor(Date.parse(`${v}:00Z`) / 1000) : empty);
+const nowSec = () => Math.floor(Date.now() / 1000);
+const DAY = 86_400;
 
 interface Check {
   label: string;
@@ -17,8 +18,10 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
   const base = config.effective ?? config.env;
   const [id, setId] = useState(base?.id ?? "");
   const [terms, setTerms] = useState<string>(base?.terms ?? buildTerms);
-  const [start, setStart] = useState(toInput(base?.startsAt ?? 0));
-  const [end, setEnd] = useState(toInput(base?.endsAt ?? NO_END));
+  const [zone, setZone] = useZone();
+  // null = open from the start / no end.
+  const [start, setStart] = useState<number | null>(base && base.startsAt > 0 ? base.startsAt : null);
+  const [end, setEnd] = useState<number | null>(base && base.endsAt < NO_END ? base.endsAt : null);
   const [qualifier, setQualifier] = useState(String(base?.qualifierUsd ?? 20));
   const [exclude, setExclude] = useState((base?.exclude ?? []).join("\n"));
   const [testers, setTesters] = useState((base?.testers ?? []).join("\n"));
@@ -34,8 +37,8 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
   const draft: RaffleConfig = {
     id: id.trim(),
     terms: terms.trim().toLowerCase() as `0x${string}`,
-    startsAt: fromInput(start, 0),
-    endsAt: fromInput(end, NO_END),
+    startsAt: start ?? 0,
+    endsAt: end ?? NO_END,
     qualifierUsd: Number(qualifier),
     exclude: ex.ok,
     testers: ts.ok,
@@ -110,20 +113,41 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
               )}
             </span>
           </label>
-          <div className="adrow">
-            <label className="pq">
-              <span className="pqlabel">Starts (UTC)</span>
-              <input className="pqtext m" type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
-            </label>
-            <label className="pq">
-              <span className="pqlabel">Entries close (UTC)</span>
-              <input className="pqtext m" type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} />
-            </label>
-            <label className="pq">
-              <span className="pqlabel">Daily qualifier, $</span>
-              <input className="pqtext m" inputMode="decimal" value={qualifier} onChange={(e) => setQualifier(e.target.value)} />
-            </label>
+          <ZoneSwitch zone={zone} onChange={setZone} />
+          <div className="adrow adtimes">
+            <DateTimeField
+              label="Starts"
+              hint="fills before this do not unlock Participate"
+              value={start}
+              onChange={setStart}
+              zone={zone}
+              empty="Open from the beginning (any fill counts)"
+              presets={[
+                { label: "Now", value: nowSec },
+                { label: "Today 00:00", value: () => toUnix(fromUnix(nowSec(), zone).date, "00:00", zone) },
+                { label: "Clear", value: () => null },
+              ]}
+            />
+            <DateTimeField
+              label="Entries close"
+              value={end}
+              onChange={setEnd}
+              zone={zone}
+              empty="No end"
+              presets={[
+                { label: "+1 day", value: () => (start ?? nowSec()) + DAY },
+                { label: "+7 days", value: () => (start ?? nowSec()) + 7 * DAY },
+                { label: "+10 days", value: () => (start ?? nowSec()) + 10 * DAY },
+                { label: "Clear", value: () => null },
+              ]}
+            />
           </div>
+          {start !== null && end !== null && end <= start && <p className="warn pqfine">Entries close before the start.</p>}
+          <label className="pq adnarrow">
+            <span className="pqlabel">Daily qualifier, $</span>
+            <input className="pqtext m" inputMode="decimal" value={qualifier} onChange={(e) => setQualifier(e.target.value)} />
+            <span className="pqfine">USD of maker fills in one UTC day to enter that day&rsquo;s draw. For a rehearsal, $1 keeps test swaps cheap.</span>
+          </label>
           <label className="pq">
             <span className="pqlabel">
               Testers <span className="pqopt-tag">· any address here = TEST MODE: live only for these, invisible to everyone else</span>
@@ -140,7 +164,7 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
           </label>
           {note && <p className="good pqfine">{note}</p>}
           <div className="adrow">
-            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || ts.bad.length > 0} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
+            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || ts.bad.length > 0 || (start !== null && end !== null && end <= start)} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
               {ts.ok.length ? "Save (test mode)" : "Save (public)"}
             </button>
             <button type="button" className="cta line" disabled={busy || config.source === "disabled"} onClick={() => run(() => api.disable(), "Switched off: no notice, no entries.")}>

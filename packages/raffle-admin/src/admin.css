@@ -29,3 +29,11 @@
   .adfilter { width: 100%; }
   .adtallies { grid-template-columns: 1fr; }
 }
+.adzone { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.addt { display: flex; gap: 8px; align-items: center; }
+.addt input[type="date"] { flex: 1 1 auto; min-width: 0; color-scheme: light dark; }
+.addttime { width: 90px; flex: none; text-align: center; }
+.addtzone { font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+.addtpresets { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; }
+.adtimes > .pq { flex: 1 1 320px; }
+.adnarrow { max-width: 320px; }

@@ -3,6 +3,7 @@ import { isAddress } from "viem";
 
 import type { AdminApi, AdminConfig, AdminEntry } from "../adminApi";
 import { errorText, utc } from "../AdminApp";
+import { DateTimeField, useZone, ZoneSwitch } from "../DateTimeField";
 
 type Lookup = { address: string; fills: number; firstFillAt: number | null; entered: boolean; entry?: AdminEntry };
 
@@ -15,7 +16,8 @@ export function SupportTab({ api, promotion, config }: { api: AdminApi; promotio
   const [address, setAddress] = useState("");
   const [found, setFound] = useState<Lookup | null>(null);
   const [note, setNote] = useState("");
-  const [enteredAt, setEnteredAt] = useState("");
+  const [enteredAt, setEnteredAt] = useState<number | null>(null);
+  const [zone, setZone] = useZone();
   const [overwrite, setOverwrite] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -82,12 +84,16 @@ export function SupportTab({ api, promotion, config }: { api: AdminApi; promotio
               <span className="pqlabel">Note (required — why, e.g. support ticket)</span>
               <input className="pqtext" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ticket #12: signed on 10-24, entry missing" />
             </label>
-            <label className="pq">
-              <span className="pqlabel">
-                Entered at (UTC) <span className="pqopt-tag">· optional; the draw counts entrants entered by its snapshot</span>
-              </span>
-              <input className="pqtext m" type="datetime-local" value={enteredAt} onChange={(e) => setEnteredAt(e.target.value)} />
-            </label>
+            <ZoneSwitch zone={zone} onChange={setZone} />
+            <DateTimeField
+              label="Entered at"
+              hint="optional; a day's draw counts entrants entered by its snapshot"
+              value={enteredAt}
+              onChange={setEnteredAt}
+              zone={zone}
+              empty="Now (when you save)"
+              presets={[{ label: "Clear", value: () => null }]}
+            />
             {found.entry?.source === "signed" && (
               <label className="check">
                 <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
@@ -101,7 +107,7 @@ export function SupportTab({ api, promotion, config }: { api: AdminApi; promotio
                 disabled={busy || !note.trim() || (found.entry?.source === "signed" && !overwrite)}
                 onClick={() =>
                   act(async () => {
-                    await api.addManual({ address: found.address, note: note.trim(), ...(enteredAt ? { enteredAt: Math.floor(Date.parse(`${enteredAt}:00Z`) / 1000) } : {}), overwrite }, promotion);
+                    await api.addManual({ address: found.address, note: note.trim(), ...(enteredAt !== null ? { enteredAt } : {}), overwrite }, promotion);
                     setNote("");
                     return "Entered by hand.";
                   })
