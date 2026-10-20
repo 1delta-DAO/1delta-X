@@ -1,7 +1,7 @@
 import { readCappedBytes } from "./body";
-import { clientIp, isTrustedCaller } from "./clientIp";
+import { clientIp, isRaffleAdmin, isTrustedCaller } from "./clientIp";
 import { locationHint, maxBodyBytesOf, type Env } from "./config";
-import { CLIENT_IP_HEADER, OrderBookDO, TRUSTED_HEADER } from "./do";
+import { ADMIN_HEADER, CLIENT_IP_HEADER, OrderBookDO, TRUSTED_HEADER } from "./do";
 
 // The entry module exports ONLY Workers entrypoints (the default handler and the
 // Durable Object class): workerd refuses to start a script whose main module
@@ -38,6 +38,7 @@ export default {
     }
     headers.set(CLIENT_IP_HEADER, ip);
     if (isTrustedCaller(request, env)) headers.set(TRUSTED_HEADER, "1");
+    if (isRaffleAdmin(request, env)) headers.set(ADMIN_HEADER, "1");
     let body: Uint8Array | undefined;
     if (request.method !== "GET" && request.method !== "HEAD") {
       // BUFFER the body (capped) before the DO sees the request. It used to be

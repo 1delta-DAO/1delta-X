@@ -11,7 +11,9 @@ import { OrderBook, type BookMarker } from "./components/OrderBook";
 import { OrderForm, type AllowanceView, type Gate, type Receipt } from "./components/OrderForm";
 import { Orders } from "./components/Orders";
 import { PreAuditGate, PreAuditStrip, useAcknowledgement } from "./components/PreAudit";
+import { BridgeSheet, OnrampLink } from "./components/Bridge";
 import { RaffleNotice } from "./components/Raffle";
+import { promotionRunsOn } from "./config/promotion";
 import { TermsLink } from "./components/TermsLink";
 import { chainById, chainLabel } from "./config/chains";
 import { deploymentFor, exclusivityForMarket, nativeOutFor, solverForMarket, type NativeOutShape } from "./config/deployments";
@@ -552,6 +554,7 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const [riskOpen, setRiskOpen] = useState(false);
+  const [bridgeOpen, setBridgeOpen] = useState(false);
   const { acknowledged, accept } = useAcknowledgement();
 
   // A receipt describes one ticket; switching market, side or type makes it stale.
@@ -1016,7 +1019,26 @@ export default function App() {
         </main>
       ) : (
       <main>
-        <RaffleNotice chainId={chainId} />
+        {promotionRunsOn(chainId) ? (
+          <RaffleNotice
+            chainId={chainId}
+            address={wallet.address}
+            signer={signer}
+            onConnect={() => setConnectRequest((n) => n + 1)}
+            onBridge={() => setBridgeOpen(true)}
+          />
+        ) : (
+          chainId === 30 && <OnrampLink onOpen={() => setBridgeOpen(true)} />
+        )}
+        {bridgeOpen && (
+          <BridgeSheet
+            provider={wallet.provider}
+            address={wallet.address}
+            walletChainId={wallet.chainId}
+            onSwitchHome={() => void wallet.switchChain(chainId)}
+            onClose={() => setBridgeOpen(false)}
+          />
+        )}
 
 
         <div className="deck">

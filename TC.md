@@ -1,6 +1,6 @@
 # 1delta Rootstock Trading Promotion — Terms & Conditions
 
-**Last updated:** 2 September 2026
+**Last updated:** 20 October 2026
 
 > **Important:** This Promotion is not open to U.S. Persons or persons located or resident in sanctioned jurisdictions. USDRIF is subject to geographic and other transfer restrictions. Participants are responsible for ensuring that they are legally permitted to participate and receive any prize.
 
@@ -35,7 +35,7 @@
 
 ## 4. Entry and Qualifying Activity
 
-4.1. There is no separate registration process. Eligible wallet addresses may be automatically considered for a daily draw based on their trading activity on the 1delta Rootstock deployment.
+4.1. To enter, a wallet address must (a) complete at least one trade on the 1delta Rootstock deployment during the Promotion Period and then (b) submit the participation form offered in the 1delta interface, signed with that wallet address. The signature costs no transaction fee. Only addresses that have entered in this way are considered for a draw, and only for draws held after their entry. Entering again with the same address updates the form and does not create an additional entry.
 
 4.2. The minimum trading activity or other qualifying criteria applicable to each draw will be determined and communicated by 1delta through its official channels or promotional materials.
 
@@ -44,6 +44,10 @@
 4.4. Trading activity does not guarantee that a wallet address will be selected as a winner.
 
 4.5. Trading volume and qualifying activity will be determined using on-chain data and 1delta's own indexing, logging and monitoring systems.
+
+4.6. The participation form asks for feedback on the 1delta interface and for the eligibility confirmations described in Section 3. By signing it you confirm that the statements in it are true. 1delta may treat an entry made with false confirmations as invalid at any time, including after a draw.
+
+4.7. 1delta stores the signed form, its answers, the wallet address and the time of entry to operate the Promotion and to improve its products. Answers are not published. A contact detail, if you choose to give one, is used only to contact a selected winner, is not published, and is deleted after the related prize has been paid or forfeited.
 
 ## 5. Exclusion and Fair Play
 

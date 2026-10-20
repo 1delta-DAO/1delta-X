@@ -745,7 +745,28 @@ capped key.
 
 **The prize draw.** `config/promotion.ts` is the single place the draw is
 described, and `components/Raffle.tsx` is the only place it is mentioned in the
-trading UI. `TC.md` fixes no numbers on purpose — §4.2 leaves the qualifying
+trading UI. ENTRY (2026-10-20): the notice reads the orderbook's `/raffle/status`
+and shows **Participate** once the connected address has a fill as maker; it opens
+`components/Participate.tsx`, a short feedback form whose gasless EIP-712 signature
+(SDK `participation.ts`, which the worker re-verifies) is the entry. The form names
+the Terms by hash: `TERMS_HASH` is keccak256 of `TC.md` at build time
+(`vite.config.ts` `define`, `pnpm terms-hash`) and must equal the worker's
+`RAFFLE_TERMS_HASH`, or the notice says the Terms changed instead of offering a form.
+The daily selection lives in `packages/raffle-admin` (console + `scripts/raffle-draw.ts`) (snapshot → publish `listHash` and a
+future block → draw); `PROMOTION.support` adds an ungated "Report a problem" link.
+The notice is shown only while the orderbook's desk says the draw is live for this
+visitor, so the desk is the switch.
+
+**Raffle administration is NOT part of this app.** The operator console is its own
+package and deployment (`packages/raffle-admin`); this app's `/api/book` proxy
+forwards no `authorization` and allows no `/raffle/admin/*` route.
+
+**The USD₮0 on-ramp.** `components/Bridge.tsx` bridges USDT0 from eleven chains to
+the user's own Rootstock address through USDT0's LayerZero OFTs
+(`config/bridge.ts`, pinned and re-checked on-chain by `pnpm verify-bridge`). All
+source-chain reads and writes go through the wallet; only the arrival check reads
+`public-node.rsk.co` (in the CSP). USD₮0 on Rootstock has an ERC-2612 permit, so a
+wallet with no RBTC trades it gaslessly. `TC.md` fixes no numbers on purpose — §4.2 leaves the qualifying
 criteria to "official channels" and §2.1 does the same for the period — so every
 figure there is a display string the promoter writes, not a number the app
 computes, and `VITE_PROMOTION` overrides it at deploy time without a code

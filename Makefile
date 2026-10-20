@@ -109,6 +109,7 @@ test-ts:
 	cd packages/orderbook-worker && npx tsc --noEmit -p tsconfig.json && npx vitest run && node scripts/bundle-check.mjs
 	cd packages/auction && npx tsc --noEmit -p tsconfig.json && npx vitest run
 	cd packages/app && npx tsc --noEmit -p tsconfig.json && npx vitest run
+	cd packages/raffle-admin && npx tsc --noEmit -p tsconfig.json && npx vitest run
 	cd packages/beta-filler && npx tsc --noEmit -p tsconfig.json && npx vitest run
 	cd packages/filler-worker && npx tsc --noEmit -p tsconfig.json && npx vitest run && node scripts/bundle-check.mjs
 

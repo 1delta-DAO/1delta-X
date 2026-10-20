@@ -33,6 +33,16 @@ export function isTrustedCaller(request: Request, env: Pick<Env, "BINDING_KEY">)
   return !!key && presented !== null && safeEqual(presented, key);
 }
 
+/**
+ * `authorization: Bearer <RAFFLE_ADMIN_TOKEN>` (constant-time). False when no token is
+ * configured. Gates the prize draw's export and contact purge.
+ */
+export function isRaffleAdmin(request: Request, env: Pick<Env, "RAFFLE_ADMIN_TOKEN">): boolean {
+  const token = env.RAFFLE_ADMIN_TOKEN?.trim();
+  const m = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "");
+  return !!token && !!m && safeEqual(m[1]!.trim(), token);
+}
+
 const IP = /^[0-9a-fA-F:.]{2,45}$/;
 
 /**

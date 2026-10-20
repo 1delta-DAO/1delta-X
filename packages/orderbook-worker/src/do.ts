@@ -14,6 +14,22 @@ export const CLIENT_IP_HEADER = "x-ob-client-ip";
  * scratch, so a client cannot set it.
  */
 export const TRUSTED_HEADER = "x-ob-trusted";
+/** Set to "1" by the entry worker ONLY after it checked the `RAFFLE_ADMIN_TOKEN` bearer (`isRaffleAdmin`). */
+export const ADMIN_HEADER = "x-ob-admin";
+
+const ERC1271_MAGIC = "0x1626ba7e";
+const ERC1271_ABI = [
+  {
+    type: "function",
+    name: "isValidSignature",
+    stateMutability: "view",
+    inputs: [
+      { name: "hash", type: "bytes32" },
+      { name: "signature", type: "bytes" },
+    ],
+    outputs: [{ name: "", type: "bytes4" }],
+  },
+] as const;
 
 export type DepsFactory = (cfg: WorkerConfig) => CoreDeps;
 
@@ -51,6 +67,15 @@ export const defaultDeps: DepsFactory = (cfg) => {
     verifier: new Verifier(getClient(), cfg.chain, { maxRecheckCalls: cfg.verifier.maxRecheckCalls, maxSweepMs: cfg.verifier.maxSweepMs }),
     cancelVerifier: new CancelVerifier(getClient, cfg.chain),
     chain: viemChainReader(getClient(), cfg.chain.settlement, cfg.ocoModules),
+    // ERC-1271 for a contract-wallet entrant (the prize draw); an EOA never gets here.
+    isValidSignature: async (signer, hash, signature) => {
+      try {
+        const magic = await getClient().readContract({ address: signer, abi: ERC1271_ABI, functionName: "isValidSignature", args: [hash, signature] });
+        return magic.toLowerCase() === ERC1271_MAGIC;
+      } catch {
+        return false;
+      }
+    },
     now: () => Math.floor(Date.now() / 1000),
     nowMs: () => Date.now(),
   };
@@ -100,7 +125,12 @@ export class OrderBookDO extends DurableObject<Env> {
     const core = this.getCore();
     if (!core) return json({ error: `orderbook misconfigured: ${this.configError ?? "unknown"}` }, 500);
     await this.ensureAlarm();
-    return core.handle(request, request.headers.get(CLIENT_IP_HEADER) ?? "unknown", request.headers.get(TRUSTED_HEADER) === "1");
+    return core.handle(
+      request,
+      request.headers.get(CLIENT_IP_HEADER) ?? "unknown",
+      request.headers.get(TRUSTED_HEADER) === "1",
+      request.headers.get(ADMIN_HEADER) === "1",
+    );
   }
 
   async alarm(): Promise<void> {

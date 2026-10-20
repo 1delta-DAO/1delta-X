@@ -22,6 +22,11 @@ export interface Sql {
  *   meta          the log cursor and alarm bookkeeping
  *   buckets       rate-limit token buckets (per IP, per maker)
  *   billed        orders / cancels already charged to their maker
+ *   raffle_entries prize-draw participation forms (src/raffle.ts), one per
+ *                 (promotion, address); `answers` holds the canonical JSON the
+ *                 signature commits to, `contact` the personal field split out
+ *   raffle_draws  the daily draw records the admin page saves (snapshot → result),
+ *                 one per (promotion, UTC day); served publicly without contacts
  *
  * Amounts are decimal TEXT (uint256 does not fit a SQLite integer); block numbers
  * and unix seconds are INTEGER.
@@ -97,6 +102,27 @@ export const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS billed (key TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
   // The bills prune keeps the newest `maxBilled` by `at`: walk an index, not a sort.
   `CREATE INDEX IF NOT EXISTS billed_at ON billed(at)`,
+  `CREATE TABLE IF NOT EXISTS raffle_entries (
+    promotion TEXT NOT NULL,
+    address TEXT NOT NULL,
+    entered_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    issued_at INTEGER NOT NULL,
+    answers TEXT NOT NULL,
+    contact TEXT,
+    signature TEXT NOT NULL,
+    -- 'signed' (the participation form) or 'manual' (added by an admin, e.g. a support case)
+    source TEXT NOT NULL DEFAULT 'signed',
+    note TEXT,
+    PRIMARY KEY (promotion, address)
+  )`,
+  `CREATE TABLE IF NOT EXISTS raffle_draws (
+    promotion TEXT NOT NULL,
+    day TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (promotion, day)
+  )`,
 ];
 
 export function migrate(sql: Sql): void {

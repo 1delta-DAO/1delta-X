@@ -24,6 +24,12 @@ export interface Promotion {
   pool: string;
   /** How the pool is spread. */
   cadence: string;
+  /**
+   * Where "Stuck? Report a problem" points (a Telegram group, a form) — open to
+   * everyone, unlike Participate, because the people who never got to a first swap
+   * are the ones whose feedback matters most. "" hides the link.
+   */
+  support: string;
 }
 
 const DEFAULT: Promotion = {
@@ -32,6 +38,7 @@ const DEFAULT: Promotion = {
   qualifier: "US$20",
   pool: "around 100 USDRIF",
   cadence: "roughly ten daily draws",
+  support: "",
 };
 
 function parse(): Promotion {

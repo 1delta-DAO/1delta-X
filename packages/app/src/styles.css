@@ -601,9 +601,44 @@ footer a { color: var(--dim); }
 .rffine b { color: var(--dim); font-weight: 700; }
 .rffine .linkbtn { font-size: inherit; color: var(--dim); }
 
+.rfactions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.rfbtn { width: auto; padding-inline: 20px; min-height: 0; padding-block: 9px; font-size: 12px; }
+.rfstate { font-size: 12.5px; color: var(--dim); }
+.rfstate .linkbtn, .rfsupport { font-size: 12.5px; }
+
 @media (max-width: 640px) {
   .raffle { flex-direction: column; gap: 10px; }
 }
+
+.onramp { margin: 0; font-size: 12.5px; color: var(--dim); }
+.onramp .linkbtn { font-size: inherit; }
+
+/* ── participation form + on-ramp (sheets) ─────────────── */
+.pqnote { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--dim); }
+.pq { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.pqlabel { padding: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+.pqopt-tag { font-weight: 400; color: var(--faint); }
+.pqopts { display: flex; flex-wrap: wrap; gap: 7px; }
+.pqopt {
+  border: 1px solid var(--line2); border-radius: 999px; background: none; color: var(--dim);
+  padding: 6px 12px; font-size: 12.5px; cursor: pointer;
+}
+.pqopt:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+.pqopt.on { border-color: var(--violet); color: var(--ink); background: color-mix(in srgb, var(--violet) 14%, transparent); }
+.pqopt:disabled { opacity: .4; cursor: not-allowed; }
+.pqscale { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.pqscale .pqopt { width: 36px; padding-inline: 0; text-align: center; }
+.pqend { font-size: 11.5px; color: var(--faint); }
+.pqtext {
+  width: 100%; box-sizing: border-box; border: 1px solid var(--line2); border-radius: 10px;
+  background: var(--raise); color: var(--ink); padding: 10px 12px; font: inherit; font-size: 13.5px; resize: vertical;
+}
+.pqtext:focus { outline: none; border-color: var(--lime); }
+.pq.attest { gap: 10px; padding-top: 4px; border-top: 1px solid var(--line); }
+.pqfine { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--faint); }
+.pqrow { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.pqrow dt { color: var(--dim); }
+.pqrow dd { margin: 0; color: var(--ink); }
 
 /* ── terms page ────────────────────────────────────────── */
 /* Its own entry point, so the chrome it borrows has to survive being an <a>:
@@ -884,3 +919,4 @@ table.o td.acts .x { margin: 2px 0 2px 6px; white-space: nowrap; }
   .dgrid { grid-template-columns: 1fr; }
   .navtabs { margin-left: 8px; }
 }
+

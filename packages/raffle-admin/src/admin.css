@@ -1,0 +1,31 @@
+/* ── raffle admin (packages/raffle-admin; layered on the app's stylesheet) ─────────────────────────── */
+.admin { display: flex; flex-direction: column; gap: 18px; }
+.adlogin { max-width: 460px; }
+.adtabs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.adpick { display: flex; align-items: center; gap: 8px; }
+.adpick select { width: auto; padding: 6px 10px; }
+.adgrid { display: flex; flex-direction: column; gap: 18px; }
+.adrow { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.adrow > .pq { flex: 1 1 180px; }
+.adrow > .cta { width: auto; padding-inline: 22px; }
+.adchecks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.adchecks li b { color: var(--ink); font-weight: 600; }
+.addanger { border-color: color-mix(in srgb, var(--orange) 45%, var(--line)); }
+.adtallies { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 22px; }
+.adtally { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.adbars { display: flex; flex-direction: column; gap: 5px; }
+.adbar { display: grid; grid-template-columns: minmax(0, 1.4fr) 1fr 28px; gap: 8px; align-items: center; font-size: 12px; color: var(--dim); }
+.adbarlabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adbartrack { height: 7px; border-radius: 999px; background: var(--raise); overflow: hidden; }
+.adbartrack i { display: block; height: 100%; background: var(--violet); }
+.adtexts { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--ink); max-height: 260px; overflow-y: auto; }
+.adtable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.adtable th { text-align: left; font-weight: 600; color: var(--dim); padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.adtable td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink); max-width: 360px; overflow-wrap: anywhere; }
+.adtable .linkbtn { margin-left: 8px; font-size: 11.5px; }
+.adfilter { width: 260px; padding: 6px 10px; }
+.admsg { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .adfilter { width: 100%; }
+  .adtallies { grid-template-columns: 1fr; }
+}

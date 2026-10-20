@@ -32,6 +32,7 @@ import { hashTypedData, isAddress, type Address, type Hex } from "viem";
 import { readCappedBytes } from "./body";
 import { decodeReceiptLogs, type ChainLog, type ChainReader, type WorkerChainEvent } from "./chain";
 import type { WorkerConfig } from "./config";
+import { handleRaffle } from "./raffle";
 import { ROUTE_COST, SqlRateLimiter } from "./ratelimit";
 import { isMethodNotFound, redactRpcUrl } from "./redact";
 import { count, getMeta, migrate, setMeta, type Sql, type SqlValue } from "./store";
@@ -56,6 +57,8 @@ export interface CoreDeps {
   /** Unix seconds. */
   now: () => number;
   nowMs: () => number;
+  /** ERC-1271 `isValidSignature(hash, sig)` on `signer` — the prize draw's contract-wallet path. Absent = EOA only. */
+  isValidSignature?: (signer: Address, hash: Hex, signature: Hex) => Promise<boolean>;
 }
 
 const MAX_PAGE = 500;
@@ -204,8 +207,9 @@ export class OrderBookCore {
   /**
    * @param trusted the caller presented the `BINDING_KEY` (the entry worker checked
    *   it, constant-time, and says so in a header only it can set) — the filler.
+   * @param admin the caller presented the `RAFFLE_ADMIN_TOKEN` bearer (checked the same way).
    */
-  async handle(request: Request, ip: string, trusted = false): Promise<Response> {
+  async handle(request: Request, ip: string, trusted = false, admin = false): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method.toUpperCase();
@@ -223,6 +227,25 @@ export class OrderBookCore {
         return await this.reportFills(request);
       }
       if (path === "/fills") return method === "GET" ? (this.gate(ip, ROUTE_COST.query) ?? this.listFills(url)) : json({ error: "method not allowed" }, 405, { allow: "GET" });
+      if (path === "/raffle" || path.startsWith("/raffle/")) {
+        const answered = await handleRaffle(
+          {
+            sql: this.sql,
+            cfg: this.cfg,
+            deps: this.deps,
+            gate: (ip2, cost) => this.gate(ip2, cost),
+            gateKey: (key, cost) => this.gateMaker(key, cost),
+            readJsonBody: (r) => this.readJsonBody(r),
+            json,
+          },
+          path,
+          method,
+          request,
+          ip,
+          admin,
+        );
+        if (answered) return answered;
+      }
       const m = /^\/orders\/(0x[0-9a-fA-F]{64})(\/status)?$/.exec(path);
       if (m) {
         if (method !== "GET") return json({ error: "method not allowed" }, 405, { allow: "GET" });

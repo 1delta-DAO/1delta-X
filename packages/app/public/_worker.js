@@ -39,7 +39,10 @@ const PROXY_PREFIX = "/api/oku/";
  * `img-src https:`; React's `style={…}` attributes need `'unsafe-inline'` for
  * styles only — scripts stay `'self'`. A self-hosted `VITE_OKU_BASE` on another
  * origin must be added to `connect-src`. `api.sushi.com`: the USD reference prices
- * (src/lib/usdPrices.ts, display only).
+ * (src/lib/usdPrices.ts, display only). `public-node.rsk.co`: Rootstock's public node,
+ * read directly for the dashboard's pool hops (src/hooks/useTxHops.ts) and the USD₮0
+ * on-ramp's arrival check while the wallet sits on the source chain (Bridge.tsx).
+ * Every other read and every write goes through the wallet's own provider.
  */
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -47,7 +50,7 @@ const CONTENT_SECURITY_POLICY = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com https://api.sushi.com",
+  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com https://api.sushi.com https://public-node.rsk.co",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -109,6 +112,7 @@ const BOOK_PREFIX = "/api/book/";
 const BOOK_MAX_BODY_BYTES = 256 * 1024;
 const BOOK_POST_TYPES = ["application/json", "application/x-protobuf"];
 const ORDER_STATUS_PATH = /^orders\/0x[0-9a-fA-F]{64}\/status$/;
+const RAFFLE_STATUS_PATH = /^raffle\/status\/0x[0-9a-fA-F]{40}$/;
 /** Base URL of a service-binding request; the host is ignored by the callee. */
 const BINDING_BASE = "https://orderbook.binding";
 
@@ -122,6 +126,12 @@ function bookRoute(path) {
   if (path === "cancels") return { POST: false };
   if (path === "fills") return { GET: true };
   if (ORDER_STATUS_PATH.test(path)) return { GET: false };
+  // The prize draw's public desk (orderbook-worker src/raffle.ts).
+  if (path === "raffle" || path === "raffle/entrants" || path === "raffle/draws" || RAFFLE_STATUS_PATH.test(path)) return { GET: false };
+  if (path === "raffle/entries") return { POST: false };
+  // `/raffle/admin/*` is deliberately absent: the operator console is its own
+  // deployment (packages/raffle-admin) with its own proxy. Nothing here forwards
+  // `authorization`, so no admin route is reachable through the app.
   return null;
 }
 

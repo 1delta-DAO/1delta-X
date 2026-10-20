@@ -107,6 +107,41 @@ describe("worker /api/book proxy — allowlisted routes", () => {
     expect(res.headers.get("allow")).toBeNull();
   });
 
+  it("the prize draw's public desk is forwarded; its admin routes are not", async () => {
+    const who = "0x00000000000000000000000000000000000000a1";
+    expect((await call("/api/book/raffle")).status).toBe(202);
+    expect((await call(`/api/book/raffle/status/${who}?x=1`)).status).toBe(202);
+    expect((await call("/api/book/raffle/entrants")).status).toBe(202);
+    expect((await call("/api/book/raffle/entries", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer t" }, body: "{}" })).status).toBe(202);
+    expect(seen.map((s) => `${s.method} ${s.url}`)).toEqual([
+      `GET ${ORIGIN}/raffle`,
+      `GET ${ORIGIN}/raffle/status/${who}`,
+      `GET ${ORIGIN}/raffle/entrants`,
+      `POST ${ORIGIN}/raffle/entries`,
+    ]);
+    expect(seen[3]!.headers.get("authorization")).toBeNull();
+    expect((await call("/api/book/raffle/export", { headers: { authorization: "Bearer t" } })).status).toBe(400);
+    expect((await call("/api/book/raffle/purge-contacts", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(400);
+    expect((await call("/api/book/raffle/status/0x1234")).status).toBe(400);
+    expect((await call("/api/book/raffle/entries")).status).toBe(405);
+    expect(seen).toHaveLength(4);
+  });
+
+  it("no raffle admin route is reachable through the app (the console is a separate deployment)", async () => {
+    const auth = { authorization: "Bearer admin-token" };
+    for (const p of ["/api/book/raffle/admin/config", "/api/book/raffle/admin/entries", "/api/book/raffle/admin/reset"]) {
+      expect((await call(p, { headers: auth })).status).toBe(400);
+    }
+    expect((await call("/api/book/raffle/admin/config", { method: "PUT", headers: { ...auth, "content-type": "application/json" }, body: "{}" })).status).toBe(400);
+    await call("/api/book/raffle", { headers: auth });
+    expect(seen.map((x) => `${x.method} ${x.url} ${x.headers.get("authorization") ?? "-"}`)).toEqual([`GET ${ORIGIN}/raffle -`]);
+  });
+
+  it("the CSP lets the app read Rootstock's public node (dashboard hops, on-ramp arrival)", async () => {
+    const res = await call("/api/book/fills");
+    expect(res.headers.get("content-security-policy")).toMatch(/connect-src [^;]*https:\/\/public-node\.rsk\.co/);
+  });
+
   it("no x-forwarded-for when Cloudflare supplied no client address", async () => {
     await call("/api/book/fills");
     expect(seen[0]!.headers.get("x-forwarded-for")).toBeNull();

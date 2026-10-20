@@ -11,7 +11,9 @@
     "preview": "vite preview --port 5060",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "vite",
-    "test": "vitest run"
+    "test": "vitest run",
+    "terms-hash": "node -e \"import('viem').then(({keccak256,toBytes})=>console.log(keccak256(toBytes(require('fs').readFileSync('../../TC.md','utf8')))))\"",
+    "verify-bridge": "tsx scripts/verify-usdt0-bridge.ts"
   },
   "dependencies": {
     "@1delta-x/sdk": "workspace:*",
