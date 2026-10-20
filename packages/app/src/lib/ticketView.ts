@@ -118,7 +118,7 @@ export function sourceName(source: string | null): string {
   if (s.startsWith("uni")) return "Uniswap";
   // Oku runs a Uniswap v3 deployment (and is our tick indexer, not a quote source): the venue is Uniswap.
   if (s.startsWith("oku")) return "Uniswap";
-  if (s.startsWith("inventory")) return "filler inventory";
+  if (s.startsWith("inventory")) return "inventory";
   // The RIF rail: RIF from the filler's inventory, priced at Money on Chain's redemption rate.
   if (s.startsWith("moc")) return "Money on Chain";
   return source.charAt(0).toUpperCase() + source.slice(1);
