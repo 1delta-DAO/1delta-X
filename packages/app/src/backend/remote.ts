@@ -42,8 +42,10 @@ import type { RowResolver } from "./restore";
  * reported, carrying the settlement transaction hash from the server's fill
  * index — or no hash at all when the node indexes no fills (G-TS_SIGN-15).
  *
- * Only the maker's own orders are tracked. Other makers' orders are not
- * fetched, so the ladder shows pool depth plus your own resting orders.
+ * Only the maker's own orders are TRACKED (status, fills, cancels). Other makers'
+ * live orders are read from `GET /orders?fillableOnly=true` every
+ * {@link PUBLIC_POLL_MS} and shown as `mine: false` rows — display only: they draw
+ * on the ladder, but nothing here follows their fills or lets this tab act on them.
  *
  * Bodies are the server's JSON form (bigints as decimal strings), NOT the
  * protobuf wire: protobufjs compiles its encoders with `new Function`, which this
@@ -54,6 +56,12 @@ import type { RowResolver } from "./restore";
 
 /** How often the maker's live orders are re-checked against the server. */
 export const POLL_MS = 6_000;
+
+/** How often other makers' live orders are re-read for the ladder (display only). */
+export const PUBLIC_POLL_MS = 12_000;
+
+/** Other makers' orders read per pass (the worker's page cap). */
+const PUBLIC_LIMIT = 500;
 
 /** Fills kept in memory — the same bound the mock uses. */
 const MAX_FILLS = 60;
@@ -340,6 +348,9 @@ export type FillReader = (signed: SignedOrder) => Promise<bigint | ChainFillStat
 
 export class RemoteOrderbook implements OrderbookApi {
   private rows: RestingOrder[] = [];
+  /** Every maker's live orders as the book serves them — rows this tab tracks win over these. */
+  private publicRows: RestingOrder[] = [];
+  private publicAt = Number.NEGATIVE_INFINITY;
   private settled: Fill[] = [];
   private readonly tracked = new Map<string, Tracked>();
   /** Orders whose row is gone but whose fill rows may still get their transaction. */
@@ -390,8 +401,9 @@ export class RemoteOrderbook implements OrderbookApi {
   }
 
   orders(marketId?: string): RestingOrder[] {
-    const all = marketId ? this.rows.filter((o) => o.marketId === marketId) : this.rows;
-    return [...all].sort((a, b) => b.createdAt - a.createdAt);
+    const own = new Set(this.rows.map((r) => r.id.toLowerCase()));
+    const all = [...this.rows, ...this.publicRows.filter((r) => !own.has(r.id.toLowerCase()))];
+    return (marketId ? all.filter((o) => o.marketId === marketId) : all).sort((a, b) => b.createdAt - a.createdAt);
   }
 
   fills(marketId?: string): Fill[] {
@@ -600,6 +612,7 @@ export class RemoteOrderbook implements OrderbookApi {
       }
       if ((this.tracked.size || this.finished.size) && this.now() >= this.pausedUntil && (await this.pollFills())) changed = true;
       if (await this.checkChain()) changed = true;
+      if (this.now() >= this.pausedUntil && (await this.pollPublic())) changed = true;
       if (this.settle()) changed = true;
       if (changed) this.emit();
     } finally {
@@ -608,6 +621,66 @@ export class RemoteOrderbook implements OrderbookApi {
   }
 
   // ── internals ──────────────────────────────────────────
+
+  /**
+   * Every maker's fillable live orders → display rows. Each item is checked the way
+   * restore checks one (the hash recomputed from the order, the market resolved);
+   * a failed read keeps the last good set. @returns whether the set changed.
+   */
+  private async pollPublic(): Promise<boolean> {
+    if (!this.resolveRow || this.now() - this.publicAt < PUBLIC_POLL_MS) return false;
+    this.publicAt = this.now();
+    const res = await this.get(`/orders?fillableOnly=true&limit=${PUBLIC_LIMIT}`);
+    if (!res?.ok) return false;
+    let body: { orders?: unknown };
+    try {
+      body = (await res.json()) as { orders?: unknown };
+    } catch {
+      return false;
+    }
+    const next: RestingOrder[] = [];
+    for (const raw of Array.isArray(body?.orders) ? body.orders : []) {
+      const row = this.publicRow(raw);
+      if (row) next.push(row);
+    }
+    const key = (rs: RestingOrder[]) => rs.map((r) => `${r.id}:${r.filled}`).join(",");
+    if (key(next) === key(this.publicRows)) return false;
+    this.publicRows = next;
+    return true;
+  }
+
+  private publicRow(raw: unknown): RestingOrder | null {
+    const item = raw as { orderHash?: unknown; order?: unknown; addedAt?: unknown; filledAmount?: unknown };
+    let order: Order;
+    try {
+      order = orderFromJson(item?.order);
+    } catch {
+      return null;
+    }
+    const hash = hashOrderStruct(order);
+    if (typeof item.orderHash !== "string" || item.orderHash.toLowerCase() !== hash.toLowerCase()) return null;
+    const placed = this.resolveRow?.(order);
+    if (!placed) return null;
+    const anchor = anchorOf(order);
+    const filledWei = toBig(item.filledAmount) ?? 0n;
+    const filled = anchor > 0n ? Math.min(1, fraction(filledWei, anchor)) * placed.size : 0;
+    const addedAt = typeof item.addedAt === "number" ? item.addedAt * 1000 : this.now();
+    const expiresAt = Number(order.expiry) * 1000;
+    return {
+      id: hash,
+      marketId: placed.marketId,
+      side: placed.side,
+      type: inferType(addedAt, expiresAt),
+      size: placed.size,
+      filled,
+      price: placed.price,
+      createdAt: addedAt,
+      expiresAt,
+      mine: false,
+      book: "remote",
+      ...(placed.native ? { native: true } : {}),
+    };
+  }
 
   private track(row: RestingOrder, signed: SignedOrder): void {
     this.tracked.set(signed.hash.toLowerCase(), {

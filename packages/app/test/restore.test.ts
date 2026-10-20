@@ -79,6 +79,48 @@ describe("rowResolver", () => {
   });
 });
 
+describe("RemoteOrderbook: other makers' orders", () => {
+  it("draws every maker's fillable orders as display rows; your own tracked row wins", async () => {
+    const theirs = order("sell", 20n, OTHER);
+    const partial = order("buy", 21n, OTHER);
+    const forged = order("sell", 22n, OTHER);
+    const mineToo = order("sell", 23n);
+    const { fn, calls } = fakeFetch({
+      "/orders": {
+        orders: [
+          item(theirs),
+          item(partial, { filledAmount: (25n * 10n ** 18n).toString() }),
+          item(forged, { orderHash: `0x${"00".repeat(32)}` }), // hash does not match the order: skipped
+          item(mineToo),
+        ],
+      },
+      "/fills": { fills: [] },
+    });
+    let now = (T0 + 100) * 1000;
+    const book = new RemoteOrderbook({ baseUrl: BASE, fetch: fn, resolveRow: resolve, now: () => now });
+    await book.poll();
+    expect(calls).toContain("/orders?fillableOnly=true&limit=500");
+    const rows = book.orders("rsk-30-usdrif-usd0");
+    expect(rows.map((r) => r.id).sort()).toEqual([theirs, partial, mineToo].map(hashOrderStruct).sort());
+    expect(rows.every((r) => !r.mine && r.book === "remote" && r.signed === undefined)).toBe(true);
+    expect(rows.find((r) => r.id === hashOrderStruct(partial))!.filled).toBeCloseTo(25, 6);
+
+    // After a restore the maker's own copy replaces the public one (no duplicate row).
+    await book.restore(MAKER);
+    const after = book.orders();
+    expect(after.filter((r) => r.id === hashOrderStruct(mineToo))).toEqual([expect.objectContaining({ mine: true })]);
+
+    // Throttled: a second poll inside PUBLIC_POLL_MS does not re-read the public book.
+    const reads = () => calls.filter((c) => c.startsWith("/orders?fillableOnly")).length;
+    const n = reads();
+    await book.poll();
+    expect(reads()).toBe(n);
+    now += 13_000;
+    await book.poll();
+    expect(reads()).toBe(n + 1);
+  });
+});
+
 describe("RemoteOrderbook.restore", () => {
   it("rebuilds the maker's resting rows and fills from the book", async () => {
     const live = order("sell", 10n);
@@ -111,9 +153,11 @@ describe("RemoteOrderbook.restore", () => {
     book.subscribe(() => notified++);
     await book.restore(MAKER);
 
-    expect(calls[0]).toBe(`/orders?maker=${MAKER}&limit=500`);
-    expect(calls[1]).toBe(`/fills?maker=${MAKER}&limit=500`);
-    const rows = book.orders();
+    // The public read (other makers' orders, display only) interleaves with the restore.
+    const restoreCalls = calls.filter((c) => !c.startsWith("/orders?fillableOnly"));
+    expect(restoreCalls[0]).toBe(`/orders?maker=${MAKER}&limit=500`);
+    expect(restoreCalls[1]).toBe(`/fills?maker=${MAKER}&limit=500`);
+    const rows = book.orders().filter((r) => r.mine);
     expect(rows.map((r) => r.id).sort()).toEqual([hashOrderStruct(live), hashOrderStruct(partial)].sort());
     const p = rows.find((r) => r.id === hashOrderStruct(partial))!;
     expect(p).toMatchObject({ side: "buy", marketId: "rsk-30-usdrif-usd0", book: "remote", mine: true, createdAt: (T0 + 5) * 1000 });

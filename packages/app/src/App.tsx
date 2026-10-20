@@ -205,15 +205,24 @@ export default function App() {
   }, [myFillKey, refreshBalances]);
   const allOrders = useRestingOrders();
 
+  // The ladder on screen draws every maker's resting orders. The one the ticket walks
+  // (quote, auto limit price) leaves out OTHER makers' real-book orders: the filler
+  // fills each order against the pools and never crosses two users' orders, so their
+  // size is not depth this ticket can take.
   const merged = useMemo(
     () => (pool.book ? mergeLadder(pool.book, resting) : { bids: [], asks: [] }),
     [pool.book, resting],
   );
+  const walkable = useMemo(() => {
+    const own = resting.filter((o) => o.mine || o.book !== "remote");
+    if (own.length === resting.length) return merged;
+    return pool.book ? mergeLadder(pool.book, own) : { bids: [], asks: [] };
+  }, [pool.book, resting, merged]);
   const tick = pool.book?.tick ?? 4;
 
   useEffect(() => {
-    setDeps({ bids: merged.bids, asks: merged.asks, tick, balances });
-  }, [merged, tick, balances]);
+    setDeps({ bids: walkable.bids, asks: walkable.asks, tick, balances });
+  }, [walkable, tick, balances]);
 
   // Your activity spans every market, so the grid each one prices on has to
   // outlive the ladder currently on screen — otherwise an order on another
@@ -240,14 +249,14 @@ export default function App() {
   const q = useMemo(() => {
     if (!ready || ticket.amount <= 0) return null;
     return quoteOrder({
-      bids: merged.bids,
-      asks: merged.asks,
+      bids: walkable.bids,
+      asks: walkable.asks,
       side: ticket.side,
       amountIn: ticket.amount,
       limit: ticket.mode === "market" ? null : ticket.limit,
       slippageBps: MARKET_SLIPPAGE_BPS,
     });
-  }, [ready, merged, ticket.side, ticket.amount, ticket.mode, ticket.limit]);
+  }, [ready, walkable, ticket.side, ticket.amount, ticket.mode, ticket.limit]);
 
   const payMeta = tokens.view(ticket.payToken);
 
