@@ -3,7 +3,7 @@
 **Day to day, use the operator console. It is a separate Pages project (`packages/raffle-admin`, behind Cloudflare Access), not part of the app.** It needs the
 orderbook worker's `RAFFLE_ADMIN_TOKEN`. It has four tabs:
 
-- **Setup & tests**: configure, switch on/off, test mode, run checks, reset a promotion, purge contacts.
+- **Setup & tests**: configure, switch on/off, run checks, reset a promotion, purge contacts.
 - **Feedback**: tallies, every entry, CSV download.
 - **Support**: look up an address, add an entry by hand with a note, remove an entry.
 - **Draws**: compute qualifiers, dry-run draw, save and fix the draw block, draw, exclude and redraw.
@@ -54,19 +54,19 @@ curl https://<app>/api/book/raffle    # {"live":true,"promotion":"rootstock-beta
 `terms` must equal the hash the app was built with, or the notice reads "The Terms
 were updated" and offers no form.
 
-## 3. Rehearsal in test mode, then the live end-to-end test
+## 3. Rehearsal, then the live end-to-end test
 
-On the console, save a config with id `rehearsal-1` and your wallets under
-**Testers**. The draw is then live only for those wallets: the public sees no
-notice and `/raffle/entrants` and `/raffle/draws` answer 404.
+On the console, save a throwaway id such as `rehearsal-1` with the qualifier set to
+$1. The rehearsal is public while it runs, so anyone could enter it, but a reset
+removes every entry.
 
 1. Run **Run checks**. Every line should be ✓.
-2. Do the steps below from a tester wallet.
+2. Do the steps below from your own wallet.
 3. Run a **Test draw** under Draws.
 4. Under Setup, **Reset promotion** `rehearsal-1`.
-5. Save the real id with no testers.
+5. Save the real id.
 
-Steps from a tester wallet (real funds, small):
+Steps from your wallet (real funds, small):
 
 Do this from a fresh wallet that holds **no RBTC on Rootstock**:
 

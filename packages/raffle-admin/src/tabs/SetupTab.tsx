@@ -24,16 +24,14 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
   const [end, setEnd] = useState<number | null>(base && base.endsAt < NO_END ? base.endsAt : null);
   const [qualifier, setQualifier] = useState(String(base?.qualifierUsd ?? 20));
   const [exclude, setExclude] = useState((base?.exclude ?? []).join("\n"));
-  const [testers, setTesters] = useState((base?.testers ?? []).join("\n"));
   const [busy, setBusy] = useState(false);
   const [checks, setChecks] = useState<Check[] | null>(null);
   const [resetId, setResetId] = useState("");
   const [note, setNote] = useState<string | null>(null);
 
-  useEffect(() => setNote(null), [id, terms, start, end, qualifier, exclude, testers]);
+  useEffect(() => setNote(null), [id, terms, start, end, qualifier, exclude]);
 
   const ex = parseAddresses(exclude);
-  const ts = parseAddresses(testers);
   const draft: RaffleConfig = {
     id: id.trim(),
     terms: terms.trim().toLowerCase() as `0x${string}`,
@@ -41,7 +39,9 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
     endsAt: end ?? NO_END,
     qualifierUsd: Number(qualifier),
     exclude: ex.ok,
-    testers: ts.ok,
+    // The worker still accepts a tester list (a closed test); the console does not use it:
+    // rehearse publicly under a throwaway id and reset it afterwards.
+    testers: [],
   };
 
   const run = async (f: () => Promise<unknown>, done?: string) => {
@@ -70,12 +70,7 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
       push("Inside its window", c.live, `${utc(eff.startsAt)} → ${utc(eff.endsAt)} · now ${utc(c.now)}`);
       push("Terms match this build's TC.md", eff.terms === buildTerms, eff.terms === buildTerms ? buildTerms : `worker ${eff.terms} ≠ build ${buildTerms} — every entry would be refused`);
       const pub = await api.publicSummary().catch(() => null);
-      if (c.testMode) push("Hidden from the public (test mode)", pub?.live === false && !pub.promotion, pub?.live ? "the public sees it live!" : "visitors see no notice");
-      else push("Visible to the public", pub?.live === true && pub.promotion === eff.id, pub?.live ? `${pub.entrants ?? 0} entrants` : "visitors see no notice");
-      for (const t of eff.testers) {
-        const s = await api.publicStatus(t).catch(() => null);
-        push(`Tester ${t.slice(0, 8)}… sees the draw`, s?.live === true, s ? `${s.traded ? "has a fill → Participate shown" : "no fill yet → Participate locked"}${s.entered ? " · entered" : ""}` : "unreachable");
-      }
+      push("Visible in the app", pub?.live === true && pub.promotion === eff.id, pub?.live ? `${pub.entrants ?? 0} entrant(s)` : "visitors see no notice");
     }
     try {
       const head = await rsk.getBlockNumber();
@@ -150,13 +145,6 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
           </label>
           <label className="pq">
             <span className="pqlabel">
-              Testers <span className="pqopt-tag">· any address here = TEST MODE: live only for these, invisible to everyone else</span>
-            </span>
-            <textarea className="pqtext m" rows={3} value={testers} onChange={(e) => setTesters(e.target.value)} placeholder="0x… one per line" />
-            {ts.bad.length > 0 && <span className="warn pqfine">Not addresses: {ts.bad.join(", ")}</span>}
-          </label>
-          <label className="pq">
-            <span className="pqlabel">
               Excluded from draws <span className="pqopt-tag">· team, contractors, ambassadors (TC §3.3); our fillers are always excluded</span>
             </span>
             <textarea className="pqtext m" rows={3} value={exclude} onChange={(e) => setExclude(e.target.value)} placeholder="0x… one per line" />
@@ -164,8 +152,8 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
           </label>
           {note && <p className="good pqfine">{note}</p>}
           <div className="adrow">
-            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || ts.bad.length > 0 || (start !== null && end !== null && end <= start)} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
-              {ts.ok.length ? "Save (test mode)" : "Save (public)"}
+            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || (start !== null && end !== null && end <= start)} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
+              Save
             </button>
             <button type="button" className="cta line" disabled={busy || config.source === "disabled"} onClick={() => run(() => api.disable(), "Switched off: no notice, no entries.")}>
               Switch off
@@ -188,9 +176,9 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
         </div>
         <div className="boxbody">
           <p className="pqnote">
-            Checks what the running configuration does for a visitor and for each tester. A full rehearsal: add your
-            wallets as testers, trade once from each, press Participate in the app, then run a test draw under Draws —
-            and reset the rehearsal promotion below.
+            Checks what the running configuration does for a visitor. A rehearsal: save a throwaway id (e.g.
+            rehearsal-1, qualifier $1), swap and press Participate in the app, check Feedback and a test draw under
+            Draws — then reset that id below and save the real one.
           </p>
           <button type="button" className="cta line" onClick={selfTest}>
             Run checks

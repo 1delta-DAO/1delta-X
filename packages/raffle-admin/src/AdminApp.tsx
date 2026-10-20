@@ -28,7 +28,7 @@ export function errorText(e: unknown): string {
 }
 
 /**
- * THE RAFFLE ADMIN PAGE (admin.html). Configure the draw, rehearse it in test mode,
+ * THE RAFFLE ADMIN PAGE (admin.html). Configure the draw, rehearse it under a throwaway id,
  * read the feedback, handle support cases, run the daily draws, and reset after a
  * rehearsal. Every action is an `/raffle/admin/*` call the orderbook worker authorises
  * with `RAFFLE_ADMIN_TOKEN`; this page holds no secret of its own and is useless
