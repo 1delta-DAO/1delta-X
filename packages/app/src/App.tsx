@@ -5,7 +5,8 @@ import { createPublicClient, createWalletClient, custom, formatUnits, zeroAddres
 
 import { BOOK_IS_REMOTE, orderbook } from "./backend/book";
 import type { SignedOrder } from "./backend/api";
-import { Header } from "./components/Header";
+import { Dashboard } from "./components/Dashboard";
+import { Header, type AppView } from "./components/Header";
 import { OrderBook, type BookMarker } from "./components/OrderBook";
 import { OrderForm, type AllowanceView, type Gate, type Receipt } from "./components/OrderForm";
 import { Orders } from "./components/Orders";
@@ -539,6 +540,17 @@ export default function App() {
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [signError, setSignError] = useState<string | null>(null);
   const [connectRequest, setConnectRequest] = useState(0);
+  // The page on screen, kept in the URL hash (#dashboard) so it can be linked and survives a reload.
+  const [view, setView] = useState<AppView>(() => (typeof location !== "undefined" && location.hash === "#dashboard" ? "dashboard" : "trade"));
+  const showView = useCallback((v: AppView) => {
+    setView(v);
+    history.replaceState(null, "", v === "dashboard" ? "#dashboard" : `${location.pathname}${location.search}`);
+  }, []);
+  useEffect(() => {
+    const onHash = () => setView(location.hash === "#dashboard" ? "dashboard" : "trade");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [riskOpen, setRiskOpen] = useState(false);
   const { acknowledged, accept } = useAcknowledgement();
 
@@ -994,8 +1006,15 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         requestConnect={connectRequest}
+        view={view}
+        onView={showView}
       />
 
+      {view === "dashboard" ? (
+        <main>
+          <Dashboard chainId={chainId} usdOf={usdOf} />
+        </main>
+      ) : (
       <main>
         <RaffleNotice chainId={chainId} />
 
@@ -1085,6 +1104,7 @@ export default function App() {
           account={wallet.address ?? undefined}
         />
       </main>
+      )}
 
       <footer>
         <p>1delta X · reference interface for UniversalSettlement</p>

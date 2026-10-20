@@ -15,7 +15,12 @@ interface HeaderProps {
   onToggleTheme: () => void;
   /** Counter bumped elsewhere in the app to pop the wallet menu open. */
   requestConnect: number;
+  /** The page on screen: the trading deck or the analytics dashboard. */
+  view: AppView;
+  onView: (v: AppView) => void;
 }
+
+export type AppView = "trade" | "dashboard";
 
 function useDismiss(open: boolean, close: () => void) {
   const ref = useRef<HTMLDivElement>(null);
@@ -185,7 +190,7 @@ function Connect({
 }
 
 export function Header(props: HeaderProps) {
-  const { chainId, onChainChange, wallet, block, live, theme, onToggleTheme, requestConnect } = props;
+  const { chainId, onChainChange, wallet, block, live, theme, onToggleTheme, requestConnect, view, onView } = props;
   return (
     <div className="nav">
       <div className="brand">
@@ -195,6 +200,14 @@ export function Header(props: HeaderProps) {
         <i className="dot" data-live={live} />
         {block === null ? "syncing" : block.toLocaleString("en-US")}
       </span>
+      <nav className="otabs navtabs" aria-label="Pages">
+        <button type="button" aria-selected={view === "trade"} onClick={() => onView("trade")}>
+          Trade
+        </button>
+        <button type="button" aria-selected={view === "dashboard"} onClick={() => onView("dashboard")}>
+          Dashboard
+        </button>
+      </nav>
       <div className="navspace" />
       <ChainSelect chainId={chainId} onChange={onChainChange} />
       <Connect wallet={wallet} chainId={chainId} requestOpen={requestConnect} />
