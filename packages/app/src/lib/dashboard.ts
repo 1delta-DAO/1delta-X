@@ -64,6 +64,19 @@ function decimalsOf(chainId: number, address: string): number | undefined {
     ?.decimals;
 }
 
+/** USD of `wei` of `token` (pinned decimals, priced by symbol), or `undefined` for a token we cannot price. */
+export function tokenUsd(
+  chainId: number,
+  token: string,
+  wei: bigint,
+  usdOf: (symbol: string) => number | undefined,
+): number | undefined {
+  const dec = decimalsOf(chainId, token);
+  if (dec === undefined || wei < 0n) return undefined;
+  const px = usdOf(symbolOf(chainId, token));
+  return px === undefined ? undefined : (Number(wei) / 10 ** dec) * px;
+}
+
 const toWei = (v: unknown): bigint | null =>
   typeof v === "string" && /^\d+$/.test(v) ? BigInt(v) : null;
 
@@ -151,8 +164,9 @@ export interface Breakdown {
 }
 
 /**
- * VOLUME vs TURNOVER (2026-10-20). TURNOVER sums every fill: two opposite orders
- * matched against each other in one transaction count twice. VOLUME is the USD that
+ * VOLUME vs TURNOVER (2026-10-20). TURNOVER is every conversion that ran: each pool hop
+ * of a routed fill (lib/turnover.ts — a two-hop route counts ~2×), and the fills of a
+ * transaction without one (an inventory fill; two matched orders count twice). VOLUME is the USD that
  * really changed hands: per transaction and per token pair, the two directions net —
  * only the larger side counts (opposite flows offset each other; fills in the same
  * direction add up). Outside a matched transaction every fill is volume and turnover
@@ -218,12 +232,45 @@ function tally(
   map.set(key, b);
 }
 
-/** Aggregate `fills` as of `now` (ms): totals, the last 24 h, `days` daily buckets, per pair and per filler. */
+/**
+ * Each fill's share of its transaction's TURNOVER (lib/turnover.ts): a transaction whose
+ * pool hops are known (`txTurnover`, USD by lowercase tx hash) splits that figure over
+ * its fills by their USD (evenly when none is sized); any other fill is its own turnover.
+ */
+export function turnoverShares(
+  fills: readonly DashFill[],
+  txTurnover?: ReadonlyMap<string, number>,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!txTurnover || txTurnover.size === 0) return out;
+  const byTx = new Map<string, DashFill[]>();
+  for (const f of fills) {
+    const tx = f.tx.toLowerCase();
+    if (!txTurnover.has(tx)) continue;
+    byTx.set(tx, [...(byTx.get(tx) ?? []), f]);
+  }
+  for (const [tx, group] of byTx) {
+    const total = txTurnover.get(tx)!;
+    const sized = group.reduce((a, f) => a + (f.usd ?? 0), 0);
+    for (const f of group)
+      out.set(
+        f.id,
+        sized > 0 ? (total * (f.usd ?? 0)) / sized : total / group.length,
+      );
+  }
+  return out;
+}
+
+/**
+ * Aggregate `fills` as of `now` (ms): totals, the last 24 h, `days` daily buckets, per pair
+ * and per filler. `txTurnover`: the pool-hop turnover of the transactions read so far.
+ */
 export function dashStats(
   chainId: number,
   fills: readonly DashFill[],
   now: number,
   days = 30,
+  txTurnover?: ReadonlyMap<string, number>,
 ): DashStats {
   const today = Math.floor(now / DAY) * DAY;
   const first = today - (days - 1) * DAY;
@@ -245,8 +292,9 @@ export function dashStats(
     fills24h: 0,
     sized: 0,
   };
+  const share = turnoverShares(fills, txTurnover);
   for (const f of fills) {
-    const t = f.usd ?? 0;
+    const t = share.get(f.id) ?? f.usd ?? 0;
     const v = netted.get(f.id) ?? 0;
     if (f.usd !== undefined) st.sized++;
     st.volume += v;

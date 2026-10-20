@@ -2,15 +2,18 @@ import { useMemo, useState } from "react";
 
 import { NATIVE_SYMBOL, WRAPPED_NATIVE } from "../config/markets";
 import { useAllFills } from "../hooks/useAllFills";
+import { useTxHops } from "../hooks/useTxHops";
 import {
   dashStats,
   fillerName,
   toDashFill,
+  tokenUsd,
   type Breakdown,
   type DashFill,
 } from "../lib/dashboard";
 import { fmtUsd } from "../lib/usdPrices";
 import { explorerTx } from "../lib/txFlow";
+import { hopUsd } from "../lib/turnover";
 
 interface DashboardProps {
   chainId: number;
@@ -260,9 +263,31 @@ export function Dashboard({ chainId, usdOf }: DashboardProps) {
     () => wire.map((f) => toDashFill(chainId, f, price)),
     [wire, chainId, price],
   );
+  // TURNOVER: every pool hop each fill transaction ran (lib/turnover.ts), read from its receipt.
+  const txs = useMemo(() => fills.map((f) => f.tx).filter(Boolean), [fills]);
+  const { hops, pools, pending } = useTxHops(chainId, txs);
+  const txTurnover = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const [tx, h] of hops) {
+      // No swap, or none we can price: its fills are its turnover.
+      const usds = h
+        .map((hop) =>
+          hopUsd(hop, pools.get(hop.pool), (t, w) =>
+            tokenUsd(chainId, t, w, price),
+          ),
+        )
+        .filter((v): v is number => v !== undefined);
+      if (usds.length > 0)
+        out.set(
+          tx,
+          usds.reduce((a, v) => a + v, 0),
+        );
+    }
+    return out;
+  }, [hops, pools, chainId, price]);
   const stats = useMemo(
-    () => dashStats(chainId, fills, Date.now(), DAYS),
-    [chainId, fills],
+    () => dashStats(chainId, fills, Date.now(), DAYS, txTurnover),
+    [chainId, fills, txTurnover],
   );
   const unsized = stats.fills - stats.sized;
 
@@ -290,7 +315,11 @@ export function Dashboard({ chainId, usdOf }: DashboardProps) {
           <Kpi
             label="Turnover"
             value={usd(stats.turnover)}
-            sub="every fill, summed"
+            sub={
+              pending > 0
+                ? `reading ${pending} transaction${pending === 1 ? "" : "s"}…`
+                : "every conversion, incl. route hops"
+            }
           />
           <Kpi
             label="Last 24 h"
@@ -306,10 +335,12 @@ export function Dashboard({ chainId, usdOf }: DashboardProps) {
         <DailyChart daily={stats.daily} />
         <p className="dnote">
           Each fill is sized on the exactly-filled leg of its order (what a
-          seller paid, what a buyer received) at today&apos;s USD price.
-          Turnover sums every fill; volume nets opposite fills settled in the
-          same transaction (two matched orders count once), so it is the USD
-          that really changed hands.
+          seller paid, what a buyer received) at today&apos;s USD price. Volume
+          is the USD that really changed hands: opposite fills settled in the
+          same transaction net (two matched orders count once). Turnover is
+          every conversion that ran: each pool hop of a routed fill (a two-hop
+          route counts about twice), and the fill itself when it needed no swap
+          (filled from inventory).
           {unsized > 0 &&
             ` ${unsized} older fill${unsized === 1 ? "" : "s"} could not be sized (the orderbook no longer holds the order).`}
         </p>
