@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill deploy-native-delivery simulate-native-unwrap deploy-native-unwrap size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: print-packages test test-sdk test-ts workers-smoke raffle-admin-setup build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill deploy-native-delivery simulate-native-unwrap deploy-native-unwrap size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── CI matrix source ──────────────────────────────────────────────────────────
 
@@ -122,6 +122,11 @@ test-ts:
 ## is NOT part of `test-ts`; CI runs it as its own step right after. Run it before a deploy.
 workers-smoke:
 	tools/workers-smoke.sh
+
+## Cloudflare secrets for the raffle operator console (idempotent; see the script header).
+## DEPLOY_WORKER=1 also deploys the orderbook worker; BINDING_KEY=… sets the console's key.
+raffle-admin-setup:
+	tools/raffle-admin-setup.sh
 
 ## Compile one package: make build PKG=modules-aave-v3
 build:
