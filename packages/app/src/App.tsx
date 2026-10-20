@@ -1028,7 +1028,7 @@ export default function App() {
             onBridge={() => setBridgeOpen(true)}
           />
         ) : (
-          chainId === 30 && <OnrampLink onOpen={() => setBridgeOpen(true)} />
+          chainId === 30 && <OnrampLink onOpen={() => setBridgeOpen(true)} address={wallet.address} />
         )}
         {bridgeOpen && (
           <BridgeSheet

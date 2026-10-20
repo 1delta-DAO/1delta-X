@@ -3,14 +3,35 @@ import { createPublicClient, createWalletClient, custom, erc20Abi, formatUnits, 
 import { rootstock } from "viem/chains";
 
 import { BRIDGE_ETA_MINUTES, BRIDGE_SOURCES, layerZeroScanTx, NATIVE_USD_REF, ROOTSTOCK_USDT0, sourceRpc, SUGGESTED_MAX_USD, USDT0_APP_URL, type BridgeSource } from "../config/bridge";
-import { approveForBridge, arrived, nativeNeeded, quoteBridge, sendToRootstock, type BridgeClient, type BridgeQuote } from "../lib/bridge";
+import {
+  approveForBridge,
+  arrived,
+  clearPending,
+  etaMinutesFor,
+  fetchTrace,
+  loadPending,
+  nativeNeeded,
+  quoteBridge,
+  recordEta,
+  savePending,
+  sendToRootstock,
+  type BridgeClient,
+  type BridgeQuote,
+  type BridgeTrace,
+} from "../lib/bridge";
+import { explorerTx } from "../lib/txFlow";
 import { fetchUsdTable, fmtUsd } from "../lib/usdPrices";
 import type { EIP1193Provider } from "../wallet/eip6963";
 
-/** Rootstock is polled this often for the USD₮0 to land (the wallet is on the source chain meanwhile). */
+/**
+ * LayerZero Scan and Rootstock are polled this often for a sent bridge (the wallet is on
+ * the source chain meanwhile). Scan is the trace: source confirmed → in flight →
+ * delivered (with the Rootstock tx) or stuck; the Rootstock balance is the fallback when
+ * Scan is unreachable or has not indexed the tx.
+ */
 const ARRIVAL_POLL_MS = 15_000;
 /** Past twice the usual time, the panel says it is slow and points at LayerZero Scan. */
-const SLOW_AFTER_MS = 2 * BRIDGE_ETA_MINUTES * 60_000;
+const slowAfterMs = (etaMinutes: number) => 2 * etaMinutes * 60_000;
 /** A quote older than this is refreshed before the send (fees and gas move). */
 const QUOTE_TTL_MS = 60_000;
 /** Above this share of the amount, the summary warns that fees eat the transfer. */
@@ -22,8 +43,11 @@ type Phase =
   | { kind: "ready"; quote: BridgeQuote; at: number }
   | { kind: "approving"; quote: BridgeQuote }
   | { kind: "sending"; quote: BridgeQuote }
-  | { kind: "sent"; quote: BridgeQuote; tx: Hex; before: bigint; at: number }
-  | { kind: "arrived"; tx: Hex; amount: bigint };
+  /** Sent on the source chain. `trace` is Scan's view (null until it indexes the tx). */
+  | { kind: "sent"; srcKey: string; tx: Hex; before: bigint; minAmountLD: bigint; amountLD: bigint; at: number; trace: BridgeTrace | null }
+  | { kind: "arrived"; tx: Hex; amount: bigint; dstTx?: Hex }
+  /** Scan reports the message as stuck (failed / blocked / payload stored). */
+  | { kind: "stuck"; tx: Hex; detail: string };
 
 const rsk = createPublicClient({ chain: rootstock, transport: http(undefined, { retryCount: 1, timeout: 15_000 }) });
 
@@ -96,10 +120,14 @@ async function switchTo(provider: EIP1193Provider, src: BridgeSource): Promise<v
   }
 }
 
-/** Reads, gas and quotes from the public RPC; writes and receipts through the wallet. */
+/**
+ * Reads, gas, quotes AND receipts from the public RPC; only the writes go through the
+ * wallet. The receipt used to be awaited through the wallet's provider: a wallet switched
+ * back to Rootstock mid-wait (or any provider hiccup) then threw, and the panel reported
+ * an error for a bridge that was in flight. The public node sees the same chain.
+ */
 function clientFor(provider: EIP1193Provider, src: BridgeSource, owner: Address): BridgeClient {
   const pub = reader(src);
-  const viaWallet = createPublicClient({ chain: src.chain, transport: custom(provider) });
   const wal = createWalletClient({ account: owner, chain: src.chain, transport: custom(provider) });
   return {
     read: (a) => pub.readContract(a as never) as never,
@@ -107,7 +135,8 @@ function clientFor(provider: EIP1193Provider, src: BridgeSource, owner: Address)
     gasPrice: () => pub.getGasPrice(),
     nativeBalance: (o) => pub.getBalance({ address: o }),
     write: (a) => wal.writeContract({ ...(a as object), account: owner, chain: src.chain } as never),
-    waitForReceipt: (hash) => viaWallet.waitForTransactionReceipt({ hash }),
+    // A public node can lag the wallet's by a few blocks: keep asking for a while.
+    waitForReceipt: (hash) => pub.waitForTransactionReceipt({ hash, pollingInterval: 4_000, retryCount: 60, timeout: 20 * 60_000 }),
   };
 }
 
@@ -157,6 +186,19 @@ export function BridgeSheet({
   const [slow, setSlow] = useState(false);
   const alive = useRef(true);
   useEffect(() => () => void (alive.current = false), []);
+  /** The usual time from this source chain: observed here when it has been, else the table's figure. */
+  const eta = useMemo(() => etaMinutesFor(src.key, BRIDGE_ETA_MINUTES), [src.key, phase.kind]);
+
+  // A bridge sent earlier (this panel closed, or the tab reloaded) is picked up where it was.
+  useEffect(() => {
+    if (!address || phase.kind !== "pick") return;
+    const p = loadPending(address);
+    if (!p || !BRIDGE_SOURCES.some((s) => s.key === p.srcKey)) return;
+    setSrcKey(p.srcKey);
+    setSlow(false);
+    setPhase({ kind: "sent", srcKey: p.srcKey, tx: p.tx, before: BigInt(p.before), minAmountLD: BigInt(p.minAmountLD), amountLD: BigInt(p.amountLD), at: p.at, trace: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address]);
 
   const onSource = walletChainId === src.chain.id;
   const busy = phase.kind === "quoting" || phase.kind === "approving" || phase.kind === "sending";
@@ -198,20 +240,38 @@ export function BridgeSheet({
     return () => void (live = false);
   }, [src]);
 
-  // Arrival: poll Rootstock until the balance rose by the minimum.
+  // The trace: LayerZero Scan for the message, Rootstock's balance as the fallback.
   useEffect(() => {
     if (phase.kind !== "sent" || !address) return;
     const p = phase;
-    const id = setInterval(() => {
-      if (Date.now() - p.at > SLOW_AFTER_MS) setSlow(true);
-      void rootstockUsdt0(address)
-        .then((now) => {
-          if (alive.current && arrived(p.before, now, p.quote.minAmountLD)) setPhase({ kind: "arrived", tx: p.tx, amount: now - p.before });
-        })
-        .catch(() => {});
-    }, ARRIVAL_POLL_MS);
+    const owner = address;
+    const slowAfter = slowAfterMs(eta.minutes);
+    const land = (amount: bigint, dstTx?: Hex) => {
+      clearPending(owner);
+      recordEta(p.srcKey, (Date.now() - p.at) / 60_000);
+      setPhase({ kind: "arrived", tx: p.tx, amount, ...(dstTx ? { dstTx } : {}) });
+    };
+    const tick = async () => {
+      if (Date.now() - p.at > slowAfter) setSlow(true);
+      const [trace, now] = await Promise.all([fetchTrace(p.tx, ROOTSTOCK_USDT0.eid), rootstockUsdt0(owner).catch(() => null)]);
+      if (!alive.current) return;
+      // What landed: the balance delta when it reads as this bridge (the user may have
+      // traded USD₮0 meanwhile, which moves the balance either way), else the quoted minimum.
+      const delta = now === null ? null : now - p.before;
+      const landed = delta !== null && delta >= p.minAmountLD && delta <= p.amountLD ? delta : p.minAmountLD;
+      if (trace?.stage === "delivered") return land(landed, trace.dstTx);
+      if (trace?.stage === "failed") {
+        setPhase({ kind: "stuck", tx: p.tx, detail: trace.detail ?? "LayerZero reports the message as stuck" });
+        return;
+      }
+      if (trace === null && now !== null && arrived(p.before, now, p.minAmountLD)) return land(landed);
+      if (trace && (trace.sourceConfirmed !== p.trace?.sourceConfirmed || p.trace === null)) setPhase({ ...p, trace });
+    };
+    void tick();
+    const id = setInterval(() => void tick(), ARRIVAL_POLL_MS);
     return () => clearInterval(id);
-  }, [phase, address]);
+    // `phase.trace` changes re-run this; the closure over `p` is what the next tick compares against.
+  }, [phase, address, eta.minutes]);
 
   const amountLD = useMemo(() => {
     try {
@@ -270,12 +330,22 @@ export function BridgeSheet({
       const before = await rootstockUsdt0(address).catch(() => null);
       if (before === null) throw new Error("could not read your Rootstock balance — try again in a moment");
       const tx = await sendToRootstock(c, src, address, quote);
-      if (alive.current) setPhase({ kind: "sent", quote, tx, before, at: Date.now() });
-      const r = await c.waitForReceipt(tx);
-      if (r.status !== "success" && alive.current) {
-        setError("the bridge transaction reverted on the source chain — nothing was sent");
-        setPhase({ kind: "pick" });
-      }
+      const at = Date.now();
+      savePending({ owner: address, srcKey: src.key, tx, before: before.toString(), minAmountLD: quote.minAmountLD.toString(), amountLD: quote.amountLD.toString(), at });
+      setSlow(false);
+      if (alive.current) setPhase({ kind: "sent", srcKey: src.key, tx, before, minAmountLD: quote.minAmountLD, amountLD: quote.amountLD, at, trace: null });
+      // Only a REVERT on the source chain ends the trace here. A receipt that cannot be
+      // read (a lagging node, a timeout) proves nothing: Scan keeps reporting the message.
+      void c
+        .waitForReceipt(tx)
+        .then((r) => {
+          if (r.status !== "success" && alive.current) {
+            clearPending(address);
+            setError("the bridge transaction reverted on the source chain — nothing was sent");
+            setPhase({ kind: "pick" });
+          }
+        })
+        .catch(() => {});
     } catch (e) {
       if (alive.current) {
         setError(message(e));
@@ -314,10 +384,36 @@ export function BridgeSheet({
               </h2>
               <p className="pqnote">
                 You need no RBTC to trade it: sign a gasless approval and an order — the filler pays the gas. Sell
-                USD₮0 for RBTC first if you want gas for later.
+                USD₮0 for RBTC first if you want gas for later.{" "}
+                {phase.dstTx && explorerTx(ROOTSTOCK_USDT0.chainId, phase.dstTx) ? (
+                  <a className="linkbtn" href={explorerTx(ROOTSTOCK_USDT0.chainId, phase.dstTx)!} target="_blank" rel="noreferrer">
+                    Rootstock transaction
+                  </a>
+                ) : (
+                  <a className="linkbtn" href={layerZeroScanTx(phase.tx)} target="_blank" rel="noreferrer">
+                    LayerZero Scan
+                  </a>
+                )}
               </p>
               <button type="button" className="cta" onClick={() => (onSwitchHome(), onClose())}>
                 Switch back to Rootstock and trade
+              </button>
+            </>
+          ) : phase.kind === "stuck" ? (
+            <>
+              <h2 id="bridge-title" className="gatetitle">
+                The bridge <span className="hl hl-violet">needs attention</span>.
+              </h2>
+              <p className="pqnote">
+                LayerZero reports the message as: <b>{phase.detail}</b>. Your USD₮0 left the source chain and is held by
+                the bridge, not lost — LayerZero retries most of these on its own; the explorer shows the message and the
+                retry.{" "}
+                <a className="linkbtn" href={layerZeroScanTx(phase.tx)} target="_blank" rel="noreferrer">
+                  Open it on LayerZero Scan
+                </a>
+              </p>
+              <button type="button" className="cta" onClick={() => (address && clearPending(address), setPhase({ kind: "pick" }))}>
+                Stop tracking here
               </button>
             </>
           ) : (
@@ -327,8 +423,8 @@ export function BridgeSheet({
               </h2>
               <p className="pqnote">
                 USDT0&rsquo;s own LayerZero bridge moves it to <b>your address</b> on Rootstock in about{" "}
-                {BRIDGE_ETA_MINUTES} minutes. You pay the bridge fee and gas in {nativeSym} on the source chain. On
-                Rootstock, USD₮0 trades gaslessly.
+                {eta.minutes} minutes{eta.observed > 0 ? ` from ${src.label}` : ""}. You pay the bridge fee and gas in {nativeSym}{" "}
+                on the source chain. On Rootstock, USD₮0 trades gaslessly.
               </p>
               <div className="pq">
                 <span className="pqlabel">From</span>
@@ -409,8 +505,8 @@ export function BridgeSheet({
                     </dd>
                   </div>
                   <div className="pqrow">
-                    <dt>Arrival on Rootstock</dt>
-                    <dd className="m">~{BRIDGE_ETA_MINUTES} min</dd>
+                    <dt>Arrival on Rootstock{eta.observed > 0 ? ` (seen ${eta.observed}× from ${src.label})` : ""}</dt>
+                    <dd className="m">~{eta.minutes} min</dd>
                   </div>
                 </dl>
               )}
@@ -424,9 +520,13 @@ export function BridgeSheet({
               )}
               {phase.kind === "sent" && (
                 <p className="pqnote">
-                  Sent. Waiting for it to land on Rootstock
-                  {slow ? " — this is taking longer than usual" : ` (usually about ${BRIDGE_ETA_MINUTES} minutes)`}. You can close this panel: it
-                  arrives at your address either way.{" "}
+                  {phase.trace === null
+                    ? `Sent from ${src.label}. Waiting for LayerZero to pick the transaction up`
+                    : !phase.trace.sourceConfirmed
+                      ? `Confirming on ${src.label} — the bridge waits out ${src.label}'s block confirmations first`
+                      : `Confirmed on ${src.label}. In flight to Rootstock`}
+                  {slow ? " — this is taking longer than usual" : ` (usually about ${eta.minutes} minutes in all)`}. You can close
+                  this panel or the tab: it arrives at your address either way, and the panel picks the trace up again.{" "}
                   <a className="linkbtn" href={layerZeroScanTx(phase.tx)} target="_blank" rel="noreferrer">
                     Track on LayerZero Scan
                   </a>
@@ -462,14 +562,26 @@ export function BridgeSheet({
   );
 }
 
-/** The on-ramp's entry when no prize-draw notice carries it. */
-export function OnrampLink({ onOpen }: { onOpen: () => void }) {
+/** The on-ramp's entry when no prize-draw notice carries it; a bridge in flight is the hint instead. */
+export function OnrampLink({ onOpen, address }: { onOpen: () => void; address?: Address | null }) {
+  const pending = address ? loadPending(address) : null;
   return (
     <p className="onramp">
-      No funds on Rootstock?{" "}
-      <button type="button" className="linkbtn" onClick={onOpen}>
-        Bring USD₮0 from Arbitrum, Ethereum, Polygon and more — no RBTC needed
-      </button>
+      {pending ? (
+        <>
+          A USD₮0 bridge is on its way to this address.{" "}
+          <button type="button" className="linkbtn" onClick={onOpen}>
+            Track it
+          </button>
+        </>
+      ) : (
+        <>
+          No funds on Rootstock?{" "}
+          <button type="button" className="linkbtn" onClick={onOpen}>
+            Bring USD₮0 from Arbitrum, Ethereum, Polygon and more — no RBTC needed
+          </button>
+        </>
+      )}
     </p>
   );
 }

@@ -70,7 +70,7 @@ Steps from your wallet (real funds, small):
 
 Do this from a fresh wallet that holds **no RBTC on Rootstock**:
 
-1. Open the app, then **Bring USD₮0** → Arbitrum → 10 USD₮0 → Bridge. The summary should show the LayerZero fee (about $1.2), Arbitrum gas (a few cents) and the total in ETH and USD. Expect arrival in about 23 minutes.
+1. Open the app, then **Bring USD₮0** → Arbitrum → 10 USD₮0 → Bridge. The summary should show the LayerZero fee (about $1.2), Arbitrum gas (a few cents) and the total in ETH and USD. Expect arrival in about 23 minutes; the panel traces it through LayerZero Scan (confirming on the source chain → in flight → delivered, with the Rootstock tx) and keeps the trace across a closed panel or a reload.
 2. Switch back to Rootstock. Sell 5 USD₮0 for **RBTC** (market order), using the gasless permit path.
    - Expected: native RBTC arrives through solver v3 + NativeBalance, and the wallet never paid gas.
    - This combination (permit-funded order + native RBTC out) has not been filled live before. If it fails, the bridge still works and RBTC delivery is the thing to fix.

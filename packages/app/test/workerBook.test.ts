@@ -149,6 +149,13 @@ describe("worker /api/book proxy — allowlisted routes", () => {
     for (const s of BRIDGE_SOURCES) expect(connect).toContain(new URL(sourceRpc(s)).origin);
   });
 
+  it("the CSP admits LayerZero Scan's API (the on-ramp traces a sent bridge through it)", async () => {
+    const { LAYERZERO_SCAN_API } = await import("../src/config/bridge");
+    const csp = (await call("/api/book/fills")).headers.get("content-security-policy")!;
+    const connect = csp.split(";").find((d) => d.trim().startsWith("connect-src"))!.trim().split(/\s+/);
+    expect(connect).toContain(new URL(LAYERZERO_SCAN_API).origin);
+  });
+
   it("no x-forwarded-for when Cloudflare supplied no client address", async () => {
     await call("/api/book/fills");
     expect(seen[0]!.headers.get("x-forwarded-for")).toBeNull();

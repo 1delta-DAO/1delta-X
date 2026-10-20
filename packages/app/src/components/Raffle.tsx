@@ -74,7 +74,7 @@ export function RaffleNotice({
   // The orderbook's desk is the switch: nothing is shown until it says the draw is live
   // for this visitor — switched off, outside its window, or a closed test (the operator console, packages/raffle-admin)
   // all hide the notice. A build without an orderbook keeps the static notice.
-  if (ORDERBOOK_URL && status?.live !== true) return <OnrampLink onOpen={onBridge} />;
+  if (ORDERBOOK_URL && status?.live !== true) return <OnrampLink onOpen={onBridge} address={address} />;
   const view = participateView(status, address, TERMS_HASH);
 
   return (

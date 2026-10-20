@@ -45,6 +45,8 @@ const PROXY_PREFIX = "/api/oku/";
  * BRIDGE_RPC_ORIGINS: the on-ramp's source-chain public RPCs (src/config/bridge.ts
  * `sourceRpc`, pinned there; a test keeps the two in step), for the balance views and
  * the fee/gas quote before the wallet switches chains — reads only.
+ * `scan.layerzero-api.com`: LayerZero Scan's message API, polled to trace a bridge in
+ * flight (src/config/bridge.ts `LAYERZERO_SCAN_API`).
  * Every other read and every write goes through the wallet's own provider.
  */
 const BRIDGE_RPC_ORIGINS = [
@@ -67,7 +69,7 @@ const CONTENT_SECURITY_POLICY = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com https://api.sushi.com https://public-node.rsk.co " + BRIDGE_RPC_ORIGINS.join(" "),
+  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com https://api.sushi.com https://public-node.rsk.co https://scan.layerzero-api.com " + BRIDGE_RPC_ORIGINS.join(" "),
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

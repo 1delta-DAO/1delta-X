@@ -77,10 +77,23 @@ export const NATIVE_USD_REF: Readonly<Record<string, { chainId: number; token: A
 };
 
 /**
- * Typical source-send → Rootstock-credit time, minutes. Observed ~23 min (2026-10-20):
- * the DVNs wait out the source chain's block confirmations before Rootstock credits it.
+ * Typical source-send → Rootstock-credit time, minutes, before this browser has seen a
+ * bridge from the chain in question. Observed ~23 min from Arbitrum (2026-10-20): the DVNs
+ * wait out the source chain's block confirmations before Rootstock credits it. Per chain
+ * the panel prefers what it has OBSERVED (lib/bridge.ts `etaMinutesFor`): the time
+ * depends on the source chain's confirmation depth, and one figure cannot fit eleven.
  */
 export const BRIDGE_ETA_MINUTES = 23;
+
+/**
+ * LayerZero Scan's public message API (read 2026-10-20): `GET {API}/messages/tx/{txHash}`
+ * returns every message a source tx emitted, with a top-level status (INFLIGHT,
+ * CONFIRMING, DELIVERED, FAILED, BLOCKED, …), the source tx's confirmations and the
+ * destination tx once it exists. The panel polls it to trace a bridge; its origin is in
+ * the CSP's connect-src (public/_worker.js, a test keeps the two in step).
+ */
+export const LAYERZERO_SCAN_API = "https://scan.layerzero-api.com/v1";
+export const layerZeroScanMessage = (txHash: string) => `${LAYERZERO_SCAN_API}/messages/tx/${txHash}`;
 
 /**
  * Source-chain gas, in gas units, when `eth_estimateGas` cannot run yet (before the
