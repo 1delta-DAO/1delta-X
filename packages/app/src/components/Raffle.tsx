@@ -6,7 +6,7 @@ import { chainLabel } from "../config/chains";
 import { PROMOTION, promotionRunsOn } from "../config/promotion";
 import { TERMS_HASH } from "../config/terms";
 import { fetchRaffleStatus, fetchRaffleSummary, participateView, type RaffleStatus, type TypedDataSigner } from "../lib/raffle";
-import { OnrampLink } from "./Bridge";
+import { GasZipLink, OnrampLink, UsdtLink } from "./Onramp";
 import { ParticipateSheet } from "./Participate";
 import { TermsLink } from "./TermsLink";
 
@@ -32,15 +32,12 @@ export function RaffleNotice({
   address,
   signer,
   onConnect,
-  onBridge,
 }: {
   chainId: number;
   address: Address | null;
   /** Null while the wallet is off the draw's chain. */
   signer: TypedDataSigner | null;
   onConnect: () => void;
-  /** Opens the USD₮0 on-ramp. */
-  onBridge: () => void;
 }) {
   const runs = promotionRunsOn(chainId) && !!ORDERBOOK_URL;
   const [status, setStatus] = useState<RaffleStatus | null>(null);
@@ -74,7 +71,7 @@ export function RaffleNotice({
   // The orderbook's desk is the switch: nothing is shown until it says the draw is live
   // for this visitor — switched off, outside its window, or a closed test (the operator console, packages/raffle-admin)
   // all hide the notice. A build without an orderbook keeps the static notice.
-  if (ORDERBOOK_URL && status?.live !== true) return <OnrampLink onOpen={onBridge} address={address} />;
+  if (ORDERBOOK_URL && status?.live !== true) return <OnrampLink />;
   const view = participateView(status, address, TERMS_HASH);
 
   return (
@@ -96,9 +93,7 @@ export function RaffleNotice({
           {view.kind === "locked" && (
             <span className="rfstate">
               Participate unlocks after your first swap.{" "}
-              <button type="button" className="linkbtn" onClick={onBridge}>
-                No funds on Rootstock? Bring USD₮0 — no RBTC needed
-              </button>
+              No funds on Rootstock? <UsdtLink>Bridge USD₮0 on usdt0.to</UsdtLink> — no RBTC needed — or <GasZipLink />.
             </span>
           )}
           {view.kind === "open" && (
@@ -116,9 +111,9 @@ export function RaffleNotice({
           )}
           {view.kind === "terms-mismatch" && <span className="rfstate warn">The Terms were updated — reload the page to review them before entering.</span>}
           {view.kind !== "locked" && (
-            <button type="button" className="linkbtn rfsupport" onClick={onBridge}>
-              No funds on Rootstock? Bring USD₮0
-            </button>
+            <span className="rfsupport">
+              No funds on Rootstock? <UsdtLink>Bridge USD₮0</UsdtLink> · <GasZipLink>RBTC via Gas.zip</GasZipLink>
+            </span>
           )}
           {entrants !== null && entrants > 0 && <span className="rfstate m">{entrants} participating</span>}
           {PROMOTION.support && (

@@ -19,9 +19,8 @@ only when the steps in §1 are done.
 | # | Step | Command / where |
 |---|---|---|
 | 1 | Counsel signs off TC.md: §4.1 (entry = one trade + the signed form), §4.6–4.7 (form and data), and the confirmation wording in `packages/sdk/src/participation.ts` (`PARTICIPATION_STATEMENT`) | — |
-| 2 | Re-check the bridge table on-chain (11 routes verified 2026-10-20) | `pnpm --filter @1delta-x/app verify-bridge` |
-| 3 | Decide the promotion window and the support link | `PROMOTION.support` in `VITE_PROMOTION` (Telegram group or form URL) |
-| 4 | Grant-thread commitments not in the app as of 2026-10-14 (per-user ~1,000 USDRIF cap, total cap, time-bounded allowances): ship them, or say in the thread why not, before promoting on the Collective | `docs/local/rootstock-grant-m1-checklist.md` |
+| 2 | Decide the promotion window and the support link | `PROMOTION.support` in `VITE_PROMOTION` (Telegram group or form URL) |
+| 3 | Grant-thread commitments not in the app as of 2026-10-14 (per-user ~1,000 USDRIF cap, total cap, time-bounded allowances): ship them, or say in the thread why not, before promoting on the Collective | `docs/local/rootstock-grant-m1-checklist.md` |
 
 Any later edit to TC.md changes its hash. Update the worker's `RAFFLE_TERMS_HASH`
 in the same deploy, or every entry is refused.
@@ -70,10 +69,10 @@ Steps from your wallet (real funds, small):
 
 Do this from a fresh wallet that holds **no RBTC on Rootstock**:
 
-1. Open the app, then **Bring USD₮0** → Arbitrum → 10 USD₮0 → Bridge. The summary should show the LayerZero fee (about $1.2), Arbitrum gas (a few cents) and the total in ETH and USD. Expect arrival in about 23 minutes; the panel traces it through LayerZero Scan (confirming on the source chain → in flight → delivered, with the Rootstock tx) and keeps the trace across a closed panel or a reload.
-2. Switch back to Rootstock. Sell 5 USD₮0 for **RBTC** (market order), using the gasless permit path.
+1. Bridge 10 USD₮0 from Arbitrum to your address on Rootstock through **usdt0.to** (linked from the app). Expect about $1.2 in LayerZero fee and arrival in about 23 minutes. Track it on LayerZero Scan.
+2. Open the app on Rootstock. Sell 5 USD₮0 for **RBTC** (market order), using the gasless permit path.
    - Expected: native RBTC arrives through solver v3 + NativeBalance, and the wallet never paid gas.
-   - This combination (permit-funded order + native RBTC out) has not been filled live before. If it fails, the bridge still works and RBTC delivery is the thing to fix.
+   - This combination (permit-funded order + native RBTC out) has not been filled live before. If it fails, RBTC delivery is the thing to fix.
 3. After the fill is indexed (about 20 s), **Participate** appears. Fill in the form and sign. Expect the "You're in the draw" message.
 4. Check that the entry appears under **Feedback** on the console.
 

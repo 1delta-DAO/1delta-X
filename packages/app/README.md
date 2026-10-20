@@ -761,18 +761,11 @@ visitor, so the desk is the switch.
 package and deployment (`packages/raffle-admin`); this app's `/api/book` proxy
 forwards no `authorization` and allows no `/raffle/admin/*` route.
 
-**The USD₮0 on-ramp.** `components/Bridge.tsx` bridges USDT0 from eleven chains to
-the user's own Rootstock address through USDT0's LayerZero OFTs
-(`config/bridge.ts`, pinned and re-checked on-chain by `pnpm verify-bridge`). All
-balances (USD₮0 and native, on every source chain and on Rootstock) and the quote are
-read from each chain's pinned public RPC, so the panel shows where the user's USD₮0 is
-and what the bridge costs before the wallet switches chains; all of those origins are
-in the CSP, and a test keeps the CSP in step with `sourceRpc`. The quote is the
-LayerZero fee plus source-chain gas (a live `eth_estimateGas` of the send, or the
-measured fallbacks while an approval is pending), priced in USD off Sushi; arrival
-takes about 23 minutes. Approvals and the send go through the wallet; the arrival
-check reads `public-node.rsk.co`. USD₮0 on Rootstock has an ERC-2612 permit, so a
-wallet with no RBTC trades it gaslessly. `TC.md` fixes no numbers on purpose — §4.2 leaves the qualifying
+**The on-ramp is links, not code** (`components/Onramp.tsx`): USD₮0 is bridged on
+USDT0's own app (usdt0.to, LayerZero, about 23 minutes to Rootstock) and RBTC for gas
+comes from Gas.zip. An in-app bridge panel existed briefly (2026-10-20) and was removed
+in favour of these. USD₮0 on Rootstock has an ERC-2612 permit, so a wallet with no
+RBTC trades it gaslessly; Gas.zip is for users who want gas of their own. `TC.md` fixes no numbers on purpose — §4.2 leaves the qualifying
 criteria to "official channels" and §2.1 does the same for the period — so every
 figure there is a display string the promoter writes, not a number the app
 computes, and `VITE_PROMOTION` overrides it at deploy time without a code

@@ -137,24 +137,11 @@ describe("worker /api/book proxy — allowlisted routes", () => {
     expect(seen.map((x) => `${x.method} ${x.url} ${x.headers.get("authorization") ?? "-"}`)).toEqual([`GET ${ORIGIN}/raffle -`]);
   });
 
-  it("the CSP lets the app read Rootstock's public node (dashboard hops, on-ramp arrival)", async () => {
+  it("the CSP lets the app read Rootstock's public node (dashboard hops)", async () => {
     const res = await call("/api/book/fills");
     expect(res.headers.get("content-security-policy")).toMatch(/connect-src [^;]*https:\/\/public-node\.rsk\.co/);
   });
 
-  it("the CSP admits every on-ramp source RPC (balance views and quotes read them directly)", async () => {
-    const { BRIDGE_SOURCES, sourceRpc } = await import("../src/config/bridge");
-    const csp = (await call("/api/book/fills")).headers.get("content-security-policy")!;
-    const connect = csp.split(";").find((d) => d.trim().startsWith("connect-src"))!.trim().split(/\s+/);
-    for (const s of BRIDGE_SOURCES) expect(connect).toContain(new URL(sourceRpc(s)).origin);
-  });
-
-  it("the CSP admits LayerZero Scan's API (the on-ramp traces a sent bridge through it)", async () => {
-    const { LAYERZERO_SCAN_API } = await import("../src/config/bridge");
-    const csp = (await call("/api/book/fills")).headers.get("content-security-policy")!;
-    const connect = csp.split(";").find((d) => d.trim().startsWith("connect-src"))!.trim().split(/\s+/);
-    expect(connect).toContain(new URL(LAYERZERO_SCAN_API).origin);
-  });
 
   it("no x-forwarded-for when Cloudflare supplied no client address", async () => {
     await call("/api/book/fills");
