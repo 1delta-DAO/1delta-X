@@ -66,64 +66,24 @@ export type Question =
   | { id: string; kind: "scale"; label: string; low: string; high: string; required: boolean }
   | { id: string; kind: "text"; label: string; max: number; required: boolean; personal?: boolean };
 
-/** Source chains offered for "where did your funds come from" — the USDT0 on-ramp list plus the rest. */
-const FUNDS_CHAINS = [
-  "Ethereum",
-  "Arbitrum",
-  "Polygon",
-  "Optimism",
-  "HyperEVM",
-  "Monad",
-  "Plasma",
-  "Unichain",
-  "Berachain",
-  "Ink",
-  "Mantle",
-  "Tron / TON",
-  "Another chain",
-] as const;
-
 /**
- * About two minutes. Nothing the chain already says (what was traded, how much,
- * when) is asked. `contact` is the only personal field and is optional: it is kept
+ * About a minute, and about the product: four 1–5 ratings (overall, ease, how
+ * safe a pending order felt, the fill), then optional detail. Nothing the chain
+ * already says (what was traded, how much, when) is asked, and nothing about where
+ * a user's funds come from — a question crypto users read as a reason not to answer. `contact` is the only personal field and is optional: it is kept
  * apart from everything published and deleted after payout.
  */
 export const PARTICIPATION_QUESTIONS: readonly Question[] = [
-  {
-    id: "heard",
-    kind: "choice",
-    label: "How did you hear about 1delta?",
-    options: ["Rootstock Collective", "An ambassador", "X / Twitter", "Telegram or Discord", "A friend", "Other"],
-    required: true,
-  },
-  {
-    id: "funds",
-    kind: "choice",
-    label: "Where did the funds you traded come from?",
-    options: [
-      "They were already on Rootstock",
-      "I bridged USD₮0 from another chain",
-      "I bridged BTC (PowPeg / Flyover)",
-      "I withdrew from an exchange",
-      "Other",
-    ],
-    required: true,
-  },
-  {
-    id: "fundsChain",
-    kind: "choice",
-    label: "If you bridged, from which chain?",
-    options: FUNDS_CHAINS,
-    required: false,
-  },
-  {
-    id: "purpose",
-    kind: "multi",
-    label: "What did you trade for?",
-    options: ["Exit USDRIF", "Get RBTC", "Buy or sell RIF", "Try the app", "Other"],
-    required: true,
-  },
+  { id: "rating", kind: "scale", label: "Overall, how would you rate the app?", low: "Poor", high: "Excellent", required: true },
   { id: "ease", kind: "scale", label: "How easy was placing your order?", low: "Very hard", high: "Very easy", required: true },
+  {
+    id: "safety",
+    kind: "scale",
+    label: "How safe did you feel while your order was pending?",
+    low: "Very uneasy",
+    high: "Completely safe",
+    required: true,
+  },
   {
     id: "fill",
     kind: "scale",
@@ -131,6 +91,13 @@ export const PARTICIPATION_QUESTIONS: readonly Question[] = [
     low: "Much worse",
     high: "Much better",
     required: true,
+  },
+  {
+    id: "purpose",
+    kind: "multi",
+    label: "What did you trade for?",
+    options: ["Exit USDRIF", "Get RBTC", "Buy or sell RIF", "Try the app", "Other"],
+    required: false,
   },
   { id: "friction", kind: "text", label: "What confused you or nearly stopped you?", max: 1000, required: false },
   {

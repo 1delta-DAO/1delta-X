@@ -29,7 +29,7 @@ describe("participateView — what the notice offers", () => {
 describe("submitParticipation", () => {
   it("signs the SDK typed data and posts exactly what the worker re-hashes", async () => {
     const account = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
-    const answers = { heard: "Other", funds: "Other", purpose: ["Try the app"], ease: 3, fill: 3 };
+    const answers = { rating: 3, ease: 3, safety: 4, fill: 3 };
     let posted: Record<string, unknown> = {};
     vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
       expect(url).toBe("/api/book/raffle/entries");

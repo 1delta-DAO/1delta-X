@@ -94,15 +94,15 @@ describe("feedback tallies and CSV", () => {
     ...over,
   });
   const entries = [
-    entry(A, { heard: "A friend", purpose: ["Get RBTC", "Exit USDRIF"], ease: 4, fill: 5, friction: 'the "approve" step, twice' }),
-    entry(B, { heard: "A friend", purpose: ["Get RBTC"], ease: 2, fill: 3 }, { contact: "@b" }),
+    entry(A, { rating: 5, safety: 4, purpose: ["Get RBTC", "Exit USDRIF"], ease: 4, fill: 5, friction: 'the "approve" step, twice' }),
+    entry(B, { rating: 3, safety: 2, purpose: ["Get RBTC"], ease: 2, fill: 3 }, { contact: "@b" }),
   ];
 
   it("counts options, averages scales, lists texts and never tallies the contact", () => {
     const t = tallyFeedback(PARTICIPATION_QUESTIONS, entries);
     expect(t.find((x) => x.q.id === "contact")).toBeUndefined();
-    const heard = t.find((x) => x.q.id === "heard")!;
-    expect(heard.kind === "counts" && heard.counts.find(([o]) => o === "A friend")?.[1]).toBe(2);
+    const safety = t.find((x) => x.q.id === "safety")!;
+    expect(safety.kind === "scale" && safety.average).toBe(3);
     const purpose = t.find((x) => x.q.id === "purpose")!;
     expect(purpose.kind === "counts" && Object.fromEntries(purpose.counts)).toMatchObject({ "Get RBTC": 2, "Exit USDRIF": 1 });
     const ease = t.find((x) => x.q.id === "ease")!;
@@ -114,7 +114,7 @@ describe("feedback tallies and CSV", () => {
   it("writes one quoted CSV row per entry", () => {
     const csv = entriesCsv(PARTICIPATION_QUESTIONS, entries).trim().split("\n");
     expect(csv).toHaveLength(3);
-    expect(csv[0]).toMatch(/^address,enteredAt,updatedAt,source,note,contact,heard,/);
+    expect(csv[0]).toMatch(/^address,enteredAt,updatedAt,source,note,contact,rating,/);
     expect(csv[1]).toContain('"the ""approve"" step, twice"');
     expect(csv[1]).toContain("Get RBTC | Exit USDRIF");
     expect(csv[2]).toContain("@b");

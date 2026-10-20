@@ -111,7 +111,7 @@ export function ParticipateSheet({
           ) : (
             <>
               <h2 id="participate-title" className="gatetitle">
-                {updating ? "Update your answers" : "Two minutes, then you're in"}
+                {updating ? "Update your answers" : "One minute, then you're in"}
               </h2>
               <p className="pqnote">
                 Your answers shape what we fix before the audited launch. Signing is free — it is a message, not a

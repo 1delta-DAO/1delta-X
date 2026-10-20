@@ -14,9 +14,8 @@ const PROMOTION = "test-draw";
 const TERMS = `0x${"7e".repeat(32)}` as Hex;
 
 const ANSWERS: ParticipationAnswers = {
-  heard: "A friend",
-  funds: "I bridged USD₮0 from another chain",
-  fundsChain: "Arbitrum",
+  rating: 4,
+  safety: 3,
   purpose: ["Get RBTC"],
   ease: 4,
   fill: 4,

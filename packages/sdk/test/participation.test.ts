@@ -16,9 +16,8 @@ import {
 const account = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
 
 const valid = {
-  heard: "A friend",
-  funds: "I bridged USD₮0 from another chain",
-  fundsChain: "Arbitrum",
+  rating: 4,
+  safety: 3,
   purpose: ["Get RBTC", "Exit USDRIF"],
   ease: 4,
   fill: 3,
@@ -29,15 +28,15 @@ const valid = {
 describe("participation form", () => {
   it("accepts a complete form and the minimal required one", () => {
     expect(validateAnswers(valid)).toBeNull();
-    expect(validateAnswers({ heard: "Other", funds: "Other", purpose: ["Try the app"], ease: 1, fill: 5 })).toBeNull();
+    expect(validateAnswers({ rating: 2, ease: 1, safety: 5, fill: 5 })).toBeNull();
   });
 
   it("refuses missing required, unknown, out-of-range and off-list answers", () => {
-    expect(validateAnswers({ ...valid, heard: "" })).toMatch(/required/);
-    expect(validateAnswers({ ...valid, extra: "x" })).toMatch(/unknown question/);
+    expect(validateAnswers({ ...valid, safety: undefined as never })).toMatch(/required/);
+    expect(validateAnswers({ ...valid, heard: "A friend" })).toMatch(/unknown question/);
     expect(validateAnswers({ ...valid, ease: 6 })).toMatch(/1 to 5/);
     expect(validateAnswers({ ...valid, ease: 2.5 })).toMatch(/1 to 5/);
-    expect(validateAnswers({ ...valid, heard: "Billboard" })).toMatch(/options/);
+    expect(validateAnswers({ ...valid, purpose: ["Narnia"] })).toMatch(/options/);
     expect(validateAnswers({ ...valid, purpose: ["Get RBTC", "Get RBTC"] })).toMatch(/repeated/);
     expect(validateAnswers({ ...valid, friction: "x".repeat(1001) })).toMatch(/1000/);
     expect(validateAnswers({ ...valid, contact: " @padded" })).toMatch(/spaces/);
@@ -46,7 +45,7 @@ describe("participation form", () => {
   });
 
   it("hashes independently of key order, click order and blank optionals", () => {
-    const reordered = { contact: "@someone", fill: 3, ease: 4, purpose: ["Exit USDRIF", "Get RBTC"], fundsChain: "Arbitrum", funds: valid.funds, heard: "A friend", friction: "The approval step", next: [] };
+    const reordered = { contact: "@someone", fill: 3, ease: 4, purpose: ["Exit USDRIF", "Get RBTC"], rating: 4, safety: 3, friction: "The approval step", next: [] };
     expect(canonicalAnswers(reordered)).toBe(canonicalAnswers(valid));
     expect(answersHash(reordered)).toBe(answersHash(valid));
     expect(answersHash({ ...valid, ease: 5 })).not.toBe(answersHash(valid));
