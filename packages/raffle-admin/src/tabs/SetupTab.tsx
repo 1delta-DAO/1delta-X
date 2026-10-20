@@ -125,6 +125,9 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
             />
             <DateTimeField
               label="Entries close"
+              hint="a date alone means 23:59 that day"
+              defaultTime="23:59"
+              warnIfPast
               value={end}
               onChange={setEnd}
               zone={zone}

@@ -57,6 +57,8 @@ export function DateTimeField({
   zone,
   empty,
   presets = [],
+  defaultTime = "00:00",
+  warnIfPast = false,
 }: {
   label: string;
   hint?: string;
@@ -66,6 +68,10 @@ export function DateTimeField({
   /** What an empty field means ("open from the start", "no end"). */
   empty: string;
   presets?: Preset[];
+  /** The time a date picked without one gets (an end date: 23:59, so the day is included). */
+  defaultTime?: string;
+  /** Flag an instant that has already passed (an end time). */
+  warnIfPast?: boolean;
 }) {
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
@@ -90,7 +96,7 @@ export function DateTimeField({
       onChange(null);
       return;
     }
-    const tt = t.trim() || "00:00";
+    const tt = t.trim() || defaultTime;
     const sec = /^\d{1,2}:\d{2}$/.test(tt) && Number(tt.split(":")[0]) < 24 && Number(tt.split(":")[1]) < 60 ? toUnix(d, tt, zone) : null;
     setBad(sec === null);
     if (sec !== null) onChange(sec);
@@ -116,6 +122,7 @@ export function DateTimeField({
         />
         <span className="addtzone m">{zone === "CET" ? "CET/CEST" : zone}</span>
       </div>
+      {warnIfPast && value !== null && value <= Date.now() / 1000 && <span className="warn pqfine">This is in the past — the raffle would be closed.</span>}
       <span className={bad ? "warn pqfine" : "pqfine"}>
         {bad ? "Time must be 24-hour HH:MM" : value === null ? empty : zone === "UTC" ? describe(value, "UTC") : `${describe(value, zone)}  ·  ${describe(value, "UTC")}`}
       </span>
