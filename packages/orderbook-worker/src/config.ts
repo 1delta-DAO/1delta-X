@@ -108,6 +108,8 @@ export interface RaffleConfig {
   prizes: number[];
   prizeToken: string;
   onePrizePerAddress: boolean;
+  /** The whole pot, in `prizeToken`: draws continue until this much has been paid out. 0 = no pot limit (the end date decides). */
+  pot: number;
   /**
    * TEST MODE when non-empty: the desk is live ONLY for these addresses (lower-case);
    * everyone else sees `live: false` and no notice, so a draw can be rehearsed on the
@@ -131,7 +133,7 @@ function addrArray(v: unknown, name: string): string[] {
 export function parseRaffleConfig(raw: unknown): RaffleConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("config must be an object");
   const r = raw as Record<string, unknown>;
-  const known = ["id", "terms", "startsAt", "endsAt", "qualifierUsd", "exclude", "testers", "periodDays", "minQualifiers", "prizes", "prizeToken", "onePrizePerAddress"];
+  const known = ["id", "terms", "startsAt", "endsAt", "qualifierUsd", "exclude", "testers", "periodDays", "minQualifiers", "prizes", "prizeToken", "onePrizePerAddress", "pot"];
   for (const k of Object.keys(r)) if (!known.includes(k)) throw new Error(`unknown field "${k}"`);
   const id = typeof r.id === "string" ? r.id.trim() : "";
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error("id must be lower-case letters, digits and dashes (≤ 64)");
@@ -161,6 +163,8 @@ export function parseRaffleConfig(raw: unknown): RaffleConfig {
   const prizeToken = r.prizeToken === undefined ? DEFAULT_RULES.prizeToken : typeof r.prizeToken === "string" ? r.prizeToken.trim() : "";
   if (!/^[A-Za-z0-9₮$.-]{1,16}$/.test(prizeToken)) throw new Error("prizeToken must be a short token symbol");
   const onePrizePerAddress = r.onePrizePerAddress === undefined ? DEFAULT_RULES.onePrizePerAddress : r.onePrizePerAddress === true;
+  const pot = r.pot === undefined || r.pot === null || r.pot === "" ? DEFAULT_RULES.pot : Number(r.pot);
+  if (!Number.isFinite(pot) || pot < 0) throw new Error("pot must be a non-negative amount (0 = no limit)");
   return {
     id,
     terms: terms as `0x${string}`,
@@ -174,6 +178,7 @@ export function parseRaffleConfig(raw: unknown): RaffleConfig {
     prizes,
     prizeToken,
     onePrizePerAddress,
+    pot,
   };
 }
 
@@ -182,12 +187,13 @@ export function parseRaffleConfig(raw: unknown): RaffleConfig {
  * DAILY draws — TC §2.1 says daily too), 10 USDRIF to one winner per day, at least 3
  * qualifiers or the prize rides on the next day.
  */
-export const DEFAULT_RULES: Pick<RaffleConfig, "periodDays" | "minQualifiers" | "prizes" | "prizeToken" | "onePrizePerAddress"> = {
+export const DEFAULT_RULES: Pick<RaffleConfig, "periodDays" | "minQualifiers" | "prizes" | "prizeToken" | "onePrizePerAddress" | "pot"> = {
   periodDays: 1,
   minQualifiers: 3,
   prizes: [10],
   prizeToken: "USDRIF",
   onePrizePerAddress: true,
+  pot: 100,
 };
 
 export interface WorkerConfig {

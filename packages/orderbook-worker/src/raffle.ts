@@ -157,6 +157,9 @@ function head(ctx: RaffleContext, r: RaffleConfig | undefined, address?: string)
       prizes: r.prizes,
       prizeToken: r.prizeToken,
       onePrizePerAddress: r.onePrizePerAddress,
+      pot: r.pot,
+      // What the saved draws have paid out so far (claimed or not), so the notice can say what is left.
+      paidOut: drawRecords(ctx, r.id).reduce((a, d) => a + (d.result?.winners.length ? (d.payouts ?? []).slice(0, d.result.winners.length).reduce((x, y) => x + y, 0) : 0), 0),
     },
     ...(r.testers.length ? { testMode: true } : {}),
   };

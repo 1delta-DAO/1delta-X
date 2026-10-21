@@ -22,6 +22,8 @@ export interface RaffleConfig {
   prizes: number[];
   prizeToken: string;
   onePrizePerAddress: boolean;
+  /** Draws continue until this much has been paid out; 0 = the end date alone decides. */
+  pot: number;
 }
 
 export interface AdminConfig {

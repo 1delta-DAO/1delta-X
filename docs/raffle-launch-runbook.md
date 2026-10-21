@@ -22,8 +22,39 @@ only when the steps in §1 are done.
 | 2 | Decide the promotion window and the support link | `PROMOTION.support` in `VITE_PROMOTION` (Telegram group or form URL) |
 | 3 | Grant-thread commitments not in the app as of 2026-10-14 (per-user ~1,000 USDRIF cap, total cap, time-bounded allowances): ship them, or say in the thread why not, before promoting on the Collective | `docs/local/rootstock-grant-m1-checklist.md` |
 
-Any later edit to TC.md changes its hash. Update the worker's `RAFFLE_TERMS_HASH`
-in the same deploy, or every entry is refused.
+TC.md must not change (reviewed). Its hash is `0xa10e1478676838587e36b9b6ca0c6d88996aeb40dbadd2d988e9e7631a7d1bd8`;
+the console's **use it** fills it in.
+
+### The live configuration (rootstock-beta-1)
+
+| Setting | Value |
+|---|---|
+| Promotion id | `rootstock-beta-1` |
+| Terms hash | `0xa10e1478…1bd8` (use it) |
+| Starts | the announcement day, 00:00 UTC |
+| Entries close | leave empty (the pot decides) |
+| Draw every … days | 1 |
+| Daily qualifier | $20 |
+| Minimum qualifiers | 3 (fewer: the day's 10 USDRIF rolls to the next day) |
+| Prizes per draw | 10 |
+| Prize token | USDRIF |
+| Total pot | 100 |
+| One prize per address | on |
+| Excluded from draws | the addresses below plus every team member's personal wallet |
+
+Addresses to exclude (our fillers `0xcafe…083a`, `0x5987…6cD1`, `0x48db…32F1` are excluded automatically; list them anyway):
+
+```
+0x00001d4754680958E7f8fe42D60842Ebde4Cb30D   deployer
+0xcafe35944e3195d59b4a354Ea23D60a0445c083a   filler operator (inventory / spot)
+0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287   AggregatorFillSolver v1
+0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1   AggregatorFillSolver v2
+0x5987A4AFE1b680DAC657506B69C56b06FFe86cD1   AggregatorFillSolver v3
+0xdadE4B0F9dEa9f2CC371E07f76653971b2c62C04   RouteSandbox v1
+0xda2Db66B3Ae47a1f5F89640666b7802423828c8b   RouteSandbox v2
+0xeBbBf5719B699a450b2537852E4286A7e69Bb1aD   RouteSandbox v3
+0xB6107a1DEa7Ae04129aBc27ce607249049f3C735   NativeUnwrapModule
+```
 
 ## 2. Configure the orderbook worker
 
@@ -90,7 +121,9 @@ what was announced (around 100 USDRIF over roughly ten daily draws; TC §2.1 say
 daily draws too): a draw **every UTC day** from the start date, one ticket per day an
 address trades ≥ $20, at least **3** qualifying addresses or the prize is carried to
 the next day, **10 USDRIF** to one winner, one prize per address while others are
-waiting. Ten days = 100 USDRIF if every draw runs.
+waiting; a **pot** of 100 USDRIF, so the draws continue until 100 has been paid
+(ten paid days; quiet days roll over and make it longer). The console stops offering
+draws once the pot is paid; then switch the promotion off.
 
 On the console, Draws tab:
 

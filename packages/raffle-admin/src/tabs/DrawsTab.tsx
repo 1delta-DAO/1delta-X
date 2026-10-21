@@ -13,6 +13,7 @@ import {
   DRAW_CONFIRMATIONS,
   DRAW_DELAY_BLOCKS,
   FINAL_MIN_DAYS,
+  paidOut,
   pickWinners,
   pricesFrom,
   type Rules,
@@ -42,7 +43,7 @@ const span = (w: [number, number]) => `${dateOf(w[0])} → ${dateOf(w[1] - 1)}`;
 export function DrawsTab({ api, promotion, config }: { api: AdminApi; promotion: string; config: AdminConfig }) {
   const cfg = config.effective?.id === promotion ? config.effective : null;
   const rules: Rules | null = cfg
-    ? { qualifierUsd: cfg.qualifierUsd, periodDays: cfg.periodDays, minQualifiers: cfg.minQualifiers, prizes: cfg.prizes, prizeToken: cfg.prizeToken, onePrizePerAddress: cfg.onePrizePerAddress }
+    ? { qualifierUsd: cfg.qualifierUsd, periodDays: cfg.periodDays, minQualifiers: cfg.minQualifiers, prizes: cfg.prizes, prizeToken: cfg.prizeToken, onePrizePerAddress: cfg.onePrizePerAddress, pot: cfg.pot }
     : null;
   const [saved, setSaved] = useState<SavedDraw[]>([]);
   const [head, setHead] = useState<bigint | null>(null);
@@ -144,7 +145,11 @@ export function DrawsTab({ api, promotion, config }: { api: AdminApi; promotion:
       return winners.length ? `${d.day}: ${winners.map((w, i) => `${short(w)} wins ${d.payouts[i]} ${d.rules.prizeToken}`).join(", ")}` : `${d.day}: nobody to draw`;
     });
 
-  const carry = carriedForward(saved.map(({ updatedAt: _u, claimed: _c, ...r }) => r));
+  const plain = saved.map(({ updatedAt: _u, claimed: _c, ...r }) => r);
+  const carry = carriedForward(plain);
+  const paid = paidOut(plain);
+  const potLeft = rules && rules.pot ? Math.max(0, rules.pot - paid) : null;
+  const potDone = potLeft !== null && potLeft <= 0;
   const finalAllowed = !!cfg && (cfg.endsAt === NO_END ? false : nowSec() >= cfg.endsAt);
 
   return (
@@ -153,12 +158,17 @@ export function DrawsTab({ api, promotion, config }: { api: AdminApi; promotion:
         <div className="boxhead">
           <span className="lbl">New draw · {promotion}</span>
           <span className="lbl m">
+            {rules && rules.pot ? `pot ${paid} / ${rules.pot} ${rules.prizeToken} paid · ` : ""}
             {carry > 0 && rules ? `carried forward ${carry} ${rules.prizeToken} · ` : ""}head {head?.toString() ?? "…"}
           </span>
         </div>
         <div className="boxbody">
           {!cfg && <p className="warn pqfine">"{promotion}" is not the running promotion: draws need its rules (period, prizes, exclusions). Select it under Setup first.</p>}
           {cfg && cfg.startsAt <= 0 && <p className="warn pqfine">The promotion has no start date, so periods cannot be counted. Set one under Setup.</p>}
+          {potDone && rules && <p className="warn pqfine">The pot of {rules.pot} {rules.prizeToken} has been paid out. No further draw: switch the promotion off under Setup once the last prize is claimed and paid.</p>}
+          {!potDone && potLeft !== null && snap && !snap.skipped && snap.payouts.reduce((a, b) => a + b, 0) > potLeft && (
+            <p className="warn pqfine">This draw would pay {snap.payouts.reduce((a, b) => a + b, 0)} but only {potLeft} {rules!.prizeToken} is left in the pot. Lower the prize under Setup, or accept going over.</p>
+          )}
           {rules && (
             <p className="pqnote">
               Draws every <b>{rules.periodDays}</b> day{rules.periodDays === 1 ? "" : "s"}; one ticket per UTC day at ≥ ${rules.qualifierUsd}; at least{" "}
@@ -182,7 +192,7 @@ export function DrawsTab({ api, promotion, config }: { api: AdminApi; promotion:
                 {finalAllowed && <option value="final">Final draw · the carry, ≥ {FINAL_MIN_DAYS} qualifying days overall</option>}
               </select>
             </label>
-            <button type="button" className="cta line" disabled={busy || !choice || !rules} onClick={compute}>
+            <button type="button" className="cta line" disabled={busy || !choice || !rules || potDone} onClick={compute}>
               {busy && !snap ? "Computing…" : "Compute"}
             </button>
           </div>

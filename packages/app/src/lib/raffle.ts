@@ -16,6 +16,9 @@ export interface RaffleRules {
   prizes: number[];
   prizeToken: string;
   onePrizePerAddress: boolean;
+  /** The whole pot (0 = none stated) and what has been paid so far. */
+  pot?: number;
+  paidOut?: number;
 }
 
 /** `GET /raffle/status/:address`. */
@@ -102,7 +105,8 @@ const every = (d: number) => (d === 1 ? "every day" : d === 7 ? "every week" : `
 export function describeRules(r: RaffleRules | undefined): { lead: string; fine: string } | null {
   if (!r || !r.prizes.length) return null;
   const winners = r.prizes.length === 1 ? `${r.prizes[0]} ${r.prizeToken} to one winner` : `${r.prizes.join(" / ")} ${r.prizeToken} to ${r.prizes.length} winners`;
-  const lead = `There is a prize draw ${every(r.periodDays)}, and every wallet that trades is in it: no sign-up. Each day you trade at least ${usd(r.qualifierUsd)} on Rootstock is one ticket, and each draw pays ${winners} picked at random.`;
+  const potText = r.pot ? ` until ${r.pot} ${r.prizeToken} has been paid out${r.paidOut ? ` (${Math.max(0, r.pot - r.paidOut)} to go)` : ""}` : "";
+  const lead = `There is a prize draw ${every(r.periodDays)}, and every wallet that trades is in it: no sign-up. Each day you trade at least ${usd(r.qualifierUsd)} on Rootstock is one ticket, and each draw pays ${winners} picked at random${potText}.`;
   const parts = [
     `A draw with fewer than ${r.minQualifiers} qualifying addresses is carried forward, so the next prize is bigger.`,
     ...(r.onePrizePerAddress ? ["One prize per address while others are still waiting to win."] : []),

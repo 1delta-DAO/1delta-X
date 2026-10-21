@@ -39,12 +39,13 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
   const [prizes, setPrizes] = useState((base?.prizes ?? [10]).join(", "));
   const [prizeToken, setPrizeToken] = useState(base?.prizeToken ?? "USDRIF");
   const [onePrize, setOnePrize] = useState(base?.onePrizePerAddress ?? true);
+  const [pot, setPot] = useState(String(base?.pot ?? 100));
   const [busy, setBusy] = useState(false);
   const [checks, setChecks] = useState<Check[] | null>(null);
   const [resetId, setResetId] = useState("");
   const [note, setNote] = useState<string | null>(null);
 
-  useEffect(() => setNote(null), [id, terms, start, end, qualifier, exclude, periodDays, minQualifiers, prizes, prizeToken, onePrize]);
+  useEffect(() => setNote(null), [id, terms, start, end, qualifier, exclude, periodDays, minQualifiers, prizes, prizeToken, onePrize, pot]);
 
   const ex = parseAddresses(exclude);
   const prizeList = parsePrizes(prizes);
@@ -63,8 +64,10 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
     prizes: prizeList.ok,
     prizeToken: prizeToken.trim(),
     onePrizePerAddress: onePrize,
+    pot: Number(pot),
   };
   const prizeTotal = prizeList.ok.reduce((a, b) => a + b, 0);
+  const drawsInPot = Number(pot) > 0 && prizeTotal > 0 ? Math.floor(Number(pot) / prizeTotal) : null;
   const periodsInWindow = start !== null && end !== null && Number(periodDays) > 0 ? Math.floor((end - utcMidnight(start)) / (Number(periodDays) * 86_400)) : null;
 
   const run = async (f: () => Promise<unknown>, done?: string) => {
@@ -191,6 +194,11 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
               <span className="pqlabel">Prize token</span>
               <input className="pqtext m" value={prizeToken} onChange={(e) => setPrizeToken(e.target.value)} />
             </label>
+            <label className="pq adnarrow">
+              <span className="pqlabel">Total pot</span>
+              <input className="pqtext m" inputMode="decimal" value={pot} onChange={(e) => setPot(e.target.value)} />
+              <span className="pqfine">{drawsInPot !== null ? `${drawsInPot} paid draw${drawsInPot === 1 ? "" : "s"}; quiet days roll over, so it may take longer. 0 = no limit.` : "0 = no limit; the end date decides."}</span>
+            </label>
           </div>
           <label className="check">
             <input type="checkbox" checked={onePrize} onChange={(e) => setOnePrize(e.target.checked)} />
@@ -198,7 +206,8 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
           </label>
           {periodsInWindow !== null && (
             <p className="pqfine">
-              {periodsInWindow} full draw{periodsInWindow === 1 ? "" : "s"} fit the window: up to {periodsInWindow * prizeTotal} {prizeToken.trim()} if every one runs.
+              {periodsInWindow} full draw{periodsInWindow === 1 ? "" : "s"} fit the window: up to {periodsInWindow * prizeTotal} {prizeToken.trim()} if every one runs
+              {drawsInPot !== null && periodsInWindow < drawsInPot ? ", which is less than the pot. Leave the end open, or extend it, if the pot should be paid out in full." : "."}
             </p>
           )}
           <label className="pq">
@@ -210,7 +219,7 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
           </label>
           {note && <p className="good pqfine">{note}</p>}
           <div className="adrow">
-            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || !!prizeList.bad || !Number(periodDays) || !Number(minQualifiers) || !prizeToken.trim() || (start !== null && end !== null && end <= start)} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
+            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || !!prizeList.bad || !Number(periodDays) || !Number(minQualifiers) || !prizeToken.trim() || !Number.isFinite(Number(pot)) || Number(pot) < 0 || (start !== null && end !== null && end <= start)} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
               Save
             </button>
             <button type="button" className="cta line" disabled={busy || config.source === "disabled"} onClick={() => run(() => api.disable(), "Switched off: no notice, no entries.")}>

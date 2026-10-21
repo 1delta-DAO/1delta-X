@@ -47,6 +47,13 @@ export interface Rules {
   prizes: number[];
   prizeToken: string;
   onePrizePerAddress: boolean;
+  /** The whole pot; 0 = unlimited. The console stops offering draws once it is paid out. */
+  pot?: number;
+}
+
+/** What the saved records have paid out (winners drawn × their payouts), in prizeToken. */
+export function paidOut(records: readonly Snapshot[]): number {
+  return records.reduce((a, r) => a + (r.result?.winners.length ? r.payouts.slice(0, r.result.winners.length).reduce((x, y) => x + y, 0) : 0), 0);
 }
 
 export interface Volume {
