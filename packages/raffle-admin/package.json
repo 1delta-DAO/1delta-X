@@ -10,7 +10,6 @@
     "build": "pnpm --filter @1delta-x/sdk build && tsc --noEmit -p tsconfig.json && vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "raffle-draw": "tsx scripts/raffle-draw.ts",
     "deploy": "pnpm build && wrangler pages deploy dist --project-name raffle-admin-1delta --branch main"
   },
   "dependencies": {

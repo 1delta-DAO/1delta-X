@@ -65,14 +65,12 @@ export interface Env {
   /** Shared secret proving a request came through the app's service binding. */
   BINDING_KEY?: string;
   /**
-   * The prize draw (src/raffle.ts). `RAFFLE_ID` unset/"" = no draw: every `/raffle`
-   * route answers `live: false` / 404. `RAFFLE_TERMS_HASH` is keccak256 of the TC.md
-   * the app ships (`pnpm --filter @1delta-x/app terms-hash`); entries naming another
-   * version are refused. `RAFFLE_STARTS_AT` / `RAFFLE_ENDS_AT` are unix seconds: a
-   * fill counts from the start, entries close at the end.
+   * The prize draw's desk (src/raffle.ts): the live switch and the optional feedback
+   * form. `RAFFLE_ID` unset/"" = no draw: every `/raffle` route answers `live: false`.
+   * `RAFFLE_STARTS_AT` / `RAFFLE_ENDS_AT` are unix seconds: a fill counts from the
+   * start, the notice and the form go dark at the end.
    */
   RAFFLE_ID?: string;
-  RAFFLE_TERMS_HASH?: string;
   RAFFLE_STARTS_AT?: string;
   RAFFLE_ENDS_AT?: string;
   /** Secret: `authorization: Bearer …` for `GET /raffle/export` and `POST /raffle/purge-contacts`. */
@@ -82,40 +80,19 @@ export interface Env {
 /**
  * The running prize draw. From `RAFFLE_*` (the deploy-time default), or — when an
  * admin saved one — from the Durable Object (`PUT /raffle/admin/config`), which wins.
+ * The draw itself (who qualified each day, who won) is evaluated by hand from the fill
+ * index; this is only the live switch, the window and the feedback form's key.
  */
 export interface RaffleConfig {
   id: string;
-  terms: `0x${string}`;
   /** Unix seconds; 0 = open since forever. */
   startsAt: number;
-  /** Unix seconds; entries close here. */
+  /** Unix seconds; the notice and the form go dark here. */
   endsAt: number;
-  /** The daily qualifier the draw tool uses, USD (display / tooling only; the desk does not price). */
+  /** The daily qualifier the operator evaluates against, USD (published for the console; the desk does not price). */
   qualifierUsd: number;
-  /** Addresses the draw tool never lists (team, ambassadors, fillers) — lower-case. */
+  /** Addresses the console's qualifier list never shows (team, fillers) — lower-case. */
   exclude: string[];
-  /**
-   * THE DRAW RULES (2026-10-21), published on `GET /raffle` so the app notice and the
-   * draw tool read one source. Draw periods of `periodDays` UTC days, counted from the
-   * UTC midnight of `startsAt`; each UTC day an address reaches `qualifierUsd` is one
-   * ticket in that period's draw. A period with fewer than `minQualifiers` qualifying
-   * addresses is not drawn: its prizes are carried forward to the next one. `prizes` is
-   * one amount per winner, in `prizeToken`. With `onePrizePerAddress`, an earlier
-   * winner's tickets count only once every other qualifier of the period has won.
-   */
-  periodDays: number;
-  minQualifiers: number;
-  prizes: number[];
-  prizeToken: string;
-  onePrizePerAddress: boolean;
-  /** The whole pot, in `prizeToken`: draws continue until this much has been paid out. 0 = no pot limit (the end date decides). */
-  pot: number;
-  /**
-   * TEST MODE when non-empty: the desk is live ONLY for these addresses (lower-case);
-   * everyone else sees `live: false` and no notice, so a draw can be rehearsed on the
-   * production book before it is announced.
-   */
-  testers: string[];
 }
 
 const ADDR_RE = /^0x[0-9a-f]{40}$/;
@@ -133,12 +110,9 @@ function addrArray(v: unknown, name: string): string[] {
 export function parseRaffleConfig(raw: unknown): RaffleConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("config must be an object");
   const r = raw as Record<string, unknown>;
-  const known = ["id", "terms", "startsAt", "endsAt", "qualifierUsd", "exclude", "testers", "periodDays", "minQualifiers", "prizes", "prizeToken", "onePrizePerAddress", "pot"];
-  for (const k of Object.keys(r)) if (!known.includes(k)) throw new Error(`unknown field "${k}"`);
+  for (const k of Object.keys(r)) if (!["id", "startsAt", "endsAt", "qualifierUsd", "exclude"].includes(k)) throw new Error(`unknown field "${k}"`);
   const id = typeof r.id === "string" ? r.id.trim() : "";
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error("id must be lower-case letters, digits and dashes (≤ 64)");
-  const terms = typeof r.terms === "string" ? r.terms.trim().toLowerCase() : "";
-  if (!/^0x[0-9a-f]{64}$/.test(terms)) throw new Error("terms must be a 32-byte hex hash (keccak256 of TC.md)");
   const int = (v: unknown, fallback: number, name: string) => {
     if (v === undefined || v === null || v === "") return fallback;
     const n = Number(v);
@@ -150,51 +124,8 @@ export function parseRaffleConfig(raw: unknown): RaffleConfig {
   if (endsAt <= startsAt) throw new Error("endsAt must be after startsAt");
   const q = r.qualifierUsd === undefined ? 20 : Number(r.qualifierUsd);
   if (!Number.isFinite(q) || q < 0) throw new Error("qualifierUsd must be a non-negative number");
-  const periodDays = r.periodDays === undefined ? DEFAULT_RULES.periodDays : Number(r.periodDays);
-  if (!Number.isInteger(periodDays) || periodDays < 1 || periodDays > 31) throw new Error("periodDays must be a whole number of days, 1 to 31");
-  const minQualifiers = r.minQualifiers === undefined ? DEFAULT_RULES.minQualifiers : Number(r.minQualifiers);
-  if (!Number.isInteger(minQualifiers) || minQualifiers < 1 || minQualifiers > 1000) throw new Error("minQualifiers must be a whole number, 1 to 1000");
-  let prizes = [...DEFAULT_RULES.prizes];
-  if (r.prizes !== undefined) {
-    if (!Array.isArray(r.prizes) || r.prizes.length === 0 || r.prizes.length > 20) throw new Error("prizes must be a list of 1 to 20 amounts");
-    prizes = r.prizes.map((x) => Number(x));
-    if (prizes.some((x) => !Number.isFinite(x) || x <= 0)) throw new Error("every prize must be a positive amount");
-  }
-  const prizeToken = r.prizeToken === undefined ? DEFAULT_RULES.prizeToken : typeof r.prizeToken === "string" ? r.prizeToken.trim() : "";
-  if (!/^[A-Za-z0-9₮$.-]{1,16}$/.test(prizeToken)) throw new Error("prizeToken must be a short token symbol");
-  const onePrizePerAddress = r.onePrizePerAddress === undefined ? DEFAULT_RULES.onePrizePerAddress : r.onePrizePerAddress === true;
-  const pot = r.pot === undefined || r.pot === null || r.pot === "" ? DEFAULT_RULES.pot : Number(r.pot);
-  if (!Number.isFinite(pot) || pot < 0) throw new Error("pot must be a non-negative amount (0 = no limit)");
-  return {
-    id,
-    terms: terms as `0x${string}`,
-    startsAt,
-    endsAt,
-    qualifierUsd: q,
-    exclude: addrArray(r.exclude, "exclude"),
-    testers: addrArray(r.testers, "testers"),
-    periodDays,
-    minQualifiers,
-    prizes,
-    prizeToken,
-    onePrizePerAddress,
-    pot,
-  };
+  return { id, startsAt, endsAt, qualifierUsd: q, exclude: addrArray(r.exclude, "exclude") };
 }
-
-/**
- * The rules a draw starts from: what was announced (around 100 USDRIF over roughly ten
- * DAILY draws — TC §2.1 says daily too), 10 USDRIF to one winner per day, at least 3
- * qualifiers or the prize rides on the next day.
- */
-export const DEFAULT_RULES: Pick<RaffleConfig, "periodDays" | "minQualifiers" | "prizes" | "prizeToken" | "onePrizePerAddress" | "pot"> = {
-  periodDays: 1,
-  minQualifiers: 3,
-  prizes: [10],
-  prizeToken: "USDRIF",
-  onePrizePerAddress: true,
-  pot: 100,
-};
 
 export interface WorkerConfig {
   chain: OrderbookConfig;
@@ -316,16 +247,14 @@ function addrList(v: string | undefined, name: string): Address[] {
 }
 
 /** `RAFFLE_*`, validated; undefined when no draw is configured. */
-export function raffleConfigOf(env: Pick<Env, "RAFFLE_ID" | "RAFFLE_TERMS_HASH" | "RAFFLE_STARTS_AT" | "RAFFLE_ENDS_AT">): RaffleConfig | undefined {
+export function raffleConfigOf(env: Pick<Env, "RAFFLE_ID" | "RAFFLE_STARTS_AT" | "RAFFLE_ENDS_AT">): RaffleConfig | undefined {
   const id = (env.RAFFLE_ID ?? "").trim();
   if (!id) return undefined;
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error("RAFFLE_ID must be lower-case letters, digits and dashes (≤ 64)");
-  const terms = (env.RAFFLE_TERMS_HASH ?? "").trim().toLowerCase();
-  if (!/^0x[0-9a-f]{64}$/.test(terms)) throw new Error("RAFFLE_TERMS_HASH must be a 32-byte hex hash (keccak256 of TC.md)");
   const startsAt = num(env.RAFFLE_STARTS_AT, 0, "RAFFLE_STARTS_AT");
   const endsAt = num(env.RAFFLE_ENDS_AT, Number.MAX_SAFE_INTEGER, "RAFFLE_ENDS_AT");
   if (endsAt <= startsAt) throw new Error("RAFFLE_ENDS_AT must be after RAFFLE_STARTS_AT");
-  return { id, terms: terms as `0x${string}`, startsAt, endsAt, qualifierUsd: 20, exclude: [], testers: [], ...DEFAULT_RULES, prizes: [...DEFAULT_RULES.prizes] };
+  return { id, startsAt, endsAt, qualifierUsd: 20, exclude: [] };
 }
 
 export function loadConfig(env: Env): WorkerConfig {

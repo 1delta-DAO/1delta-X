@@ -743,43 +743,21 @@ proxy response. A self-hosted
 `VITE_GRAPH_KEY` is inlined into the public bundle: use a domain-restricted,
 capped key.
 
-**The prize draw.** `config/promotion.ts` is the single place the draw is
-described, and `components/Raffle.tsx` is the only place it is mentioned in the
-trading UI. NO ENTRY (TC §4.1, the reviewed Terms): every wallet that trades is in
-the draw. The notice reads the orderbook's `/raffle/status` and shows **Rate the app**
-once the connected address has a fill as maker; it opens `components/Participate.tsx`,
+**The prize draw.** `config/promotion.ts` is the single place the draw is described,
+and `components/Raffle.tsx` is the only place it is mentioned in the trading UI. The
+copy is deliberately vague ("roughly", "around"): TC.md (reviewed, frozen) leaves the
+criteria, timing and amounts to 1delta, and the draw is evaluated by hand from the fill
+index (packages/raffle-admin), so nothing in the app has to be defended to the cent.
+There is NO ENTRY (TC §4.1): every wallet that trades is in. The notice is shown only
+while the orderbook's desk (`/raffle`) says the draw is live, so the desk is the switch.
+After a first fill as maker the notice offers **Rate the app**: `components/Participate.tsx`,
 an optional feedback form whose gasless EIP-712 signature (SDK `feedbackTypedData`,
-which the worker re-verifies) proves the answers come from a user. A drawn winner sees
-a **claim** button (`claimView`, from `status.wins`) and signs the eligibility
-confirmations (`ClaimSheet`, SDK `claimTypedData`), which name the Terms by hash:
-`TERMS_HASH` is keccak256 of `TC.md` at build time (`vite.config.ts` `define`,
-`pnpm terms-hash`) and must equal the worker's `RAFFLE_TERMS_HASH`, or the notice asks
-the winner to reload before claiming.
-The daily selection lives in `packages/raffle-admin` (console + `scripts/raffle-draw.ts`) (snapshot → publish `listHash` and a
-future block → draw); `PROMOTION.support` adds an ungated "Report a problem" link.
-The notice is shown only while the orderbook's desk says the draw is live for this
-visitor, so the desk is the switch.
+which the worker re-verifies) proves the answers come from a user. It changes nothing
+about the draw. `PROMOTION.support` adds an ungated "Report a problem" link.
 
 **Raffle administration is NOT part of this app.** The operator console is its own
 package and deployment (`packages/raffle-admin`); this app's `/api/book` proxy
 forwards no `authorization` and allows no `/raffle/admin/*` route.
-
-**The on-ramp is links, not code** (`components/Onramp.tsx`): USD₮0 is bridged on
-USDT0's own app (usdt0.to, LayerZero, about 23 minutes to Rootstock) and RBTC for gas
-comes from Gas.zip. An in-app bridge panel existed briefly (2026-10-20) and was removed
-in favour of these. USD₮0 on Rootstock has an ERC-2612 permit, so a wallet with no
-RBTC trades it gaslessly; Gas.zip is for users who want gas of their own. `TC.md` fixes no numbers on purpose — §4.2 leaves the qualifying
-criteria to "official channels" and §2.1 does the same for the period — so every
-figure there is a display string the promoter writes, not a number the app
-computes, and `VITE_PROMOTION` overrides it at deploy time without a code
-change. `{"live":false}` removes every mention of the draw, including the bullet
-in the acknowledgement gate: with no draw running, describing one is not a
-disclosure but an advertisement for something that does not exist.
-
-The copy has one distinction to hold: a draw is not a reward. Trading qualifies
-an address for a random selection, it does not earn anything, and more volume
-does not improve the odds within a draw. "Draw", "qualify" and "at random" are
-load-bearing words there, not decoration.
 
 **Disclosure.** A first visit is gated on reading and accepting the pre-audit
 warning; `ACK_VERSION` in `components/PreAudit.tsx` is bumped whenever the text

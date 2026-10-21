@@ -1,22 +1,15 @@
 import { keccak256, toBytes, type Address, type Hex } from "viem";
 
 /**
- * THE PRIZE DRAW'S TWO SIGNATURES (2026-10-21).
+ * THE FEEDBACK SIGNATURE (2026-10-21).
  *
  * The Promotion Terms (TC.md §4.1, reviewed and frozen) say there is NO registration:
- * every wallet that trades is considered automatically. So nothing here is an entry.
- *
- *   • FEEDBACK — optional. After a first swap, a user may rate the app; the signature
- *     (gasless EIP-712) proves the wallet gave these answers and commits to them by
- *     hash. It changes nothing about the draw.
- *   • CLAIM — a drawn winner confirms eligibility before payout (TC §3, §7.5): not a
- *     U.S. Person, not in a sanctioned jurisdiction, of legal age, accepts the Terms
- *     (by hash), agrees to the address being published. The orderbook stores it; the
- *     operator pays only claimed prizes.
- *
- * The app builds both messages from this module and the orderbook worker re-derives
- * them, so what a user signed and what the server checks cannot drift apart. Neither
- * is an order: the domain carries no `verifyingContract`, and no contract reads them.
+ * every wallet that trades is considered automatically. So this is not an entry. After
+ * a first swap, a user may rate the app; the gasless EIP-712 signature proves the
+ * wallet gave these answers and commits to them by hash. The app builds the message
+ * from this module and the orderbook worker re-derives it, so the form the user filled
+ * in and the form the server checks cannot drift apart. Not an order: the domain
+ * carries no `verifyingContract`, and no contract ever reads this signature.
  */
 
 export const PARTICIPATION_DOMAIN_NAME = "1delta Prize Draw";
@@ -52,43 +45,6 @@ export function feedbackTypedData(chainId: number, m: FeedbackMessage) {
     types: FEEDBACK_TYPES,
     primaryType: "Feedback" as const,
     message: { ...m, statement: FEEDBACK_STATEMENT },
-  };
-}
-
-/** The eligibility confirmations a winner makes before payout (TC §3.1, §3.2, §7.5, §8). */
-export const CLAIM_STATEMENT =
-  "I claim the prize drawn for my wallet address in the draw identified by `draw`. I confirm that I am not a U.S. Person, " +
-  "that I am not located in, resident in or a national of a sanctioned jurisdiction, that I am of legal age and have legal capacity, " +
-  "that I control this wallet address, and that I am permitted to receive the prize. I accept the Promotion Terms identified by `terms`. " +
-  "I agree that my wallet address may be published.";
-
-export const CLAIM_TYPES = {
-  Claim: [
-    { name: "participant", type: "address" },
-    { name: "promotion", type: "string" },
-    { name: "draw", type: "string" },
-    { name: "terms", type: "bytes32" },
-    { name: "statement", type: "string" },
-    { name: "issuedAt", type: "uint64" },
-  ],
-} as const;
-
-export interface ClaimMessage {
-  participant: Address;
-  promotion: string;
-  /** The draw record's key ("YYYY-MM-DD", the period's first day). */
-  draw: string;
-  /** keccak256 of the Terms text the winner was shown. */
-  terms: Hex;
-  issuedAt: bigint;
-}
-
-export function claimTypedData(chainId: number, m: ClaimMessage) {
-  return {
-    domain: { name: PARTICIPATION_DOMAIN_NAME, version: PARTICIPATION_DOMAIN_VERSION, chainId },
-    types: CLAIM_TYPES,
-    primaryType: "Claim" as const,
-    message: { ...m, statement: CLAIM_STATEMENT },
   };
 }
 

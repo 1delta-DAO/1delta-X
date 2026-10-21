@@ -35,11 +35,12 @@ export interface Promotion {
 const DEFAULT: Promotion = {
   live: true,
   chainId: 30,
-  // Fallback copy only: with a live orderbook the notice states the rules the desk
-  // publishes (periodDays, qualifier, prizes; lib/raffle.ts `describeRules`).
+  // Deliberately vague ("roughly", "around"): the Terms leave the criteria, timing and
+  // amounts to 1delta, and the draw is evaluated by hand, so edge cases can be judged
+  // generously. Never state a figure here the operator would have to defend to the cent.
   qualifier: "US$20",
   pool: "around 100 USDRIF",
-  cadence: "roughly ten daily draws",
+  cadence: "roughly ten daily draws of about 10 USDRIF",
   support: "",
 };
 

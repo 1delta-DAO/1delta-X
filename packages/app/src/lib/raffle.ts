@@ -1,4 +1,4 @@
-import { answersHash, claimTypedData, feedbackTypedData, type ParticipationAnswers } from "@1delta-x/sdk";
+import { answersHash, feedbackTypedData, type ParticipationAnswers } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
 /**
@@ -8,38 +8,11 @@ import type { Address, Hex } from "viem";
  * every wallet that trades is in. The worker enforces every rule again.
  */
 
-/** The draw rules the desk publishes (orderbook-worker `RaffleConfig`). */
-export interface RaffleRules {
-  qualifierUsd: number;
-  periodDays: number;
-  minQualifiers: number;
-  prizes: number[];
-  prizeToken: string;
-  onePrizePerAddress: boolean;
-  /** The whole pot (0 = none stated) and what has been paid so far. */
-  pot?: number;
-  paidOut?: number;
-}
-
-/** `GET /raffle/status/:address`. */
-/** A draw the connected address won (`GET /raffle/status/:address` → `wins`). */
-export interface Win {
-  day: string;
-  payout: number;
-  token: string;
-  drawnAt: number;
-  /** Unix seconds: the claim window (TC §7.5, 14 days). */
-  claimBy: number;
-  claimed: boolean;
-  claimedAt?: number;
-}
-
 export interface RaffleStatus {
   live: boolean;
-  rules?: RaffleRules;
-  wins?: Win[];
   promotion?: string;
-  terms?: Hex;
+  /** What the desk marks a day as qualifying at; the notice says "about" this. */
+  qualifierUsd?: number;
   startsAt?: number;
   endsAt?: number | null;
   chainId?: number;
@@ -68,19 +41,6 @@ export function participateView(status: RaffleStatus | null, address: string | n
   return status.traded ? { kind: "open" } : { kind: "locked" };
 }
 
-/**
- * The prize the connected wallet should claim now, if any: unclaimed, inside its window.
- * `termsMismatch` when the desk's Terms are not this build's — the claim signs the
- * Terms by hash, so the user must reload to see the text they would accept.
- */
-export function claimView(status: RaffleStatus | null, address: string | null, termsHash: Hex, now = Math.floor(Date.now() / 1000)): { win: Win; termsMismatch: boolean } | null {
-  if (!status || !address || !status.promotion || !status.wins?.length) return null;
-  if (status.address && status.address.toLowerCase() !== address.toLowerCase()) return null;
-  const win = status.wins.find((w) => !w.claimed && now <= w.claimBy) ?? null;
-  if (!win) return null;
-  return { win, termsMismatch: (status.terms ?? "").toLowerCase() !== termsHash.toLowerCase() };
-}
-
 export async function fetchRaffleStatus(base: string, address: string, init?: RequestInit): Promise<RaffleStatus> {
   const res = await fetch(`${base}/raffle/status/${address.toLowerCase()}`, { ...init, headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(res.status === 429 ? "rate limited" : `the orderbook answered ${res.status}`);
@@ -88,31 +48,10 @@ export async function fetchRaffleStatus(base: string, address: string, init?: Re
 }
 
 /** `GET /raffle` — the public entrant count for the notice. */
-export async function fetchRaffleSummary(base: string, init?: RequestInit): Promise<{ live: boolean; entrants?: number; rules?: RaffleRules }> {
+export async function fetchRaffleSummary(base: string, init?: RequestInit): Promise<{ live: boolean; feedback?: number; qualifierUsd?: number }> {
   const res = await fetch(`${base}/raffle`, { ...init, headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(`the orderbook answered ${res.status}`);
-  return (await res.json()) as { live: boolean; entrants?: number; rules?: RaffleRules };
-}
-
-const usd = (n: number) => `US$${Number.isInteger(n) ? n : n.toFixed(2)}`;
-const every = (d: number) => (d === 1 ? "every day" : d === 7 ? "every week" : `every ${d} days`);
-
-/**
- * The notice's sentences, from the published rules — so the app never states a
- * cadence or a prize the desk is not running. `null` without rules (an old worker):
- * the caller falls back to the compiled-in copy.
- */
-export function describeRules(r: RaffleRules | undefined): { lead: string; fine: string } | null {
-  if (!r || !r.prizes.length) return null;
-  const winners = r.prizes.length === 1 ? `${r.prizes[0]} ${r.prizeToken} to one winner` : `${r.prizes.join(" / ")} ${r.prizeToken} to ${r.prizes.length} winners`;
-  const potText = r.pot ? ` until ${r.pot} ${r.prizeToken} has been paid out${r.paidOut ? ` (${Math.max(0, r.pot - r.paidOut)} to go)` : ""}` : "";
-  const lead = `There is a prize draw ${every(r.periodDays)}, and every wallet that trades is in it: no sign-up. Each day you trade at least ${usd(r.qualifierUsd)} on Rootstock is one ticket, and each draw pays ${winners} picked at random${potText}.`;
-  const parts = [
-    `A draw with fewer than ${r.minQualifiers} qualifying addresses is carried forward, so the next prize is bigger.`,
-    ...(r.onePrizePerAddress ? ["One prize per address while others are still waiting to win."] : []),
-    "A winner confirms eligibility here before the prize is paid to the winning address.",
-  ];
-  return { lead, fine: parts.join(" ") };
+  return (await res.json()) as { live: boolean; feedback?: number; qualifierUsd?: number };
 }
 
 export interface TypedDataSigner {
@@ -140,28 +79,4 @@ export async function submitParticipation(args: {
   const body = (await res.json().catch(() => ({}))) as { error?: string; updated?: boolean; enteredAt?: number };
   if (!res.ok) throw new Error(body.error ?? `the orderbook answered ${res.status}`);
   return { entered: true, updated: !!body.updated, enteredAt: body.enteredAt ?? Number(issuedAt) };
-}
-
-/** A drawn winner signs the eligibility confirmations (TC §3, §7.5) and posts the claim. */
-export async function submitClaim(args: {
-  base: string;
-  signer: TypedDataSigner;
-  chainId: number;
-  participant: Address;
-  promotion: string;
-  draw: string;
-  terms: Hex;
-  now?: () => number;
-}): Promise<{ claimed: true; payout?: number; token?: string }> {
-  const issuedAt = BigInt(Math.floor((args.now ?? Date.now)() / 1000));
-  const td = claimTypedData(args.chainId, { participant: args.participant, promotion: args.promotion, draw: args.draw, terms: args.terms, issuedAt });
-  const signature = await args.signer.signTypedData({ account: args.participant, ...td } as never);
-  const res = await fetch(`${args.base}/raffle/claims`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ participant: args.participant, promotion: args.promotion, draw: args.draw, terms: args.terms, issuedAt: issuedAt.toString(), signature }),
-  });
-  const body = (await res.json().catch(() => ({}))) as { error?: string; payout?: number; token?: string };
-  if (!res.ok) throw new Error(body.error ?? `the orderbook answered ${res.status}`);
-  return { claimed: true, ...(body.payout !== undefined ? { payout: body.payout, token: body.token } : {}) };
 }

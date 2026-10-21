@@ -1,8 +1,6 @@
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import react from "@vitejs/plugin-react";
-import { keccak256, toBytes } from "viem";
 import { defineConfig } from "vite";
 
 /**
@@ -14,14 +12,11 @@ import { defineConfig } from "vite";
  * and the stylesheet), so a draw values fills exactly as the app shows them. Nothing
  * runs in the app on the console's behalf.
  */
-const TERMS_HASH = keccak256(toBytes(readFileSync(resolve(__dirname, "../../TC.md"), "utf8")));
 
 export default defineConfig({
   plugins: [react()],
   base: "./",
   resolve: { alias: { "@app": resolve(__dirname, "../app/src") } },
-  // The Terms version this console expects the worker to run (the "use it" button, the checks).
-  define: { __TERMS_HASH__: JSON.stringify(TERMS_HASH) },
   server: {
     port: 5176,
     strictPort: true,

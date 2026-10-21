@@ -1,74 +1,36 @@
 import { useEffect, useState } from "react";
 
 import { NO_END, type AdminApi, type AdminConfig, type RaffleConfig } from "../adminApi";
-import { errorText, parseAddresses, rsk, utc } from "../AdminApp";
+import { errorText, parseAddresses, utc } from "../AdminApp";
 import { DateTimeField, useZone, ZoneSwitch } from "../DateTimeField";
-import { toUnix, fromUnix } from "../time";
-import { utcMidnight } from "../draw";
-
-/** "25" or "50, 25, 25" → amounts, or a message. */
-function parsePrizes(text: string): { ok: number[]; bad?: string } {
-  const parts = text.split(/[,\s]+/).filter(Boolean);
-  if (parts.length === 0) return { ok: [], bad: "At least one prize." };
-  const ok = parts.map(Number);
-  if (ok.some((x) => !Number.isFinite(x) || x <= 0)) return { ok: [], bad: "Prizes must be positive amounts, separated by commas." };
-  return { ok };
-}
+import { fromUnix, toUnix } from "../time";
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const DAY = 86_400;
 
-interface Check {
-  label: string;
-  ok: boolean | null;
-  detail: string;
-}
-
-export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api: AdminApi; config: AdminConfig; buildTerms: `0x${string}`; onChanged: () => Promise<void>; onError: (e: string | null) => void }) {
+/**
+ * The live switch and the few settings the desk keeps: the promotion id (the feedback
+ * forms' key), the window the app shows the notice in, the daily qualifier the
+ * Qualifiers tab uses, and the addresses it leaves out. The deploy's `RAFFLE_*` are
+ * the defaults; saving here overrides them without a deploy.
+ */
+export function SetupTab({ api, config, onChanged, onError }: { api: AdminApi; config: AdminConfig; onChanged: () => Promise<void>; onError: (e: string | null) => void }) {
   const base = config.effective ?? config.env;
-  const [id, setId] = useState(base?.id ?? "");
-  const [terms, setTerms] = useState<string>(base?.terms ?? buildTerms);
+  const [id, setId] = useState(base?.id ?? "rootstock-beta-1");
   const [zone, setZone] = useZone();
-  // null = open from the start / no end.
   const [start, setStart] = useState<number | null>(base && base.startsAt > 0 ? base.startsAt : null);
   const [end, setEnd] = useState<number | null>(base && base.endsAt < NO_END ? base.endsAt : null);
   const [qualifier, setQualifier] = useState(String(base?.qualifierUsd ?? 20));
   const [exclude, setExclude] = useState((base?.exclude ?? []).join("\n"));
-  const [periodDays, setPeriodDays] = useState(String(base?.periodDays ?? 1));
-  const [minQualifiers, setMinQualifiers] = useState(String(base?.minQualifiers ?? 3));
-  const [prizes, setPrizes] = useState((base?.prizes ?? [10]).join(", "));
-  const [prizeToken, setPrizeToken] = useState(base?.prizeToken ?? "USDRIF");
-  const [onePrize, setOnePrize] = useState(base?.onePrizePerAddress ?? true);
-  const [pot, setPot] = useState(String(base?.pot ?? 100));
   const [busy, setBusy] = useState(false);
-  const [checks, setChecks] = useState<Check[] | null>(null);
   const [resetId, setResetId] = useState("");
   const [note, setNote] = useState<string | null>(null);
 
-  useEffect(() => setNote(null), [id, terms, start, end, qualifier, exclude, periodDays, minQualifiers, prizes, prizeToken, onePrize, pot]);
+  useEffect(() => setNote(null), [id, start, end, qualifier, exclude]);
 
   const ex = parseAddresses(exclude);
-  const prizeList = parsePrizes(prizes);
-  const draft: RaffleConfig = {
-    id: id.trim(),
-    terms: terms.trim().toLowerCase() as `0x${string}`,
-    startsAt: start ?? 0,
-    endsAt: end ?? NO_END,
-    qualifierUsd: Number(qualifier),
-    exclude: ex.ok,
-    // The worker still accepts a tester list (a closed test); the console does not use it:
-    // rehearse publicly under a throwaway id and reset it afterwards.
-    testers: [],
-    periodDays: Number(periodDays),
-    minQualifiers: Number(minQualifiers),
-    prizes: prizeList.ok,
-    prizeToken: prizeToken.trim(),
-    onePrizePerAddress: onePrize,
-    pot: Number(pot),
-  };
-  const prizeTotal = prizeList.ok.reduce((a, b) => a + b, 0);
-  const drawsInPot = Number(pot) > 0 && prizeTotal > 0 ? Math.floor(Number(pot) / prizeTotal) : null;
-  const periodsInWindow = start !== null && end !== null && Number(periodDays) > 0 ? Math.floor((end - utcMidnight(start)) / (Number(periodDays) * 86_400)) : null;
+  const draft: RaffleConfig = { id: id.trim(), startsAt: start ?? 0, endsAt: end ?? NO_END, qualifierUsd: Number(qualifier), exclude: ex.ok };
+  const badWindow = start !== null && end !== null && end <= start;
 
   const run = async (f: () => Promise<unknown>, done?: string) => {
     setBusy(true);
@@ -84,65 +46,35 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
     }
   };
 
-  const selfTest = async () => {
-    setChecks(null);
-    const out: Check[] = [];
-    const push = (label: string, ok: boolean | null, detail = "") => out.push({ label, ok, detail });
-    const c = await api.config().catch(() => null);
-    push("Admin token accepted", !!c, c ? `config source: ${c.source}` : "refused");
-    const eff = c?.effective;
-    push("A promotion is configured", !!eff, eff ? eff.id : c?.source === "disabled" ? "switched off" : "none");
-    if (eff && c) {
-      push("Inside its window", c.live, `${utc(eff.startsAt)} → ${utc(eff.endsAt)} · now ${utc(c.now)}`);
-      push("Terms match this build's TC.md", eff.terms === buildTerms, eff.terms === buildTerms ? buildTerms : `worker ${eff.terms} ≠ build ${buildTerms} — every entry would be refused`);
-      const pub = await api.publicSummary().catch(() => null);
-      push("Visible in the app", pub?.live === true && pub.promotion === eff.id, pub?.live ? `${pub.entrants ?? 0} entrant(s)` : "visitors see no notice");
-    }
-    try {
-      const head = await rsk.getBlockNumber();
-      push("Rootstock RPC (draw blocks)", true, `head ${head}`);
-    } catch (e) {
-      push("Rootstock RPC (draw blocks)", false, errorText(e));
-    }
-    setChecks(out);
-  };
-
   return (
     <div className="adgrid">
       <section className="box">
         <div className="boxhead">
-          <span className="lbl">Configuration</span>
+          <span className="lbl">Live switch</span>
           <span className="lbl">
-            source: <b>{config.source}</b>
+            now: <b>{config.effective ? (config.live ? "LIVE" : "closed (outside the window)") : config.source === "disabled" ? "switched off" : "no draw"}</b> · source: {config.source}
           </span>
         </div>
         <div className="boxbody">
+          <p className="pqnote">
+            While live, the app shows the prize-draw notice and the optional feedback form. The draw itself is yours: list the day
+            under Qualifiers, pick by hand, announce by address, pay. The wording in the app stays vague on purpose (the Terms leave
+            criteria, timing and amounts to 1delta), so be generous with edge cases.
+          </p>
           <label className="pq">
             <span className="pqlabel">Promotion id</span>
             <input className="pqtext m" value={id} onChange={(e) => setId(e.target.value)} placeholder="rootstock-beta-1" />
-            <span className="pqfine">Lower-case, digits, dashes. Entries are kept per id — rehearse under e.g. "rehearsal-1", then reset it.</span>
-          </label>
-          <label className="pq">
-            <span className="pqlabel">Terms hash</span>
-            <input className="pqtext m" value={terms} onChange={(e) => setTerms(e.target.value)} />
-            <span className="pqfine">
-              This build ships {buildTerms.slice(0, 10)}…{" "}
-              {terms.toLowerCase() !== buildTerms && (
-                <button type="button" className="linkbtn" onClick={() => setTerms(buildTerms)}>
-                  use it
-                </button>
-              )}
-            </span>
+            <span className="pqfine">Lower-case, digits, dashes. Feedback is kept per id; a new id starts a clean Feedback tab.</span>
           </label>
           <ZoneSwitch zone={zone} onChange={setZone} />
           <div className="adrow adtimes">
             <DateTimeField
               label="Starts"
-              hint="fills before this do not unlock Participate"
+              hint="fills before this do not unlock the feedback form"
               value={start}
               onChange={setStart}
               zone={zone}
-              empty="Open from the beginning (any fill counts)"
+              empty="Open from the beginning"
               presets={[
                 { label: "Now", value: nowSec },
                 { label: "Today 00:00", value: () => toUnix(fromUnix(nowSec(), zone).date, "00:00", zone) },
@@ -150,79 +82,40 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
               ]}
             />
             <DateTimeField
-              label="Entries close"
-              hint="a date alone means 23:59 that day"
+              label="Notice goes dark"
+              hint="a date alone means 23:59 that day; leave empty while the pot lasts"
               defaultTime="23:59"
               warnIfPast
               value={end}
               onChange={setEnd}
               zone={zone}
-              empty="No end"
+              empty="No end: switch off by hand when the pot is paid out"
               presets={[
-                { label: "+1 day", value: () => (start ?? nowSec()) + DAY },
-                { label: "+7 days", value: () => (start ?? nowSec()) + 7 * DAY },
                 { label: "+10 days", value: () => (start ?? nowSec()) + 10 * DAY },
+                { label: "+14 days", value: () => (start ?? nowSec()) + 14 * DAY },
                 { label: "Clear", value: () => null },
               ]}
             />
           </div>
-          {start !== null && end !== null && end <= start && <p className="warn pqfine">Entries close before the start.</p>}
-          <div className="adrow adrules">
-            <label className="pq">
-              <span className="pqlabel">Draw every … days</span>
-              <input className="pqtext m" inputMode="numeric" value={periodDays} onChange={(e) => setPeriodDays(e.target.value.replace(/\D/g, ""))} />
-              <span className="pqfine">Periods of whole UTC days from the start date.</span>
-            </label>
-            <label className="pq">
-              <span className="pqlabel">Daily qualifier, $</span>
-              <input className="pqtext m" inputMode="decimal" value={qualifier} onChange={(e) => setQualifier(e.target.value)} />
-              <span className="pqfine">Each UTC day at or above this = 1 ticket. $1 for a rehearsal.</span>
-            </label>
-            <label className="pq">
-              <span className="pqlabel">Minimum qualifiers</span>
-              <input className="pqtext m" inputMode="numeric" value={minQualifiers} onChange={(e) => setMinQualifiers(e.target.value.replace(/\D/g, ""))} />
-              <span className="pqfine">Fewer than this in a period: no draw, the prize is carried forward.</span>
-            </label>
-          </div>
-          <div className="adrow adrules">
-            <label className="pq">
-              <span className="pqlabel">Prizes per draw</span>
-              <input className="pqtext m" value={prizes} onChange={(e) => setPrizes(e.target.value)} placeholder="25  or  50, 25, 25" />
-              <span className={prizeList.bad ? "warn pqfine" : "pqfine"}>{prizeList.bad ?? `One amount per winner; carried-forward prizes are added to the first. ${prizeTotal} ${prizeToken.trim()} per draw.`}</span>
-            </label>
-            <label className="pq adnarrow">
-              <span className="pqlabel">Prize token</span>
-              <input className="pqtext m" value={prizeToken} onChange={(e) => setPrizeToken(e.target.value)} />
-            </label>
-            <label className="pq adnarrow">
-              <span className="pqlabel">Total pot</span>
-              <input className="pqtext m" inputMode="decimal" value={pot} onChange={(e) => setPot(e.target.value)} />
-              <span className="pqfine">{drawsInPot !== null ? `${drawsInPot} paid draw${drawsInPot === 1 ? "" : "s"}; quiet days roll over, so it may take longer. 0 = no limit.` : "0 = no limit; the end date decides."}</span>
-            </label>
-          </div>
-          <label className="check">
-            <input type="checkbox" checked={onePrize} onChange={(e) => setOnePrize(e.target.checked)} />
-            <span>One prize per address: an earlier winner is drawn again only once every other qualifier of the period has won.</span>
+          {badWindow && <p className="warn pqfine">The end is before the start.</p>}
+          <label className="pq adnarrow">
+            <span className="pqlabel">Daily qualifier, $</span>
+            <input className="pqtext m" inputMode="decimal" value={qualifier} onChange={(e) => setQualifier(e.target.value)} />
+            <span className="pqfine">What the Qualifiers tab marks as ✓. The notice says "about" this amount.</span>
           </label>
-          {periodsInWindow !== null && (
-            <p className="pqfine">
-              {periodsInWindow} full draw{periodsInWindow === 1 ? "" : "s"} fit the window: up to {periodsInWindow * prizeTotal} {prizeToken.trim()} if every one runs
-              {drawsInPot !== null && periodsInWindow < drawsInPot ? ", which is less than the pot. Leave the end open, or extend it, if the pot should be paid out in full." : "."}
-            </p>
-          )}
           <label className="pq">
             <span className="pqlabel">
-              Excluded from draws <span className="pqopt-tag">· team, contractors, ambassadors (TC §3.3); our fillers are always excluded</span>
+              Excluded from the qualifier list <span className="pqopt-tag">· team, contractors, ambassadors (TC §3.3); our fillers are always excluded</span>
             </span>
-            <textarea className="pqtext m" rows={3} value={exclude} onChange={(e) => setExclude(e.target.value)} placeholder="0x… one per line" />
+            <textarea className="pqtext m" rows={5} value={exclude} onChange={(e) => setExclude(e.target.value)} placeholder="0x… one per line" />
             {ex.bad.length > 0 && <span className="warn pqfine">Not addresses: {ex.bad.join(", ")}</span>}
           </label>
           {note && <p className="good pqfine">{note}</p>}
           <div className="adrow">
-            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || !!prizeList.bad || !Number(periodDays) || !Number(minQualifiers) || !prizeToken.trim() || !Number.isFinite(Number(pot)) || Number(pot) < 0 || (start !== null && end !== null && end <= start)} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
-              Save
+            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || !id.trim() || badWindow || !Number.isFinite(Number(qualifier))} onClick={() => run(() => api.saveConfig(draft), "Saved. The app follows within a minute.")}>
+              Save &amp; switch on
             </button>
-            <button type="button" className="cta line" disabled={busy || config.source === "disabled"} onClick={() => run(() => api.disable(), "Switched off: no notice, no entries.")}>
+            <button type="button" className="cta line" disabled={busy || config.source === "disabled"} onClick={() => run(() => api.disable(), "Switched off: no notice, no feedback form.")}>
               Switch off
             </button>
             <button type="button" className="cta line" disabled={busy || config.source === "env" || !config.env} onClick={() => run(() => api.revertToEnv(), "Back to the deploy defaults (RAFFLE_*).")}>
@@ -231,44 +124,19 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
           </div>
           {config.env && (
             <p className="pqfine">
-              Deploy defaults: {config.env.id} · {utc(config.env.startsAt)} → {utc(config.env.endsAt)}
+              Deploy defaults: {config.env.id} · {utc(config.env.startsAt)} → {utc(config.env.endsAt)} · ${config.env.qualifierUsd}/day
             </p>
-          )}
-        </div>
-      </section>
-
-      <section className="box">
-        <div className="boxhead">
-          <span className="lbl">Tests</span>
-        </div>
-        <div className="boxbody">
-          <p className="pqnote">
-            Checks what the running configuration does for a visitor. A rehearsal: save a throwaway id (e.g.
-            rehearsal-1, qualifier $1), swap and press Participate in the app, check Feedback and a test draw under
-            Draws — then reset that id below and save the real one.
-          </p>
-          <button type="button" className="cta line" onClick={selfTest}>
-            Run checks
-          </button>
-          {checks && (
-            <ul className="adchecks">
-              {checks.map((c) => (
-                <li key={c.label} className={c.ok ? "good" : c.ok === false ? "warn" : ""}>
-                  <span>{c.ok ? "✓" : c.ok === false ? "✗" : "·"}</span> <b>{c.label}</b> <span className="pqfine">{c.detail}</span>
-                </li>
-              ))}
-            </ul>
           )}
         </div>
       </section>
 
       <section className="box addanger">
         <div className="boxhead">
-          <span className="lbl">Reset &amp; cleanup</span>
+          <span className="lbl">Reset</span>
         </div>
         <div className="boxbody">
           <label className="pq">
-            <span className="pqlabel">Reset a promotion — deletes ALL its entries (feedback included) and draw records</span>
+            <span className="pqlabel">Delete every feedback form of a promotion (after a rehearsal)</span>
             <input className="pqtext m" value={resetId} onChange={(e) => setResetId(e.target.value)} placeholder="type the promotion id to confirm" />
           </label>
           <button
@@ -276,10 +144,10 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
             className="cta line"
             disabled={busy || !resetId.trim()}
             onClick={() =>
-              window.confirm(`Delete every entry and draw of "${resetId.trim()}"? This cannot be undone.`) &&
+              window.confirm(`Delete every feedback form of "${resetId.trim()}"? This cannot be undone.`) &&
               run(async () => {
                 const r = await api.reset(resetId.trim(), resetId.trim());
-                setNote(`Reset ${resetId.trim()}: ${r.entriesRemoved} entries, ${r.drawsRemoved} draws removed.`);
+                setNote(`Reset ${resetId.trim()}: ${r.entriesRemoved} feedback form(s) removed.`);
                 setResetId("");
               })
             }

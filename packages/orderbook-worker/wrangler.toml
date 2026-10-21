@@ -116,11 +116,10 @@ MAX_FILLS = "50000"
 # (Free: 50) — https://developers.cloudflare.com/workers/platform/limits/ — and an
 # alarm makes ~2 RPC calls idle plus 2–3 per fill it indexes and the re-check sweep,
 # bounded by ALARM_BUDGET_SECONDS.
-# The prize draw (src/raffle.ts). RAFFLE_ID "" = no draw. RAFFLE_TERMS_HASH must be
-# the keccak256 of the TC.md the app ships (`pnpm --filter @1delta-x/app terms-hash`).
-# Times are unix seconds: fills count from RAFFLE_STARTS_AT, entries close at
-# RAFFLE_ENDS_AT. The admin token is a secret: wrangler secret put RAFFLE_ADMIN_TOKEN
-RAFFLE_ID = ""
-RAFFLE_TERMS_HASH = ""
+# The prize draw's desk (src/raffle.ts): the live switch + the optional feedback form.
+# RAFFLE_ID "" = no draw. Times are unix seconds: fills count from RAFFLE_STARTS_AT,
+# the notice goes dark at RAFFLE_ENDS_AT. The console can override all of it without a
+# deploy. The admin token is a secret: wrangler secret put RAFFLE_ADMIN_TOKEN
+RAFFLE_ID = "rootstock-beta-1"
 RAFFLE_STARTS_AT = ""
 RAFFLE_ENDS_AT = ""

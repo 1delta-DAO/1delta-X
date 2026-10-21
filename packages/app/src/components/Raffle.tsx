@@ -4,10 +4,9 @@ import type { Address } from "viem";
 import { ORDERBOOK_URL } from "../backend/book";
 import { chainLabel } from "../config/chains";
 import { PROMOTION, promotionRunsOn } from "../config/promotion";
-import { TERMS_HASH } from "../config/terms";
-import { claimView, describeRules, fetchRaffleStatus, fetchRaffleSummary, participateView, type RaffleStatus, type TypedDataSigner } from "../lib/raffle";
+import { fetchRaffleStatus, fetchRaffleSummary, participateView, type RaffleStatus, type TypedDataSigner } from "../lib/raffle";
 import { GasZipLink, OnrampLink, UsdtLink } from "./Onramp";
-import { ClaimSheet, ParticipateSheet } from "./Participate";
+import { ParticipateSheet } from "./Participate";
 import { TermsLink } from "./TermsLink";
 
 /** Re-read the desk this often while the page is open — a first fill unlocks Participate. */
@@ -43,7 +42,6 @@ export function RaffleNotice({
   const [status, setStatus] = useState<RaffleStatus | null>(null);
   const [entrants, setEntrants] = useState<number | null>(null);
   const [open, setOpen] = useState(false);
-  const [claimOpen, setClaimOpen] = useState(false);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((n) => n + 1), []);
 
@@ -54,7 +52,7 @@ export function RaffleNotice({
       const base = ORDERBOOK_URL!;
       void fetchRaffleSummary(base, { signal: ctl.signal })
         .then((s) => {
-          setEntrants(typeof s.entrants === "number" ? s.entrants : null);
+          setEntrants(typeof s.feedback === "number" ? s.feedback : null);
           if (!address) setStatus(s.live ? (s as RaffleStatus) : { live: false });
         })
         .catch(() => {});
@@ -74,32 +72,17 @@ export function RaffleNotice({
   // all hide the notice. A build without an orderbook keeps the static notice.
   if (ORDERBOOK_URL && status?.live !== true) return <OnrampLink />;
   const view = participateView(status, address);
-  const claim = claimView(status, address, TERMS_HASH);
-  const rules = describeRules(status?.rules);
 
   return (
     <aside className="raffle">
       <span className="pill pill-violet">Prize draw</span>
       <div className="rfbody">
         <p className="rflead">
-          {rules ? (
-            rules.lead
-          ) : (
-            <>
-              Trading on {chainLabel(PROMOTION.chainId)} puts your address in a prize draw, no sign-up needed. Each day
-              you trade at least <b>{PROMOTION.qualifier}</b> is a ticket, and <b>{PROMOTION.pool}</b> is paid out over{" "}
-              {PROMOTION.cadence}.
-            </>
-          )}{" "}
-          After your first swap you can also <b>rate the app</b>: a minute of feedback, optional.
+          Trading on {chainLabel(PROMOTION.chainId)} puts your address in a prize draw, no sign-up needed. Roughly{" "}
+          <b>{PROMOTION.qualifier}</b> of trading in a day counts, and <b>{PROMOTION.pool}</b> is paid out over{" "}
+          {PROMOTION.cadence}. After your first swap you can also <b>rate the app</b>: a minute of feedback, optional.
         </p>
         <div className="rfactions">
-          {claim && !claim.termsMismatch && (
-            <button type="button" className="cta rfbtn" onClick={() => setClaimOpen(true)}>
-              You won {claim.win.payout} {claim.win.token}: claim it
-            </button>
-          )}
-          {claim?.termsMismatch && <span className="rfstate warn">You won a prize. The Terms were updated: reload the page to review them, then claim.</span>}
           {view.kind === "connect" && (
             <button type="button" className="cta line rfbtn" onClick={onConnect}>
               Connect wallet
@@ -137,9 +120,9 @@ export function RaffleNotice({
           )}
         </div>
         <p className="rffine">
-          Winners are picked <b>at random</b> from the tickets. Trading qualifies you for a draw, it does not earn a
-          prize, and no amount of volume guarantees one. {rules?.fine} Winners are announced by wallet address on the
-          official channels and see a claim button here. Figures are approximate and the criteria,
+          Winners are picked <b>at random</b> from the day&rsquo;s qualifying addresses and announced by wallet address on
+          the official channels. Trading qualifies you for a draw, it does not earn a prize, and no amount of volume
+          guarantees one. Figures are approximate and the criteria,
           schedule and pool can change. Not open to U.S. Persons or persons in sanctioned jurisdictions, and USDRIF
           carries its own transfer restrictions. Winning addresses may be published.{" "}
           <TermsLink>Full Terms</TermsLink>
@@ -155,19 +138,6 @@ export function RaffleNotice({
           updating={view.kind === "entered"}
           onClose={() => setOpen(false)}
           onEntered={refresh}
-        />
-      )}
-      {claimOpen && claim && address && status?.promotion && status.terms && ORDERBOOK_URL && (
-        <ClaimSheet
-          base={ORDERBOOK_URL}
-          signer={signer}
-          chainId={PROMOTION.chainId}
-          participant={address}
-          promotion={status.promotion}
-          terms={status.terms}
-          win={claim.win}
-          onClose={() => setClaimOpen(false)}
-          onClaimed={refresh}
         />
       )}
     </aside>

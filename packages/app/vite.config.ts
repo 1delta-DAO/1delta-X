@@ -1,7 +1,5 @@
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { keccak256, toBytes } from "viem";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -15,15 +13,8 @@ import react from "@vitejs/plugin-react";
 // read its `dist` types would let the two diverge silently, which is the one
 // failure this app cannot afford: the order encoding it signs has to be the one
 // the contract hashes.
-// The Terms version a prize-draw entrant signs (`terms` in the participation form):
-// keccak256 of the exact TC.md text the terms page renders. The orderbook worker's
-// RAFFLE_TERMS_HASH must equal it (`pnpm terms-hash` prints it), or every entry is
-// refused as "the Terms have changed".
-const TERMS_HASH = keccak256(toBytes(readFileSync(resolve(__dirname, "../../TC.md"), "utf8")));
-
 export default defineConfig({
   plugins: [react()],
-  define: { __TERMS_HASH__: JSON.stringify(TERMS_HASH) },
   base: "./",
   // A dedicated port, and `strictPort` so a clash FAILS instead of quietly
   // moving. Vite's default 5173 is already taken here by the Rootstock pitch

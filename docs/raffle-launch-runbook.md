@@ -3,10 +3,10 @@
 **Day to day, use the operator console. It is a separate Pages project (`packages/raffle-admin`, behind Cloudflare Access), not part of the app.** It needs the
 orderbook worker's `RAFFLE_ADMIN_TOKEN`. It has four tabs:
 
-- **Setup & tests**: configure, switch on/off, run checks, reset a promotion.
-- **Feedback**: tallies, every entry, CSV download.
-- **Support**: look up an address, add an entry by hand with a note, remove an entry.
-- **Draws**: compute qualifiers, dry-run draw, save and fix the draw block, draw, exclude and redraw.
+- **Qualifiers**: each UTC day's addresses and volumes, who reached the qualifier, copy the list.
+- **Feedback**: tallies of the optional feedback, every form, CSV download.
+- **Support**: look up an address, delete its feedback on request.
+- **Setup**: the live switch, the window, the qualifier, the exclusion list, reset.
 
 The CLI steps below are the offline equivalent.
 
@@ -18,71 +18,41 @@ only when the steps in §1 are done.
 
 | # | Step | Command / where |
 |---|---|---|
-| 1 | TC.md is the reviewed 2 September 2026 text and must not change. The claim wording a winner signs (`CLAIM_STATEMENT` in `packages/sdk/src/participation.ts`) restates §3/§7.5/§8; show it to counsel if in doubt | — |
+| 1 | TC.md is the reviewed 2 September 2026 text and must not change. Nothing in the app or the console adds terms of its own: the notice is deliberately vague and the draw is run by hand | — |
 | 2 | Decide the promotion window and the support link | `PROMOTION.support` in `VITE_PROMOTION` (Telegram group or form URL) |
 | 3 | Grant-thread commitments not in the app as of 2026-10-14 (per-user ~1,000 USDRIF cap, total cap, time-bounded allowances): ship them, or say in the thread why not, before promoting on the Collective | `docs/local/rootstock-grant-m1-checklist.md` |
 
-TC.md must not change (reviewed). Its hash is `0xa10e1478676838587e36b9b6ca0c6d88996aeb40dbadd2d988e9e7631a7d1bd8`;
-the console's **use it** fills it in.
+TC.md must not change (reviewed).
 
 ### The live configuration (rootstock-beta-1)
+
+The deploy sets `RAFFLE_ID = "rootstock-beta-1"` in `wrangler.toml`, so the desk is
+live as soon as the worker is deployed; the console's Setup tab adjusts the rest
+without a deploy.
 
 | Setting | Value |
 |---|---|
 | Promotion id | `rootstock-beta-1` |
-| Terms hash | `0xa10e1478…1bd8` (use it) |
-| Starts | the announcement day, 00:00 UTC |
-| Entries close | leave empty (the pot decides) |
-| Draw every … days | 1 |
-| Daily qualifier | $20 |
-| Minimum qualifiers | 3 (fewer: the day's 10 USDRIF rolls to the next day) |
-| Prizes per draw | 10 |
-| Prize token | USDRIF |
-| Total pot | 100 |
-| One prize per address | on |
-| Excluded from draws | the addresses below plus every team member's personal wallet |
+| Starts | the announcement day, 00:00 UTC (fills before it do not unlock the feedback form) |
+| Notice goes dark | leave empty; switch off by hand when the pot is paid out |
+| Daily qualifier | $20 (what the Qualifiers tab marks ✓; the notice says "roughly") |
+| Excluded from the qualifier list | the addresses below plus every team member's personal wallet |
 
-Addresses to exclude (our fillers `0xcafe…083a`, `0x5987…6cD1`, `0x48db…32F1` are excluded automatically; list them anyway):
+Addresses to exclude (our fillers `0xcafe…083a`, `0x5987…6cD1`, `0x48db…32F1` are excluded automatically; list them anyway), pasteable:
 
 ```
-0x00001d4754680958E7f8fe42D60842Ebde4Cb30D   deployer
-0xcafe35944e3195d59b4a354Ea23D60a0445c083a   filler operator (inventory / spot)
-0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287   AggregatorFillSolver v1
-0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1   AggregatorFillSolver v2
-0x5987A4AFE1b680DAC657506B69C56b06FFe86cD1   AggregatorFillSolver v3
-0xdadE4B0F9dEa9f2CC371E07f76653971b2c62C04   RouteSandbox v1
-0xda2Db66B3Ae47a1f5F89640666b7802423828c8b   RouteSandbox v2
-0xeBbBf5719B699a450b2537852E4286A7e69Bb1aD   RouteSandbox v3
-0xB6107a1DEa7Ae04129aBc27ce607249049f3C735   NativeUnwrapModule
+0x00001d4754680958E7f8fe42D60842Ebde4Cb30D
+0xcafe35944e3195d59b4a354Ea23D60a0445c083a
+0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287
+0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1
+0x5987A4AFE1b680DAC657506B69C56b06FFe86cD1
+0xdadE4B0F9dEa9f2CC371E07f76653971b2c62C04
+0xda2Db66B3Ae47a1f5F89640666b7802423828c8b
+0xeBbBf5719B699a450b2537852E4286A7e69Bb1aD
+0xB6107a1DEa7Ae04129aBc27ce607249049f3C735
 ```
 
-## 2. Configure the orderbook worker
-
-```sh
-pnpm --filter @1delta-x/app terms-hash        # → 0x… (keccak256 of TC.md)
-cd packages/orderbook-worker
-wrangler secret put RAFFLE_ADMIN_TOKEN        # a long random string; keep it in the password manager
-```
-
-The console's Setup tab can set (and later change) all of this without a deploy.
-To bake defaults into the deployment instead, set these in `wrangler.toml` `[vars]`
-and run `wrangler deploy`:
-
-```toml
-RAFFLE_ID = "rootstock-beta-1"
-RAFFLE_TERMS_HASH = "0x…"          # the hash printed above
-RAFFLE_STARTS_AT = "<unix seconds>" # fills before this do not unlock Participate
-RAFFLE_ENDS_AT = "<unix seconds>"   # entries close here
-```
-
-The Durable Object keeps its old env until it restarts. Check before announcing:
-
-```sh
-curl https://<app>/api/book/raffle    # {"live":true,"promotion":"rootstock-beta-1","terms":"0x…",…}
-```
-
-`terms` must equal the hash the app was built with, or the notice reads "The Terms
-were updated" and offers no form.
+(deployer, filler operator, solver v1/v2/v3, sandboxes v1/v2/v3, NativeUnwrapModule)
 
 ## 3. Rehearsal, then the live end-to-end test
 
@@ -92,7 +62,7 @@ removes every entry.
 
 1. Run **Run checks**. Every line should be ✓.
 2. Do the steps below from your own wallet.
-3. Run a **Test draw** under Draws.
+3. Open **Qualifiers** for today (UTC): your wallet should be listed with its volume.
 4. Under Setup, **Reset promotion** `rehearsal-1`.
 5. Save the real id.
 
@@ -105,52 +75,34 @@ Do this from a fresh wallet that holds **no RBTC on Rootstock**:
    - Expected: native RBTC arrives through solver v3 + NativeBalance, and the wallet never paid gas.
    - This combination (permit-funded order + native RBTC out) has not been filled live before. If it fails, RBTC delivery is the thing to fix.
 3. After the fill is indexed (about 20 s), **Rate the app** appears. Fill in the form and sign. Expect the "Thank you" message.
-4. Check that the feedback appears under **Feedback** on the console, and that the address shows up under Draws → Compute for the current period (it is in the draw without any form).
+4. Check that the feedback appears under **Feedback** on the console. (The address was in the day's qualifier list from its first fill, form or no form.)
 
-## 4. The draws (one per period, the morning after it ends)
+## 4. The draw, by hand, each morning
 
-**Compliance with the reviewed Terms (TC.md, 2 September 2026, unchanged):** there
-is no registration (§4.1), so the draw lists EVERY wallet with qualifying fills,
-whether or not it gave feedback; the feedback form is optional. The rules below are
-"qualifying criteria communicated through official channels" (§4.2/4.3) and 1delta's
-"number, timing and amount of prizes" (§6.2); the announcement line and the app notice
-are that communication. A winner confirms eligibility before payout (§7.5) by signing
-the claim in the app. The rules are console settings (Setup tab) and are published on
-`GET /raffle`, so the app notice always states what the desk runs. Defaults match
-what was announced (around 100 USDRIF over roughly ten daily draws; TC §2.1 says
-daily draws too): a draw **every UTC day** from the start date, one ticket per day an
-address trades ≥ $20, at least **3** qualifying addresses or the prize is carried to
-the next day, **10 USDRIF** to one winner, one prize per address while others are
-waiting; a **pot** of 100 USDRIF, so the draws continue until 100 has been paid
-(ten paid days; quiet days roll over and make it longer). The console stops offering
-draws once the pot is paid; then switch the promotion off.
+The Terms promise no registration (§4.1) and leave the criteria, timing and amounts
+to 1delta (§4.2, §4.3, §6.2). So there is no draw machinery: the console lists each
+UTC day's qualifying addresses off the fill index and you draw, announce and pay by
+hand. The app's notice is deliberately vague ("roughly", "around"), so be generous
+with edge cases: someone a little late or early, a day a few cents short.
 
-On the console, Draws tab:
+Announced: around 100 USDRIF, roughly ten daily draws of about 10 USDRIF, a day
+counts from roughly $20 of trading.
 
-1. Pick the period that just ended (the newest one without a record is preselected) and **Compute**. Review the `unsized` column and the "set aside" list.
-2. If fewer than the minimum qualified, press **Record carry-forward**. Nothing is drawn; the prize rides on the next period. Publish the announcement line anyway, so the carry is public.
-3. Otherwise **Save & fix draw block**, then **publish** the announcement line (tickets, `listHash`, draw block) in the official channel **before that block** (about an hour).
-4. After the block is 12 deep (about 6 minutes more), press **Draw**.
-5. Publish the winners by address (TC §8.1). This is how a winner learns they won: the app then shows that wallet a **claim** button, and the claim (TC §3, §7.5 confirmations, Terms accepted by hash) is signed in the app. The window is 14 days; a winner who confirms another way is recorded under Support.
-6. Review each claimed winner (TC §5, §7.5): funding-source clusters, wallet age, whether its only activity is our raffle. If a winner is excluded, **exclude …** redraws deterministically.
-7. Pay claimed prizes from the treasury wallet, then publish the payout txs.
-
-After the end date a **Final draw** option appears: it spends whatever was carried
-forward and never paid, among addresses with ≥ 2 qualifying days overall. If even
-that has fewer than the minimum, nothing is paid.
-
-The CLI equivalent (records as JSON files, same rules):
-
-```sh
-cd packages/raffle-admin
-pnpm raffle-draw snapshot --book https://<app>/api/book --exclude team.txt --out raffle/   # next period without a record
-pnpm raffle-draw draw --snapshot raffle/<day>.json [--skip <address>]
-pnpm raffle-draw snapshot --final --book https://<app>/api/book --out raffle/            # after the end date
-```
-
-`team.txt` lists the addresses of employees, contractors and ambassadors (TC §3.3;
-ambassadors run on their own pool). One address per line. The console uses the
-exclusion list from Setup instead.
+1. Console → **Qualifiers**: pick yesterday (UTC). The table shows every address that
+   traded, its volume valued like the Dashboard, and ✓ at or above the qualifier. Look
+   at any `unsized` rows (fills the book could not price) before deciding. Our fillers
+   and the Setup exclusion list are left out.
+2. Fewer than about three qualifiers: skip the day and let the 10 USDRIF ride on the
+   next one. Otherwise **Copy qualifying addresses** and pick one at random the way you
+   announced (e.g. a published block hash modulo the count, or any method you can show).
+3. Review the winner (TC §5, §7.5): funding-source clusters, wallet age, whether its only
+   activity is our raffle. If in doubt, pick again.
+4. Announce the winning address on the official channels (TC §8.1). Since the form
+   collects no contact details, this is how a winner learns. Ask for the §7.5 confirmation
+   there if you want one before paying.
+5. Pay from the treasury wallet, publish the payout tx. Keep a simple ledger (day, list
+   size, winner, tx) in the team drive; the console stores none of it.
+6. When about 100 USDRIF has been paid out: Setup → **Switch off**.
 
 ## 5. Close
 

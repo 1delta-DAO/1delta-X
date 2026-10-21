@@ -1,7 +1,6 @@
 import type { ParticipationAnswers, Question } from "@1delta-x/sdk";
 
 import type { FillWire } from "@app/lib/dashboard";
-import type { Snapshot } from "./draw";
 
 /**
  * The admin page's client for the orderbook's `/raffle/admin/*` routes (through the
@@ -11,19 +10,10 @@ import type { Snapshot } from "./draw";
 
 export interface RaffleConfig {
   id: string;
-  terms: `0x${string}`;
   startsAt: number;
   endsAt: number;
   qualifierUsd: number;
   exclude: string[];
-  testers: string[];
-  periodDays: number;
-  minQualifiers: number;
-  prizes: number[];
-  prizeToken: string;
-  onePrizePerAddress: boolean;
-  /** Draws continue until this much has been paid out; 0 = the end date alone decides. */
-  pot: number;
 }
 
 export interface AdminConfig {
@@ -31,7 +21,6 @@ export interface AdminConfig {
   effective: RaffleConfig | null;
   env: RaffleConfig | null;
   live: boolean;
-  testMode: boolean;
   now: number;
   chainId: number;
   questions: Question[];
@@ -53,32 +42,6 @@ export interface PromotionRow {
   entries: number;
   firstEntry: number | null;
   lastUpdate: number | null;
-  draws: number;
-}
-
-export interface SavedDraw extends Snapshot {
-  updatedAt: number;
-  /** Winners who have confirmed eligibility (signed in the app, or recorded by an admin). */
-  claimed: string[];
-}
-
-export interface Win {
-  day: string;
-  payout: number;
-  token: string;
-  drawnAt: number;
-  claimBy: number;
-  claimed: boolean;
-  claimedAt?: number;
-}
-
-export interface Claim {
-  day: string;
-  address: string;
-  claimedAt: number;
-  source: "signed" | "manual";
-  note: string | null;
-  signature: string;
 }
 
 export class AdminError extends Error {
@@ -122,28 +85,20 @@ export class AdminApi {
   promotions = () => this.req<{ promotions: PromotionRow[] }>("GET", "/raffle/admin/promotions");
   entries = (promotion?: string) => this.req<{ promotion: string; questions: Question[]; count: number; entries: AdminEntry[] }>("GET", "/raffle/admin/entries", undefined, promotion);
   removeEntry = (address: string, promotion?: string) => this.req<{ removed: boolean }>("DELETE", `/raffle/admin/entries/${address.toLowerCase()}`, undefined, promotion);
-  claims = (promotion?: string) => this.req<{ promotion: string; claims: Claim[] }>("GET", "/raffle/admin/claims", undefined, promotion);
-  confirmClaim = (c: { address: string; day: string; note: string }, promotion?: string) => this.req<{ claim: Claim }>("POST", "/raffle/admin/claims", c, promotion);
-  removeClaim = (day: string, address: string, promotion?: string) => this.req<{ removed: boolean }>("DELETE", `/raffle/admin/claims/${day}/${address.toLowerCase()}`, undefined, promotion);
   lookup = (address: string, promotion?: string) =>
-    this.req<{ address: string; promotion: string | null; fills: number; firstFillAt: number | null; entered: boolean; entry?: AdminEntry; wins: Win[]; claims: Claim[] }>(
+    this.req<{ address: string; promotion: string | null; fills: number; firstFillAt: number | null; entered: boolean; entry?: AdminEntry }>(
       "GET",
       `/raffle/admin/status?address=${address.toLowerCase()}`,
       undefined,
       promotion,
     );
-  reset = (promotion: string, confirm: string) => this.req<{ entriesRemoved: number; drawsRemoved: number }>("POST", "/raffle/admin/reset", { promotion, confirm });
-  draws = (promotion?: string) => this.req<{ promotion: string; draws: SavedDraw[] }>("GET", "/raffle/admin/draws", undefined, promotion);
-  saveDraw = (s: Snapshot) => this.req<{ saved: boolean }>("PUT", `/raffle/admin/draws/${s.day}`, s, s.promotion);
-  removeDraw = (day: string, promotion?: string) => this.req<{ removed: boolean }>("DELETE", `/raffle/admin/draws/${day}`, undefined, promotion);
+  reset = (promotion: string, confirm: string) => this.req<{ entriesRemoved: number }>("POST", "/raffle/admin/reset", { promotion, confirm });
 
   /** Public routes, for the self-test (what a visitor / a tester sees). */
-  publicSummary = () => fetch(`${this.base}/raffle`).then((r) => r.json() as Promise<{ live: boolean; promotion?: string; terms?: string; entrants?: number }>);
-  publicStatus = (address: string) =>
-    fetch(`${this.base}/raffle/status/${address.toLowerCase()}`).then((r) => r.json() as Promise<{ live: boolean; traded?: boolean; entered?: boolean; terms?: string }>);
+  publicSummary = () => fetch(`${this.base}/raffle`).then((r) => r.json() as Promise<{ live: boolean; promotion?: string; feedback?: number }>);
 }
 
-/** Every indexed fill since `fromSec` (newest first, paged), for the draw. */
+/** Every indexed fill since `fromSec` (newest first, paged), for the daily qualifier list. */
 export async function fillsSince(base: string, fromSec: number): Promise<FillWire[]> {
   const out: FillWire[] = [];
   let cursor: string | undefined;

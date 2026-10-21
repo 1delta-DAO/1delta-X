@@ -26,6 +26,7 @@ describe("raffle-admin _worker.js", () => {
     expect((await call(e, "/api/book/raffle/admin/config", { headers: auth })).status).toBe(200);
     expect((await call(e, "/api/book/raffle/admin/config", { method: "PUT", headers: { ...auth, "content-type": "application/json" }, body: '{"id":"x"}' })).status).toBe(200);
     expect((await call(e, "/api/book/raffle/admin/entries/0x00000000000000000000000000000000000000a1?promotion=x", { method: "DELETE", headers: auth })).status).toBe(200);
+    expect((await call(e, "/api/book/raffle/admin/draws/2026-10-25", { headers: auth })).status).toBe(400);
     expect((await call(e, "/api/book/fills?limit=500", { headers: auth })).status).toBe(200);
     expect(e.seen).toEqual([
       { url: "https://orderbook.binding/raffle/admin/config", method: "GET", auth: "Bearer t", body: null },

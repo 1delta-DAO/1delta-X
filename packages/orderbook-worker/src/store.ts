@@ -22,14 +22,10 @@ export interface Sql {
  *   meta          the log cursor and alarm bookkeeping
  *   buckets       rate-limit token buckets (per IP, per maker)
  *   billed        orders / cancels already charged to their maker
- *   raffle_claims  a drawn winner's eligibility confirmation before payout (TC §7.5),
- *                 one per (promotion, draw, address)
  *   raffle_entries prize-draw FEEDBACK forms (src/raffle.ts; optional, not an entry), one per
  *                 (promotion, address); `answers` holds the canonical JSON the
  *                 signature commits to. `contact` is a retired column (the form
  *                 dropped its contact field 2026-10-20): always NULL, scrubbed on start
- *   raffle_draws  the daily draw records the admin page saves (snapshot → result),
- *                 one per (promotion, UTC day); served publicly
  *
  * Amounts are decimal TEXT (uint256 does not fit a SQLite integer); block numbers
  * and unix seconds are INTEGER.
@@ -121,24 +117,9 @@ export const SCHEMA = [
   )`,
   // The contact field was dropped (2026-10-20): erase any value a rehearsal stored.
   `UPDATE raffle_entries SET contact = NULL WHERE contact IS NOT NULL`,
-  `CREATE TABLE IF NOT EXISTS raffle_claims (
-    promotion TEXT NOT NULL,
-    day TEXT NOT NULL,
-    address TEXT NOT NULL,
-    claimed_at INTEGER NOT NULL,
-    signature TEXT NOT NULL,
-    -- 'signed' (the winner's claim in the app) or 'manual' (confirmed by an admin another way)
-    source TEXT NOT NULL DEFAULT 'signed',
-    note TEXT,
-    PRIMARY KEY (promotion, day, address)
-  )`,
-  `CREATE TABLE IF NOT EXISTS raffle_draws (
-    promotion TEXT NOT NULL,
-    day TEXT NOT NULL,
-    snapshot TEXT NOT NULL,
-    updated_at INTEGER NOT NULL,
-    PRIMARY KEY (promotion, day)
-  )`,
+  // Retired (2026-10-21): the draw is evaluated by hand from the fill index now.
+  `DROP TABLE IF EXISTS raffle_draws`,
+  `DROP TABLE IF EXISTS raffle_claims`,
 ];
 
 export function migrate(sql: Sql): void {

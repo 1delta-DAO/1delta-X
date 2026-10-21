@@ -27,7 +27,7 @@ const BINDING_BASE = "https://orderbook.binding";
 function route(path) {
   if (path === "raffle" || path === "fills") return ["GET"];
   if (/^raffle\/status\/0x[0-9a-fA-F]{40}$/.test(path)) return ["GET"];
-  if (/^raffle\/admin\/(config|promotions|entries|entries\/0x[0-9a-fA-F]{40}|status|purge-contacts|reset|draws|draws\/\d{4}-\d{2}-\d{2})$/.test(path)) {
+  if (/^raffle\/admin\/(config|promotions|entries|entries\/0x[0-9a-fA-F]{40}|status|reset)$/.test(path)) {
     return ["GET", "PUT", "POST", "DELETE"];
   }
   return null;

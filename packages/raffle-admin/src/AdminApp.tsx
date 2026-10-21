@@ -1,19 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createPublicClient, http, isAddress } from "viem";
-import { rootstock } from "viem/chains";
+import { isAddress } from "viem";
 
-import { ORDERBOOK_URL, TERMS_HASH } from "./config";
+import { ORDERBOOK_URL } from "./config";
 import { useTheme } from "@app/hooks/useTheme";
 import { AdminApi, AdminError, NO_END, type AdminConfig } from "./adminApi";
-import { DrawsTab } from "./tabs/DrawsTab";
 import { FeedbackTab } from "./tabs/FeedbackTab";
+import { QualifiersTab } from "./tabs/QualifiersTab";
 import { SetupTab } from "./tabs/SetupTab";
 import { SupportTab } from "./tabs/SupportTab";
 
 const TOKEN_KEY = "1delta-x.raffle-admin-token";
-export const rsk = createPublicClient({ chain: rootstock, transport: http(undefined, { retryCount: 1, timeout: 15_000 }) });
 
-type Tab = "setup" | "feedback" | "support" | "draws";
+type Tab = "qualifiers" | "feedback" | "support" | "setup";
 
 export const utc = (sec: number | null | undefined) =>
   sec === null || sec === undefined ? "—" : sec >= NO_END ? "no end" : new Date(sec * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC";
@@ -28,11 +26,13 @@ export function errorText(e: unknown): string {
 }
 
 /**
- * THE RAFFLE ADMIN PAGE (admin.html). Configure the draw, rehearse it under a throwaway id,
- * read the feedback, handle support cases, run the daily draws, and reset after a
- * rehearsal. Every action is an `/raffle/admin/*` call the orderbook worker authorises
- * with `RAFFLE_ADMIN_TOKEN`; this page holds no secret of its own and is useless
- * without the token.
+ * THE RAFFLE OPERATOR CONSOLE — deliberately small. The draw is evaluated by hand
+ * (the Terms promise no registration and leave criteria, timing and amounts to 1delta),
+ * so the console does three things: list each UTC day's qualifying addresses off the
+ * fill index (Qualifiers), show the optional feedback (Feedback), and hold the live
+ * switch for the app's notice (Setup). Every action is an `/raffle/admin/*` call the
+ * orderbook worker authorises with `RAFFLE_ADMIN_TOKEN`; this page holds no secret of
+ * its own and is useless without the token.
  */
 export function AdminApp() {
   const [theme, toggleTheme] = useTheme();
@@ -46,7 +46,7 @@ export function AdminApp() {
   const [draft, setDraft] = useState("");
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("setup");
+  const [tab, setTab] = useState<Tab>("qualifiers");
   // The promotion the Feedback / Support / Draws tabs look at: the running one by default.
   const [promotion, setPromotion] = useState<string | null>(null);
 
@@ -104,7 +104,7 @@ export function AdminApp() {
         <div className="navspace" />
         {config && (
           <span className="netpill" title="effective configuration">
-            {config.effective ? `${config.effective.id} · ${config.live ? (config.testMode ? "TEST MODE" : "LIVE") : "closed"}` : config.source === "disabled" ? "switched off" : "no draw"}
+            {config.effective ? `${config.effective.id} · ${config.live ? "LIVE" : "closed"}` : config.source === "disabled" ? "switched off" : "no draw"}
           </span>
         )}
         {token && (
@@ -138,20 +138,20 @@ export function AdminApp() {
         ) : (
           <>
             <div className="adtabs" role="tablist">
-              {(["setup", "feedback", "support", "draws"] as const).map((t) => (
+              {(["qualifiers", "feedback", "support", "setup"] as const).map((t) => (
                 <button key={t} type="button" role="tab" aria-selected={tab === t} className={`pqopt${tab === t ? " on" : ""}`} onClick={() => setTab(t)}>
-                  {{ setup: "Setup & tests", feedback: "Feedback", support: "Support", draws: "Draws" }[t]}
+                  {{ qualifiers: "Qualifiers", feedback: "Feedback", support: "Support", setup: "Setup" }[t]}
                 </button>
               ))}
               <span className="navspace" />
               <PromotionPicker api={api} value={active} onChange={setPromotion} running={config.effective?.id ?? null} />
             </div>
             {error && <p className="signerr">{error}</p>}
-            {tab === "setup" && <SetupTab api={api} config={config} buildTerms={TERMS_HASH} onChanged={reload} onError={setError} />}
+            {tab === "qualifiers" && <QualifiersTab config={config} />}
+            {tab === "setup" && <SetupTab api={api} config={config} onChanged={reload} onError={setError} />}
             {tab === "feedback" && active && <FeedbackTab api={api} promotion={active} />}
-            {tab === "support" && active && <SupportTab api={api} promotion={active} config={config} />}
-            {tab === "draws" && active && <DrawsTab api={api} promotion={active} config={config} />}
-            {tab !== "setup" && !active && <p className="pqnote">No promotion yet — configure one under Setup.</p>}
+            {tab === "support" && active && <SupportTab api={api} promotion={active} />}
+            {(tab === "feedback" || tab === "support") && !active && <p className="pqnote">No promotion yet: switch one on under Setup.</p>}
           </>
         )}
       </main>
