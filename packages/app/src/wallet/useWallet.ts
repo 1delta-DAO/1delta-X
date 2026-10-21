@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { numberToHex } from "viem";
 
 import { chainById } from "../config/chains";
@@ -20,6 +20,15 @@ export interface WalletState {
   switchChain: (chainId: number) => Promise<void>;
 }
 
+/**
+ * True when the wallet moved from one connected account to ANOTHER one. Not on the
+ * first connect (no previous account), not on a disconnect (no next account), and not
+ * when a wallet re-announces the same account (Rabby does on unlock).
+ */
+export function accountSwitched(prev: string | null, next: string | null | undefined): boolean {
+  return !!prev && !!next && prev.toLowerCase() !== next.toLowerCase();
+}
+
 function message(e: unknown): string {
   if (typeof e === "object" && e && "message" in e) return String((e as { message: unknown }).message);
   return String(e);
@@ -32,12 +41,15 @@ export function useWallet(): WalletState {
   const [chainId, setChainId] = useState<number | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The account the app last loaded for, read synchronously by the wallet's event handler. */
+  const current = useRef<string | null>(null);
 
   const provider = rdns ? (providerByRdns(rdns)?.provider ?? null) : null;
 
   const read = useCallback(async (p: EIP1193Provider, accounts?: string[]) => {
     const list = accounts ?? ((await p.request({ method: "eth_accounts" })) as string[]);
     const id = (await p.request({ method: "eth_chainId" })) as string;
+    current.current = list[0] ?? null;
     setAddress((list[0] as `0x${string}`) ?? null);
     setChainId(Number.parseInt(id, 16));
   }, []);
@@ -51,6 +63,17 @@ export function useWallet(): WalletState {
 
     const onAccounts = (...args: never[]) => {
       const accounts = args[0] as unknown as string[];
+      // ACCOUNT SWITCH (2026-10-21): reload the page. Balances re-read by address, but
+      // much else is per account: the orderbook store's tracked orders (shown as
+      // "yours" on the ladder), the last receipt, quotes sized for the old maker,
+      // allowance and permit state, nonce reservations. Resetting each one by hand
+      // would miss the next one added. The reload reconnects silently through
+      // `eth_accounts` (LAST_WALLET), so it costs no wallet prompt, only the ticket input.
+      if (accountSwitched(current.current, accounts?.[0])) {
+        window.location.reload();
+        return;
+      }
+      current.current = accounts?.[0] ?? null;
       setAddress((accounts?.[0] as `0x${string}`) ?? null);
       if (!accounts?.length) localStorage.removeItem(LAST_WALLET);
     };
@@ -90,6 +113,7 @@ export function useWallet(): WalletState {
   const disconnect = useCallback(() => {
     localStorage.removeItem(LAST_WALLET);
     setRdns(null);
+    current.current = null;
     setAddress(null);
     setChainId(null);
     setError(null);

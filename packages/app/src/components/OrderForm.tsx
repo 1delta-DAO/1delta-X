@@ -629,7 +629,7 @@ export function OrderForm(props: OrderFormProps) {
               You receive{isMarket && figures ? (figures.grossReceive !== null ? " ≈ · net" : " ≈") : ""}
             </span>
             <span className="bal">
-              {recvBal.kind === "ok" ? <>Balance </> : null}
+              {recvBal.kind === "ok" ? <span className="blabel">Balance</span> : null}
               {recvBal.kind === "disconnected" ? null : <Bal state={recvBal} onConnect={onConnect} />}
               {recvBal.kind === "ok" && <UnwrapLink unwrap={unwrap} symbol={recvToken} native={wallet.native.symbol} />}
             </span>
