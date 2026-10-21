@@ -3,18 +3,16 @@ import { isAddress } from "viem";
 
 import { ORDERBOOK_URL } from "./config";
 import { useTheme } from "@app/hooks/useTheme";
-import { AdminApi, AdminError, NO_END, type AdminConfig } from "./adminApi";
+import { AdminApi, AdminError } from "./adminApi";
 import { FeedbackTab } from "./tabs/FeedbackTab";
 import { QualifiersTab } from "./tabs/QualifiersTab";
-import { SetupTab } from "./tabs/SetupTab";
 import { SupportTab } from "./tabs/SupportTab";
 
 const TOKEN_KEY = "1delta-x.raffle-admin-token";
 
-type Tab = "qualifiers" | "feedback" | "support" | "setup";
+type Tab = "qualifiers" | "feedback" | "support";
 
-export const utc = (sec: number | null | undefined) =>
-  sec === null || sec === undefined ? "—" : sec >= NO_END ? "no end" : new Date(sec * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+export const utc = (sec: number | null | undefined) => (sec === null || sec === undefined ? "—" : new Date(sec * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC");
 export const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 export const parseAddresses = (text: string): { ok: string[]; bad: string[] } => {
   const parts = text.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
@@ -26,13 +24,12 @@ export function errorText(e: unknown): string {
 }
 
 /**
- * THE RAFFLE OPERATOR CONSOLE — deliberately small. The draw is evaluated by hand
- * (the Terms promise no registration and leave criteria, timing and amounts to 1delta),
- * so the console does three things: list each UTC day's qualifying addresses off the
- * fill index (Qualifiers), show the optional feedback (Feedback), and hold the live
- * switch for the app's notice (Setup). Every action is an `/raffle/admin/*` call the
- * orderbook worker authorises with `RAFFLE_ADMIN_TOKEN`; this page holds no secret of
- * its own and is useless without the token.
+ * THE RAFFLE OPERATOR CONSOLE — deliberately small. The draw is stated as fixed copy in
+ * the app and evaluated by hand (the Terms promise no registration and leave criteria,
+ * timing and amounts to 1delta), so nothing here configures it. Three tabs: each UTC
+ * day's addresses and volumes off the fill index (Qualifiers), the optional feedback
+ * (Feedback), and a lookup / deletion desk (Support). The token is the orderbook
+ * worker's `RAFFLE_ADMIN_TOKEN`; this page holds no secret of its own.
  */
 export function AdminApp() {
   const [theme, toggleTheme] = useTheme();
@@ -44,18 +41,20 @@ export function AdminApp() {
     }
   });
   const [draft, setDraft] = useState("");
-  const [config, setConfig] = useState<AdminConfig | null>(null);
+  const [promotion, setPromotion] = useState<string | null>(null);
+  const [feedbackCount, setFeedbackCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("qualifiers");
-  // The promotion the Feedback / Support / Draws tabs look at: the running one by default.
-  const [promotion, setPromotion] = useState<string | null>(null);
 
   const api = useMemo(() => (token && ORDERBOOK_URL ? new AdminApi(ORDERBOOK_URL, token) : null), [token]);
 
+  // Sign-in check: the entries route needs the token; the summary tells us the form's key.
   const reload = useCallback(async () => {
     if (!api) return;
     try {
-      setConfig(await api.config());
+      const [s] = await Promise.all([api.summary(), api.entries()]);
+      setPromotion(s.promotion ?? null);
+      setFeedbackCount(s.feedback ?? 0);
       setError(null);
     } catch (e) {
       setError(errorText(e));
@@ -90,10 +89,7 @@ export function AdminApp() {
       /* nothing stored */
     }
     setToken("");
-    setConfig(null);
   };
-
-  const active = promotion ?? config?.effective?.id ?? null;
 
   return (
     <>
@@ -102,9 +98,9 @@ export function AdminApp() {
           1delta X <em>Raffle admin</em>
         </a>
         <div className="navspace" />
-        {config && (
-          <span className="netpill" title="effective configuration">
-            {config.effective ? `${config.effective.id} · ${config.live ? "LIVE" : "closed"}` : config.source === "disabled" ? "switched off" : "no draw"}
+        {token && promotion && (
+          <span className="netpill" title="the feedback form's key on the orderbook">
+            {promotion} · {feedbackCount ?? "…"} feedback
           </span>
         )}
         {token && (
@@ -133,53 +129,22 @@ export function AdminApp() {
               </button>
             </div>
           </div>
-        ) : !config || !api ? (
-          <p className="pqnote">{error ?? "Loading…"}</p>
-        ) : (
+        ) : !api ? null : (
           <>
             <div className="adtabs" role="tablist">
-              {(["qualifiers", "feedback", "support", "setup"] as const).map((t) => (
+              {(["qualifiers", "feedback", "support"] as const).map((t) => (
                 <button key={t} type="button" role="tab" aria-selected={tab === t} className={`pqopt${tab === t ? " on" : ""}`} onClick={() => setTab(t)}>
-                  {{ qualifiers: "Qualifiers", feedback: "Feedback", support: "Support", setup: "Setup" }[t]}
+                  {{ qualifiers: "Qualifiers", feedback: "Feedback", support: "Support" }[t]}
                 </button>
               ))}
-              <span className="navspace" />
-              <PromotionPicker api={api} value={active} onChange={setPromotion} running={config.effective?.id ?? null} />
             </div>
             {error && <p className="signerr">{error}</p>}
-            {tab === "qualifiers" && <QualifiersTab config={config} />}
-            {tab === "setup" && <SetupTab api={api} config={config} onChanged={reload} onError={setError} />}
-            {tab === "feedback" && active && <FeedbackTab api={api} promotion={active} />}
-            {tab === "support" && active && <SupportTab api={api} promotion={active} />}
-            {(tab === "feedback" || tab === "support") && !active && <p className="pqnote">No promotion yet: switch one on under Setup.</p>}
+            {tab === "qualifiers" && <QualifiersTab />}
+            {tab === "feedback" && (promotion ? <FeedbackTab api={api} promotion={promotion} /> : <p className="pqnote">The orderbook keeps no feedback form (RAFFLE_ID is unset).</p>)}
+            {tab === "support" && (promotion ? <SupportTab api={api} promotion={promotion} onChanged={reload} /> : <p className="pqnote">The orderbook keeps no feedback form (RAFFLE_ID is unset).</p>)}
           </>
         )}
       </main>
     </>
-  );
-}
-
-function PromotionPicker({ api, value, onChange, running }: { api: AdminApi; value: string | null; onChange: (p: string | null) => void; running: string | null }) {
-  const [ids, setIds] = useState<string[]>([]);
-  useEffect(() => {
-    void api
-      .promotions()
-      .then((r) => setIds(r.promotions.map((p) => p.promotion)))
-      .catch(() => {});
-  }, [api, value]);
-  const all = [...new Set([...(running ? [running] : []), ...ids, ...(value ? [value] : [])])];
-  if (all.length === 0) return null;
-  return (
-    <label className="adpick">
-      <span className="lbl">Promotion</span>
-      <select className="pqtext m" value={value ?? ""} onChange={(e) => onChange(e.target.value === running ? null : e.target.value)}>
-        {all.map((id) => (
-          <option key={id} value={id}>
-            {id}
-            {id === running ? " (running)" : ""}
-          </option>
-        ))}
-      </select>
-    </label>
   );
 }

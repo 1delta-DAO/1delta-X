@@ -53,7 +53,7 @@ export function RaffleNotice({
       void fetchRaffleSummary(base, { signal: ctl.signal })
         .then((s) => {
           setEntrants(typeof s.feedback === "number" ? s.feedback : null);
-          if (!address) setStatus(s.live ? (s as RaffleStatus) : { live: false });
+          if (!address) setStatus(s as RaffleStatus);
         })
         .catch(() => {});
       if (address) void fetchRaffleStatus(base, address, { signal: ctl.signal }).then(setStatus).catch(() => {});
@@ -66,11 +66,9 @@ export function RaffleNotice({
     };
   }, [runs, address, tick]);
 
-  if (!promotionRunsOn(chainId)) return null;
-  // The orderbook's desk is the switch: nothing is shown until it says the draw is live
-  // for this visitor — switched off, outside its window, or a closed test (the operator console, packages/raffle-admin)
-  // all hide the notice. A build without an orderbook keeps the static notice.
-  if (ORDERBOOK_URL && status?.live !== true) return <OnrampLink />;
+  // The notice is fixed copy, switched by `VITE_PROMOTION` (`{"live":false}` hides it);
+  // the orderbook only adds the optional feedback form.
+  if (!promotionRunsOn(chainId)) return <OnrampLink />;
   const view = participateView(status, address);
 
   return (
@@ -78,9 +76,10 @@ export function RaffleNotice({
       <span className="pill pill-violet">Prize draw</span>
       <div className="rfbody">
         <p className="rflead">
-          Trading on {chainLabel(PROMOTION.chainId)} puts your address in a prize draw, no sign-up needed. Roughly{" "}
-          <b>{PROMOTION.qualifier}</b> of trading in a day counts, and <b>{PROMOTION.pool}</b> is paid out over{" "}
-          {PROMOTION.cadence}. After your first swap you can also <b>rate the app</b>: a minute of feedback, optional.
+          Trading on {chainLabel(PROMOTION.chainId)} puts your address in a <b>daily prize draw</b>, no sign-up needed.
+          Roughly <b>{PROMOTION.qualifier}</b> of trading in a day counts; a draw is held on days with more than three
+          participating addresses, and <b>{PROMOTION.pool}</b> is paid out over {PROMOTION.cadence}. After your first swap
+          you can also <b>rate the app</b>: a minute of feedback, optional.
         </p>
         <div className="rfactions">
           {view.kind === "connect" && (

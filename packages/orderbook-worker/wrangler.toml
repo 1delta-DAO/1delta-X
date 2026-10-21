@@ -116,10 +116,7 @@ MAX_FILLS = "50000"
 # (Free: 50) — https://developers.cloudflare.com/workers/platform/limits/ — and an
 # alarm makes ~2 RPC calls idle plus 2–3 per fill it indexes and the re-check sweep,
 # bounded by ALARM_BUDGET_SECONDS.
-# The prize draw's desk (src/raffle.ts): the live switch + the optional feedback form.
-# RAFFLE_ID "" = no draw. Times are unix seconds: fills count from RAFFLE_STARTS_AT,
-# the notice goes dark at RAFFLE_ENDS_AT. The console can override all of it without a
-# deploy. The admin token is a secret: wrangler secret put RAFFLE_ADMIN_TOKEN
+# The optional feedback form's key (src/raffle.ts); "" = no form. The draw itself is run
+# by hand off the fill index (the operator console). The admin token is a secret:
+# wrangler secret put RAFFLE_ADMIN_TOKEN
 RAFFLE_ID = "rootstock-beta-1"
-RAFFLE_STARTS_AT = ""
-RAFFLE_ENDS_AT = ""

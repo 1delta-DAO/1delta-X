@@ -11,8 +11,9 @@ type Lookup = { address: string; fills: number; firstFillAt: number | null; ente
  * can be removed on request (a data-deletion case). There is nothing to "add to the
  * draw": the Terms (§4.1) promise no registration, every trader is in.
  */
-export function SupportTab({ api, promotion }: { api: AdminApi; promotion: string }) {
+export function SupportTab({ api, promotion, onChanged }: { api: AdminApi; promotion: string; onChanged: () => Promise<void> }) {
   const [address, setAddress] = useState("");
+  const [resetId, setResetId] = useState("");
   const [found, setFound] = useState<Lookup | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -23,7 +24,7 @@ export function SupportTab({ api, promotion }: { api: AdminApi; promotion: strin
     setMsg(null);
     try {
       setMsg({ ok: true, text: await f() });
-      setFound(await api.lookup(address.trim(), promotion));
+      if (valid) setFound(await api.lookup(address.trim(), promotion));
     } catch (e) {
       setMsg({ ok: false, text: errorText(e) });
     } finally {
@@ -71,20 +72,46 @@ export function SupportTab({ api, promotion }: { api: AdminApi; promotion: strin
           </div>
           <div className="boxbody">
             <div className="adrow">
-              {found.entry && (
-                <button
-                  type="button"
-                  className="cta line"
-                  disabled={busy}
-                  onClick={() => window.confirm(`Delete the feedback of ${found.address}? Its answers are gone for good.`) && act(async () => (await api.removeEntry(found.address, promotion), "Feedback deleted."))}
-                >
-                  Delete feedback
-                </button>
-              )}
+              <button
+                type="button"
+                className="cta line"
+                disabled={busy}
+                onClick={() => window.confirm(`Delete the feedback of ${found.address}? Its answers are gone for good.`) && act(async () => (await api.removeEntry(found.address, promotion), await onChanged(), "Feedback deleted."))}
+              >
+                Delete feedback
+              </button>
             </div>
           </div>
         </section>
       )}
+
+      <section className="box addanger">
+        <div className="boxhead">
+          <span className="lbl">Reset after a rehearsal</span>
+        </div>
+        <div className="boxbody">
+          <label className="pq">
+            <span className="pqlabel">Delete every feedback form under a key (type it to confirm)</span>
+            <input className="pqtext m" value={resetId} onChange={(e) => setResetId(e.target.value)} placeholder={promotion} />
+          </label>
+          <button
+            type="button"
+            className="cta line"
+            disabled={busy || !resetId.trim()}
+            onClick={() =>
+              window.confirm(`Delete every feedback form under "${resetId.trim()}"? This cannot be undone.`) &&
+              act(async () => {
+                const r = await api.reset(resetId.trim(), resetId.trim());
+                await onChanged();
+                setResetId("");
+                return `${r.entriesRemoved} feedback form(s) removed.`;
+              })
+            }
+          >
+            Reset
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

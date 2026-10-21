@@ -6,10 +6,9 @@ bundle. The app's `/api/book` proxy cannot reach a `/raffle/admin/*` route.
 
 | Tab | What it does |
 |---|---|
-| Qualifiers | For a UTC day: every address that traded, its volume valued like the Dashboard, and ✓ at or above the qualifier; copy the qualifying addresses or the day as CSV. Our fillers and the Setup exclusion list are left out. The draw itself is done by hand from this list (the Terms promise no registration and leave criteria, timing and amounts to 1delta). |
+| Qualifiers | A start day and a number of days. Per UTC day: every address that traded, its volume valued like the Dashboard, ✓ at or above the qualifier; copy the qualifying addresses or everything as CSV. The qualifier and the exclusion list (our own nine addresses by default; add team wallets) are kept in the browser. The draw itself is done by hand from this list; nothing here configures it. |
 | Feedback | Per-question tallies of the optional feedback forms, every form with its answers, CSV download. |
-| Support | Look up an address: fills, first fill, feedback. Delete its feedback on request. |
-| Setup | The live switch for the app's notice: promotion id, window, daily qualifier, exclusion list. Overrides the deploy's `RAFFLE_*` without a deploy. Reset a promotion's feedback after a rehearsal. |
+| Support | Look up an address: fills, first fill, feedback. Delete its feedback on request. Reset the forms after a rehearsal. |
 
 Every action is a `/raffle/admin/*` call that the orderbook worker authorises with
 its `RAFFLE_ADMIN_TOKEN` secret. The console asks for the token and keeps it only
@@ -89,4 +88,4 @@ Access keeps the page itself private. The admin token is still what authorises e
 
 ### Check it
 
-Open the console URL, pass Access, sign in with the token, then go to Setup & tests → **Run checks**. Every line should be ✓, except "Inside its window" before the start date.
+Open the console URL, pass Access, sign in with the token: the header shows the feedback key and count, and Qualifiers opens on yesterday.

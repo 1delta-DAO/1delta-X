@@ -40,7 +40,7 @@ const DEFAULT: Promotion = {
   // generously. Never state a figure here the operator would have to defend to the cent.
   qualifier: "US$20",
   pool: "around 100 USDRIF",
-  cadence: "roughly ten daily draws of about 10 USDRIF",
+  cadence: "roughly ten draws of about 10 USDRIF",
   support: "",
 };
 

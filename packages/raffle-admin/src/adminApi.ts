@@ -8,24 +8,6 @@ import type { FillWire } from "@app/lib/dashboard";
  * token is the worker's `RAFFLE_ADMIN_TOKEN`; the page keeps it in sessionStorage.
  */
 
-export interface RaffleConfig {
-  id: string;
-  startsAt: number;
-  endsAt: number;
-  qualifierUsd: number;
-  exclude: string[];
-}
-
-export interface AdminConfig {
-  source: "env" | "admin" | "disabled" | "none";
-  effective: RaffleConfig | null;
-  env: RaffleConfig | null;
-  live: boolean;
-  now: number;
-  chainId: number;
-  questions: Question[];
-}
-
 export interface AdminEntry {
   address: string;
   enteredAt: number;
@@ -37,13 +19,6 @@ export interface AdminEntry {
   note: string | null;
 }
 
-export interface PromotionRow {
-  promotion: string;
-  entries: number;
-  firstEntry: number | null;
-  lastUpdate: number | null;
-}
-
 export class AdminError extends Error {
   constructor(
     message: string,
@@ -52,9 +27,6 @@ export class AdminError extends Error {
     super(message);
   }
 }
-
-/** "No end" on the worker is MAX_SAFE_INTEGER. */
-export const NO_END = Number.MAX_SAFE_INTEGER;
 
 export class AdminApi {
   constructor(
@@ -78,11 +50,6 @@ export class AdminApi {
     return json as T;
   }
 
-  config = () => this.req<AdminConfig>("GET", "/raffle/admin/config");
-  saveConfig = (c: RaffleConfig) => this.req<AdminConfig>("PUT", "/raffle/admin/config", { ...c, endsAt: c.endsAt === NO_END ? undefined : c.endsAt });
-  disable = () => this.req<AdminConfig>("PUT", "/raffle/admin/config", { disabled: true });
-  revertToEnv = () => this.req<AdminConfig>("DELETE", "/raffle/admin/config");
-  promotions = () => this.req<{ promotions: PromotionRow[] }>("GET", "/raffle/admin/promotions");
   entries = (promotion?: string) => this.req<{ promotion: string; questions: Question[]; count: number; entries: AdminEntry[] }>("GET", "/raffle/admin/entries", undefined, promotion);
   removeEntry = (address: string, promotion?: string) => this.req<{ removed: boolean }>("DELETE", `/raffle/admin/entries/${address.toLowerCase()}`, undefined, promotion);
   lookup = (address: string, promotion?: string) =>
@@ -93,9 +60,8 @@ export class AdminApi {
       promotion,
     );
   reset = (promotion: string, confirm: string) => this.req<{ entriesRemoved: number }>("POST", "/raffle/admin/reset", { promotion, confirm });
-
-  /** Public routes, for the self-test (what a visitor / a tester sees). */
-  publicSummary = () => fetch(`${this.base}/raffle`).then((r) => r.json() as Promise<{ live: boolean; promotion?: string; feedback?: number }>);
+  /** Public: the feedback form's key on this book, if any. */
+  summary = () => fetch(`${this.base}/raffle`).then((r) => r.json() as Promise<{ feedbackForm: boolean; promotion?: string; feedback?: number }>);
 }
 
 /** Every indexed fill since `fromSec` (newest first, paged), for the daily qualifier list. */

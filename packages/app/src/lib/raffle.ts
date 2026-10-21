@@ -2,19 +2,17 @@ import { answersHash, feedbackTypedData, type ParticipationAnswers } from "@1del
 import type { Address, Hex } from "viem";
 
 /**
- * The prize draw's client side: the orderbook worker's `/raffle` desk (src/raffle.ts
- * there) and the decisions the notice makes from it — what the feedback control shows,
- * and whether the connected wallet has a prize to claim. There is NO entry (TC §4.1):
- * every wallet that trades is in. The worker enforces every rule again.
+ * The prize draw's client side. The draw itself is fixed copy (config/promotion.ts) and
+ * is evaluated by hand; nothing on the orderbook configures it. The worker's `/raffle`
+ * desk only keeps the optional feedback form, and this decides what the feedback
+ * control shows. There is NO entry (TC §4.1): every wallet that trades is in.
  */
 
+/** `GET /raffle/status/:address`. */
 export interface RaffleStatus {
-  live: boolean;
+  /** The book keeps a feedback form (RAFFLE_ID set). */
+  feedbackForm: boolean;
   promotion?: string;
-  /** What the desk marks a day as qualifying at; the notice says "about" this. */
-  qualifierUsd?: number;
-  startsAt?: number;
-  endsAt?: number | null;
   chainId?: number;
   address?: string;
   traded?: boolean;
@@ -25,7 +23,7 @@ export interface RaffleStatus {
 
 /** What the feedback control shows. Feedback is optional and changes nothing about the draw. */
 export type ParticipateView =
-  /** No draw on the desk (or no desk in this build): no control at all. */
+  /** No feedback form on this book (or no book in this build): no control at all. */
   | { kind: "hidden" }
   | { kind: "connect" }
   /** Connected, no fill as maker yet: ratings come from users, so the form waits. */
@@ -34,7 +32,7 @@ export type ParticipateView =
   | { kind: "entered"; enteredAt: number };
 
 export function participateView(status: RaffleStatus | null, address: string | null): ParticipateView {
-  if (!status || !status.live || !status.promotion) return { kind: "hidden" };
+  if (!status || !status.feedbackForm || !status.promotion) return { kind: "hidden" };
   if (!address) return { kind: "connect" };
   if (status.address && status.address.toLowerCase() !== address.toLowerCase()) return { kind: "hidden" };
   if (status.entered) return { kind: "entered", enteredAt: status.enteredAt ?? 0 };
@@ -47,11 +45,11 @@ export async function fetchRaffleStatus(base: string, address: string, init?: Re
   return (await res.json()) as RaffleStatus;
 }
 
-/** `GET /raffle` — the public entrant count for the notice. */
-export async function fetchRaffleSummary(base: string, init?: RequestInit): Promise<{ live: boolean; feedback?: number; qualifierUsd?: number }> {
+/** `GET /raffle` — the feedback count for the notice. */
+export async function fetchRaffleSummary(base: string, init?: RequestInit): Promise<{ feedbackForm: boolean; promotion?: string; feedback?: number }> {
   const res = await fetch(`${base}/raffle`, { ...init, headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(`the orderbook answered ${res.status}`);
-  return (await res.json()) as { live: boolean; feedback?: number; qualifierUsd?: number };
+  return (await res.json()) as { feedbackForm: boolean; promotion?: string; feedback?: number };
 }
 
 export interface TypedDataSigner {

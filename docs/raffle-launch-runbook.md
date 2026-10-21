@@ -6,7 +6,7 @@ orderbook worker's `RAFFLE_ADMIN_TOKEN`. It has four tabs:
 - **Qualifiers**: each UTC day's addresses and volumes, who reached the qualifier, copy the list.
 - **Feedback**: tallies of the optional feedback, every form, CSV download.
 - **Support**: look up an address, delete its feedback on request.
-- **Setup**: the live switch, the window, the qualifier, the exclusion list, reset.
+- **Support** also resets the feedback forms after a rehearsal. There is no setup: the draw is fixed copy in the app and is run by hand.
 
 The CLI steps below are the offline equivalent.
 
@@ -24,47 +24,30 @@ only when the steps in §1 are done.
 
 TC.md must not change (reviewed).
 
-### The live configuration (rootstock-beta-1)
+## 2. The orderbook worker
 
-The deploy sets `RAFFLE_ID = "rootstock-beta-1"` in `wrangler.toml`, so the desk is
-live as soon as the worker is deployed; the console's Setup tab adjusts the rest
-without a deploy.
+The only raffle-related settings on the worker are `RAFFLE_ID = "rootstock-beta-1"`
+in `wrangler.toml` (the key the optional feedback forms are stored under) and the
+`RAFFLE_ADMIN_TOKEN` secret for the console:
 
-| Setting | Value |
-|---|---|
-| Promotion id | `rootstock-beta-1` |
-| Starts | the announcement day, 00:00 UTC (fills before it do not unlock the feedback form) |
-| Notice goes dark | leave empty; switch off by hand when the pot is paid out |
-| Daily qualifier | $20 (what the Qualifiers tab marks ✓; the notice says "roughly") |
-| Excluded from the qualifier list | the addresses below plus every team member's personal wallet |
-
-Addresses to exclude (our fillers `0xcafe…083a`, `0x5987…6cD1`, `0x48db…32F1` are excluded automatically; list them anyway), pasteable:
-
-```
-0x00001d4754680958E7f8fe42D60842Ebde4Cb30D
-0xcafe35944e3195d59b4a354Ea23D60a0445c083a
-0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287
-0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1
-0x5987A4AFE1b680DAC657506B69C56b06FFe86cD1
-0xdadE4B0F9dEa9f2CC371E07f76653971b2c62C04
-0xda2Db66B3Ae47a1f5F89640666b7802423828c8b
-0xeBbBf5719B699a450b2537852E4286A7e69Bb1aD
-0xB6107a1DEa7Ae04129aBc27ce607249049f3C735
+```sh
+cd packages/orderbook-worker
+wrangler secret put RAFFLE_ADMIN_TOKEN        # a long random string; keep it in the password manager
 ```
 
-(deployer, filler operator, solver v1/v2/v3, sandboxes v1/v2/v3, NativeUnwrapModule)
+Nothing on the worker or the console configures the draw. The app states it as fixed
+copy (`VITE_PROMOTION` on the app's Pages project: `{"live":false}` hides the notice;
+`qualifier`, `pool` and `cadence` are the three strings it shows), and the operator
+evaluates each day by hand (§4).
 
 ## 3. Rehearsal, then the live end-to-end test
 
-On the console, save a throwaway id such as `rehearsal-1` with the qualifier set to
-$1. The rehearsal is public while it runs, so anyone could enter it, but a reset
-removes every entry.
+There is nothing to set up for a rehearsal: trade from your own wallet, then check
+the console.
 
-1. Run **Run checks**. Every line should be ✓.
-2. Do the steps below from your own wallet.
-3. Open **Qualifiers** for today (UTC): your wallet should be listed with its volume.
-4. Under Setup, **Reset promotion** `rehearsal-1`.
-5. Save the real id.
+1. Do the steps below from your own wallet.
+2. Open **Qualifiers** for today (UTC): your wallet should be listed with its volume.
+3. Under Support, **Reset** `rootstock-beta-1` afterwards to drop your test feedback.
 
 Steps from your wallet (real funds, small):
 
@@ -88,10 +71,11 @@ with edge cases: someone a little late or early, a day a few cents short.
 Announced: around 100 USDRIF, roughly ten daily draws of about 10 USDRIF, a day
 counts from roughly $20 of trading.
 
-1. Console → **Qualifiers**: pick yesterday (UTC). The table shows every address that
-   traded, its volume valued like the Dashboard, and ✓ at or above the qualifier. Look
-   at any `unsized` rows (fills the book could not price) before deciding. Our fillers
-   and the Setup exclusion list are left out.
+1. Console → **Qualifiers**: it opens on yesterday (UTC); set "From" and "Days" for a
+   range. Each day's table shows every address that traded, its volume valued like the
+   Dashboard, and ✓ at or above the qualifier. Look at any `unsized` rows (fills the
+   book could not price) before deciding. The exclusion box starts with our own nine
+   addresses; add the team's wallets once, the browser remembers them.
 2. Fewer than about three qualifiers: skip the day and let the 10 USDRIF ride on the
    next one. Otherwise **Copy qualifying addresses** and pick one at random the way you
    announced (e.g. a published block hash modulo the count, or any method you can show).
@@ -102,7 +86,8 @@ counts from roughly $20 of trading.
    there if you want one before paying.
 5. Pay from the treasury wallet, publish the payout tx. Keep a simple ledger (day, list
    size, winner, tx) in the team drive; the console stores none of it.
-6. When about 100 USDRIF has been paid out: Setup → **Switch off**.
+6. When about 100 USDRIF has been paid out: hide the notice with `VITE_PROMOTION='{"live":false}'`
+   on the app's Pages project and redeploy.
 
 ## 5. Close
 
@@ -111,4 +96,4 @@ The form collects no contact details, so there is nothing personal to delete.
 
 Use **Download CSV** under Feedback, or call `GET /raffle/admin/entries`.
 
-Use **Switch off** on the console; the app hides the notice as soon as the desk says it is not live.
+Hide the notice with `VITE_PROMOTION='{"live":false}'` on the app's Pages project and redeploy.

@@ -51,11 +51,8 @@ export default defineConfig({
                 CONFIRMATIONS: "0",
                 MAX_LOG_RANGE: "100",
                 BINDING_KEY: "test-binding-key",
-                // The prize draw's desk (test/raffle.test.ts): open from 2020 to 2100; the
-                // test fills' block times (helpers.ts) are ~2023.
+                // The feedback form's key (test/raffle.test.ts).
                 RAFFLE_ID: "test-draw",
-                RAFFLE_STARTS_AT: "1600000000",
-                RAFFLE_ENDS_AT: "4102444800",
                 RAFFLE_ADMIN_TOKEN: "test-admin-token",
               },
               serviceBindings: {

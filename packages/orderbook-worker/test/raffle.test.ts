@@ -3,7 +3,7 @@ import { answersHash, feedbackTypedData, type ParticipationAnswers } from "@1del
 import type { Address, Hex } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { parseRaffleConfig, raffleConfigOf } from "../src/config";
+import { raffleIdOf } from "../src/config";
 import { ADMIN_HEADER, CLIENT_IP_HEADER } from "../src/do";
 import worker from "../src/index";
 import { alice, bob, call, fillLog, freshBook, mallory, now, resetWorld, signed, testEnv, world } from "./helpers";
@@ -69,7 +69,7 @@ describe("prize draw — participation entries", () => {
     const book = await bookWithFill(alice);
 
     const before = await call(book, "GET", `/raffle/status/${bob.address}`, undefined, ip());
-    expect(before.body).toMatchObject({ live: true, promotion: PROMOTION, qualifierUsd: 20, traded: false, entered: false });
+    expect(before.body).toMatchObject({ feedbackForm: true, promotion: PROMOTION, traded: false, entered: false });
     // No swap → no entry, whatever the app shows.
     expect((await call(book, "POST", "/raffle/entries", await form(bob), ip())).status).toBe(403);
 
@@ -82,11 +82,11 @@ describe("prize draw — participation entries", () => {
 
     const after = await call(book, "GET", `/raffle/status/${alice.address}`, undefined, ip());
     expect(after.body).toMatchObject({ traded: true, entered: true });
-    const list = await call(book, "GET", "/raffle/entrants", undefined, ip());
-    expect(list.body).toMatchObject({ promotion: PROMOTION, count: 1, entrants: [{ address: alice.address.toLowerCase() }] });
-    // The public list carries no answers.
-    expect(JSON.stringify(list.body)).not.toContain("answers");
-    expect((await call(book, "GET", "/raffle", undefined, ip())).body).toMatchObject({ live: true, feedback: 1 });
+    const list = await admin(book, "GET", "/raffle/admin/entries");
+    expect(list.body).toMatchObject({ promotion: PROMOTION, count: 1, entries: [{ address: alice.address.toLowerCase(), source: "signed" }] });
+    // The public summary carries a count only, never answers or signatures.
+    expect(JSON.stringify((await call(book, "GET", "/raffle", undefined, ip())).body)).not.toMatch(/answers|signature/);
+    expect((await call(book, "GET", "/raffle", undefined, ip())).body).toMatchObject({ feedbackForm: true, feedback: 1 });
   });
 
   it("refuses a forged participant, another promotion, a stale or bad form; the Terms are not part of feedback", async () => {
@@ -103,7 +103,7 @@ describe("prize draw — participation entries", () => {
     const signedBody = JSON.parse(await form(alice)) as Record<string, unknown>;
     const tampered = JSON.stringify({ ...signedBody, answers: { ...ANSWERS, ease: 1 } });
     expect((await call(book, "POST", "/raffle/entries", tampered, ip())).status).toBe(401);
-    expect((await call(book, "GET", "/raffle/entrants", undefined, ip())).body.count).toBe(0);
+    expect((await call(book, "GET", "/raffle", undefined, ip())).body.feedback).toBe(0);
   });
 
   it("lets a newer form replace the answers and refuses replaying the older one", async () => {
@@ -135,15 +135,6 @@ describe("prize draw — participation entries", () => {
     expect((await admin(book, "POST", "/raffle/admin/purge-contacts")).status).toBe(404);
   });
 
-  it("closes entries at RAFFLE_ENDS_AT", async () => {
-    const book = await bookWithFill(alice);
-    world.offset = 4_102_444_800 - Math.floor(Date.now() / 1000) + 10;
-    const res = await call(book, "POST", "/raffle/entries", await form(alice), ip());
-    expect(res.status).toBe(403);
-    expect(String(res.body.error)).toMatch(/ended/);
-    expect((await call(book, "GET", `/raffle/status/${alice.address}`, undefined, ip())).body.live).toBe(false);
-  });
-
   it("the entry worker sets the admin header only for the right bearer token", async () => {
     const get = (auth?: string) =>
       worker.fetch(
@@ -160,33 +151,12 @@ describe("prize draw — participation entries", () => {
 });
 
 describe("prize draw — admin", () => {
-  const cfg = { id: "rehearsal-1", startsAt: 1_600_000_000, endsAt: 4_102_444_800, qualifierUsd: 20, exclude: [] as string[] };
 
   it("every admin route needs the admin header", async () => {
     const book = freshBook();
-    for (const [m, p] of [["GET", "/raffle/admin/config"], ["PUT", "/raffle/admin/config"], ["POST", "/raffle/admin/reset"], ["GET", "/raffle/admin/promotions"], ["DELETE", `/raffle/admin/entries/${alice.address}`]] as const) {
+    for (const [m, p] of [["GET", "/raffle/admin/entries"], ["POST", "/raffle/admin/reset"], ["GET", `/raffle/admin/status?address=${alice.address}`], ["DELETE", `/raffle/admin/entries/${alice.address}`]] as const) {
       expect((await call(book, m, p, m === "GET" || m === "DELETE" ? undefined : "{}", ip())).status).toBe(403);
     }
-  });
-
-  it("overrides the env config, switches it off, and falls back to the env", async () => {
-    const book = freshBook();
-    expect((await admin(book, "GET", "/raffle/admin/config")).body).toMatchObject({ source: "env", effective: { id: PROMOTION } });
-    expect((await admin(book, "PUT", "/raffle/admin/config", { ...cfg, id: "Bad Id" })).status).toBe(400);
-    expect((await admin(book, "PUT", "/raffle/admin/config", cfg)).body).toMatchObject({ source: "admin", effective: { id: "rehearsal-1" }, live: true });
-    expect((await call(book, "GET", "/raffle", undefined, ip())).body).toMatchObject({ live: true, promotion: "rehearsal-1" });
-    expect((await admin(book, "PUT", "/raffle/admin/config", { disabled: true })).body).toMatchObject({ source: "disabled", effective: null });
-    expect((await call(book, "GET", "/raffle", undefined, ip())).body).toEqual({ live: false });
-    expect((await admin(book, "DELETE", "/raffle/admin/config")).body).toMatchObject({ source: "env", effective: { id: PROMOTION } });
-  });
-
-  it("the exclusion list is saved lower-case and published to the console only", async () => {
-    const book = freshBook();
-    const saved = await admin(book, "PUT", "/raffle/admin/config", { ...cfg, exclude: [alice.address.toUpperCase().replace("0X", "0x")] });
-    expect(saved.body).toMatchObject({ source: "admin", effective: { exclude: [alice.address.toLowerCase()] } });
-    expect((await admin(book, "PUT", "/raffle/admin/config", { ...cfg, exclude: ["nope"] })).status).toBe(400);
-    expect((await admin(book, "PUT", "/raffle/admin/config", { ...cfg, testers: [] })).status).toBe(400); // retired field
-    expect(JSON.stringify((await call(book, "GET", "/raffle", undefined, ip())).body)).not.toContain("exclude");
   });
 
   it("removes a feedback form by hand (a data-deletion request); forms cannot be added by hand", async () => {
@@ -194,16 +164,16 @@ describe("prize draw — admin", () => {
     expect((await admin(book, "POST", "/raffle/admin/entries", { address: alice.address, note: "x" })).status).toBe(405);
     expect((await call(book, "POST", "/raffle/entries", await form(alice), ip())).status).toBe(201);
     expect((await admin(book, "DELETE", `/raffle/admin/entries/${alice.address}`)).body).toMatchObject({ removed: true });
-    expect((await call(book, "GET", "/raffle/entrants", undefined, ip())).body.count).toBe(0);
+    expect((await call(book, "GET", "/raffle", undefined, ip())).body.feedback).toBe(0);
   });
 
-  it("lists promotions and a reset wipes a promotion's feedback", async () => {
+  it("a reset wipes a promotion's feedback", async () => {
     const book = await bookWithFill(alice);
     await call(book, "POST", "/raffle/entries", await form(alice), ip());
-    expect((await admin(book, "GET", "/raffle/admin/promotions")).body).toMatchObject({ promotions: [{ promotion: PROMOTION, entries: 1 }] });
+    expect(((await admin(book, "GET", "/raffle/admin/entries")).body.entries as unknown[]).length).toBe(1);
     expect((await admin(book, "POST", "/raffle/admin/reset", { promotion: PROMOTION })).status).toBe(400);
     expect((await admin(book, "POST", "/raffle/admin/reset", { promotion: PROMOTION, confirm: PROMOTION })).body).toMatchObject({ entriesRemoved: 1 });
-    expect((await admin(book, "GET", "/raffle/admin/promotions")).body).toEqual({ promotions: [] });
+    expect(((await admin(book, "GET", "/raffle/admin/entries")).body.entries as unknown[]).length).toBe(0);
   });
 
   it("looks an address up for a support case", async () => {
@@ -212,14 +182,10 @@ describe("prize draw — admin", () => {
   });
 });
 
-describe("raffleConfigOf", () => {
-  it("validates the console's config and the env defaults", () => {
-    expect(parseRaffleConfig({ id: "x" })).toEqual({ id: "x", startsAt: 0, endsAt: Number.MAX_SAFE_INTEGER, qualifierUsd: 20, exclude: [] });
-    expect(() => parseRaffleConfig({ id: "x", qualifierUsd: -1 })).toThrow(/qualifierUsd/);
-    expect(() => parseRaffleConfig({ id: "x", startsAt: 10, endsAt: 5 })).toThrow(/after/);
-    expect(raffleConfigOf({})).toBeUndefined();
-    expect(raffleConfigOf({ RAFFLE_ID: "x" })).toMatchObject({ id: "x", startsAt: 0, qualifierUsd: 20 });
-    expect(() => raffleConfigOf({ RAFFLE_ID: "Bad Id" })).toThrow(/RAFFLE_ID/);
-    expect(() => raffleConfigOf({ RAFFLE_ID: "x", RAFFLE_STARTS_AT: "10", RAFFLE_ENDS_AT: "5" })).toThrow(/after/);
+describe("raffleIdOf", () => {
+  it("validates RAFFLE_ID", () => {
+    expect(raffleIdOf({})).toBeUndefined();
+    expect(raffleIdOf({ RAFFLE_ID: "x" })).toBe("x");
+    expect(() => raffleIdOf({ RAFFLE_ID: "Bad Id" })).toThrow(/RAFFLE_ID/);
   });
 });

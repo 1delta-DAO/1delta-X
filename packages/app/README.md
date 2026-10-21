@@ -748,8 +748,9 @@ and `components/Raffle.tsx` is the only place it is mentioned in the trading UI.
 copy is deliberately vague ("roughly", "around"): TC.md (reviewed, frozen) leaves the
 criteria, timing and amounts to 1delta, and the draw is evaluated by hand from the fill
 index (packages/raffle-admin), so nothing in the app has to be defended to the cent.
-There is NO ENTRY (TC §4.1): every wallet that trades is in. The notice is shown only
-while the orderbook's desk (`/raffle`) says the draw is live, so the desk is the switch.
+There is NO ENTRY (TC §4.1): every wallet that trades is in. The notice is shown
+while `VITE_PROMOTION` says `live` (the only switch); the orderbook adds nothing but
+the feedback form.
 After a first fill as maker the notice offers **Rate the app**: `components/Participate.tsx`,
 an optional feedback form whose gasless EIP-712 signature (SDK `feedbackTypedData`,
 which the worker re-verifies) proves the answers come from a user. It changes nothing

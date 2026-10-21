@@ -5,7 +5,7 @@ import { zeroAddress } from "viem";
 import { pinnedToken } from "@app/config/markets";
 import { entriesCsv, tallyFeedback, type AdminEntry } from "../src/adminApi";
 import type { FillWire } from "@app/lib/dashboard";
-import { ALWAYS_EXCLUDED, DAY, dayCsv, dayRows, dayWindow, pricesFrom, utcMidnight } from "../src/qualifiers";
+import { ALWAYS_EXCLUDED, DAY, dayCsv, dayRows, daysFrom, dayWindow, pricesFrom, rangeCsv, rangeRows, utcMidnight } from "../src/qualifiers";
 import { buildOrder } from "@app/lib/order";
 
 const A = "0x00000000000000000000000000000000000000a1";
@@ -63,6 +63,21 @@ describe("the daily qualifier list", () => {
     expect(dayRows({ fills: [fill(sell(ALWAYS_EXCLUDED[0]!, 7n, 100), FROM + 1)], day: DAY_STR, prices: pricesFrom({}), qualifierUsd: 20, exclude: [] })).toEqual([]);
     expect(dayCsv(DAY_STR, rows).split("\n")[1]).toBe(`${DAY_STR},${A},25,1,0,true`);
     expect(() => dayWindow("25-10-2026")).toThrow(/YYYY-MM-DD/);
+  });
+
+  it("groups a range of days, oldest first, and writes one CSV line per address and day", () => {
+    expect(daysFrom(DAY_STR, 3)).toEqual(["2026-10-25", "2026-10-26", "2026-10-27"]);
+    expect(daysFrom(DAY_STR, 0)).toEqual(["2026-10-25"]);
+    const fills = [fill(sell(A, 1n, 25), FROM + 100), fill(sell(B, 2n, 30), FROM + DAY + 100)];
+    const groups = rangeRows({ fills, days: daysFrom(DAY_STR, 2), prices: pricesFrom({}), qualifierUsd: 20, exclude: [] });
+    expect(groups.map((g) => [g.day, g.rows.map((r) => r.address)])).toEqual([
+      ["2026-10-25", [A]],
+      ["2026-10-26", [B]],
+    ]);
+    expect(rangeCsv(groups).trim().split("\n")).toEqual(["day,address,usd,fills,unsized,qualifies", `2026-10-25,${A},25,1,0,true`, `2026-10-26,${B},30,1,0,true`]);
+    // The default exclusion list is the beta's own addresses, lower-case.
+    expect(ALWAYS_EXCLUDED).toHaveLength(9);
+    expect(ALWAYS_EXCLUDED.every((a) => a === a.toLowerCase() && /^0x[0-9a-f]{40}$/.test(a))).toBe(true);
   });
 });
 

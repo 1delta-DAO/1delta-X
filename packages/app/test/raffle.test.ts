@@ -6,12 +6,12 @@ import { answersHash, feedbackTypedData } from "@1delta-x/sdk";
 import { participateView, submitParticipation, type RaffleStatus } from "../src/lib/raffle";
 
 const A = "0x00000000000000000000000000000000000000a1";
-const base: RaffleStatus = { live: true, promotion: "p", address: A, traded: false, entered: false };
+const base: RaffleStatus = { feedbackForm: true, promotion: "p", address: A, traded: false, entered: false };
 
 describe("participateView — the optional feedback control", () => {
-  it("hides without a live draw and asks to connect without a wallet", () => {
+  it("hides without a feedback form on the book and asks to connect without a wallet", () => {
     expect(participateView(null, A)).toEqual({ kind: "hidden" });
-    expect(participateView({ live: false }, A)).toEqual({ kind: "hidden" });
+    expect(participateView({ feedbackForm: false }, A)).toEqual({ kind: "hidden" });
     expect(participateView(base, null)).toEqual({ kind: "connect" });
   });
   it("locks until a first swap, opens after it, and shows the feedback once given", () => {

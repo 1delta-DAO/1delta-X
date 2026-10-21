@@ -10,11 +10,21 @@ import { nettedUsd, toDashFill, type FillWire } from "@app/lib/dashboard";
  * Nothing here decides the draw; it is the list the operator draws from.
  */
 
-/** The beta's own fillers: never a qualifying "maker" even if one ever signs an order. */
+/**
+ * The beta's own addresses (docs/deployment-rootstock-beta.md): never a qualifying
+ * "maker". The console's exclusion box starts from this list; team wallets are added
+ * there and remembered in the browser.
+ */
 export const ALWAYS_EXCLUDED = [
-  "0xcafe35944e3195d59b4a354ea23d60a0445c083a",
-  "0x5987a4afe1b680dac657506b69c56b06ffe86cd1",
-  "0x48dbdc43507767bd51ec0af2cb9bfa5e35b332f1",
+  "0x00001d4754680958e7f8fe42d60842ebde4cb30d", // deployer
+  "0xcafe35944e3195d59b4a354ea23d60a0445c083a", // filler operator (inventory / spot)
+  "0x33ccacb24da5c7f335819da877fc03e4bf62e287", // AggregatorFillSolver v1
+  "0x48dbdc43507767bd51ec0af2cb9bfa5e35b332f1", // AggregatorFillSolver v2
+  "0x5987a4afe1b680dac657506b69c56b06ffe86cd1", // AggregatorFillSolver v3
+  "0xdade4b0f9dea9f2cc371e07f76653971b2c62c04", // RouteSandbox v1
+  "0xda2db66b3ae47a1f5f89640666b7802423828c8b", // RouteSandbox v2
+  "0xebbbf5719b699a450b2537852e4286a7e69bb1ad", // RouteSandbox v3
+  "0xb6107a1dea7ae04129abc27ce607249049f3c735", // NativeUnwrapModule
 ];
 const STABLES = ["USD₮0", "USDT", "USDC.e", "USDRIF"];
 export const DAY = 86_400;
@@ -72,7 +82,23 @@ export function dayRows(args: { fills: readonly FillWire[]; day: string; prices:
     .sort((a, b) => Number(b.qualifies) - Number(a.qualifies) || b.usd - a.usd || a.address.localeCompare(b.address));
 }
 
+/** The days of a range: `start` and the following `days - 1` days, oldest first. */
+export function daysFrom(start: string, days: number): string[] {
+  const [from] = dayWindow(start);
+  return Array.from({ length: Math.max(1, Math.min(60, Math.floor(days))) }, (_, i) => dateOf(from + i * DAY));
+}
+
+/** Several days at once, oldest first (one `dayRows` per day). */
+export function rangeRows(args: { fills: readonly FillWire[]; days: readonly string[]; prices: Record<string, number>; qualifierUsd: number; exclude: readonly string[] }): Array<{ day: string; rows: DayRow[] }> {
+  return args.days.map((day) => ({ day, rows: dayRows({ ...args, day }) }));
+}
+
+/** Rows as CSV, one line per address and day, qualifiers first within a day. */
+export function rangeCsv(groups: ReadonlyArray<{ day: string; rows: readonly DayRow[] }>): string {
+  return [`day,address,usd,fills,unsized,qualifies`, ...groups.flatMap((g) => g.rows.map((r) => `${g.day},${r.address},${r.usd},${r.fills},${r.unsized},${r.qualifies}`))].join("\n") + "\n";
+}
+
 /** The day's list as CSV, qualifiers first. */
 export function dayCsv(day: string, rows: readonly DayRow[]): string {
-  return [`day,address,usd,fills,unsized,qualifies`, ...rows.map((r) => `${day},${r.address},${r.usd},${r.fills},${r.unsized},${r.qualifies}`)].join("\n") + "\n";
+  return rangeCsv([{ day, rows }]);
 }

@@ -65,66 +65,12 @@ export interface Env {
   /** Shared secret proving a request came through the app's service binding. */
   BINDING_KEY?: string;
   /**
-   * The prize draw's desk (src/raffle.ts): the live switch and the optional feedback
-   * form. `RAFFLE_ID` unset/"" = no draw: every `/raffle` route answers `live: false`.
-   * `RAFFLE_STARTS_AT` / `RAFFLE_ENDS_AT` are unix seconds: a fill counts from the
-   * start, the notice and the form go dark at the end.
+   * The key the optional feedback forms are stored under (src/raffle.ts); unset/"" =
+   * no feedback form. The draw itself is run by hand off the fill index.
    */
   RAFFLE_ID?: string;
-  RAFFLE_STARTS_AT?: string;
-  RAFFLE_ENDS_AT?: string;
-  /** Secret: `authorization: Bearer …` for `GET /raffle/export` and `POST /raffle/purge-contacts`. */
+  /** Secret: `authorization: Bearer …` for the `/raffle/admin/*` routes (the operator console). */
   RAFFLE_ADMIN_TOKEN?: string;
-}
-
-/**
- * The running prize draw. From `RAFFLE_*` (the deploy-time default), or — when an
- * admin saved one — from the Durable Object (`PUT /raffle/admin/config`), which wins.
- * The draw itself (who qualified each day, who won) is evaluated by hand from the fill
- * index; this is only the live switch, the window and the feedback form's key.
- */
-export interface RaffleConfig {
-  id: string;
-  /** Unix seconds; 0 = open since forever. */
-  startsAt: number;
-  /** Unix seconds; the notice and the form go dark here. */
-  endsAt: number;
-  /** The daily qualifier the operator evaluates against, USD (published for the console; the desk does not price). */
-  qualifierUsd: number;
-  /** Addresses the console's qualifier list never shows (team, fillers) — lower-case. */
-  exclude: string[];
-}
-
-const ADDR_RE = /^0x[0-9a-f]{40}$/;
-
-function addrArray(v: unknown, name: string): string[] {
-  if (v === undefined || v === null) return [];
-  if (!Array.isArray(v)) throw new Error(`${name} must be a list of addresses`);
-  const out = v.map((a) => (typeof a === "string" ? a.trim().toLowerCase() : ""));
-  for (const a of out) if (!ADDR_RE.test(a)) throw new Error(`${name}: "${a}" is not an address`);
-  if (out.length > 1000) throw new Error(`${name}: at most 1000 addresses`);
-  return [...new Set(out)];
-}
-
-/** Validate a raffle config from JSON (the operator console). Throws a readable message. */
-export function parseRaffleConfig(raw: unknown): RaffleConfig {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("config must be an object");
-  const r = raw as Record<string, unknown>;
-  for (const k of Object.keys(r)) if (!["id", "startsAt", "endsAt", "qualifierUsd", "exclude"].includes(k)) throw new Error(`unknown field "${k}"`);
-  const id = typeof r.id === "string" ? r.id.trim() : "";
-  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error("id must be lower-case letters, digits and dashes (≤ 64)");
-  const int = (v: unknown, fallback: number, name: string) => {
-    if (v === undefined || v === null || v === "") return fallback;
-    const n = Number(v);
-    if (!Number.isSafeInteger(n) || n < 0) throw new Error(`${name} must be unix seconds`);
-    return n;
-  };
-  const startsAt = int(r.startsAt, 0, "startsAt");
-  const endsAt = int(r.endsAt, Number.MAX_SAFE_INTEGER, "endsAt");
-  if (endsAt <= startsAt) throw new Error("endsAt must be after startsAt");
-  const q = r.qualifierUsd === undefined ? 20 : Number(r.qualifierUsd);
-  if (!Number.isFinite(q) || q < 0) throw new Error("qualifierUsd must be a non-negative number");
-  return { id, startsAt, endsAt, qualifierUsd: q, exclude: addrArray(r.exclude, "exclude") };
 }
 
 export interface WorkerConfig {
@@ -183,8 +129,8 @@ export interface WorkerConfig {
   alarmBudgetMs: number;
   /** Bounds of one lens re-check sweep (the library Verifier's bisection). */
   verifier: { maxRecheckCalls: number; maxSweepMs: number };
-  /** The prize draw, or absent when none is configured. */
-  raffle?: RaffleConfig;
+  /** The feedback forms' key (`RAFFLE_ID`), or absent: no form. */
+  raffleId?: string;
 }
 
 /** Re-check cadence when the RPC serves no `eth_getLogs` (see {@link WorkerConfig.revalidateNoLogsSeconds}). */
@@ -246,15 +192,12 @@ function addrList(v: string | undefined, name: string): Address[] {
     .map((s) => addr(s, name));
 }
 
-/** `RAFFLE_*`, validated; undefined when no draw is configured. */
-export function raffleConfigOf(env: Pick<Env, "RAFFLE_ID" | "RAFFLE_STARTS_AT" | "RAFFLE_ENDS_AT">): RaffleConfig | undefined {
+/** `RAFFLE_ID`, validated; undefined when unset. */
+export function raffleIdOf(env: Pick<Env, "RAFFLE_ID">): string | undefined {
   const id = (env.RAFFLE_ID ?? "").trim();
   if (!id) return undefined;
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error("RAFFLE_ID must be lower-case letters, digits and dashes (≤ 64)");
-  const startsAt = num(env.RAFFLE_STARTS_AT, 0, "RAFFLE_STARTS_AT");
-  const endsAt = num(env.RAFFLE_ENDS_AT, Number.MAX_SAFE_INTEGER, "RAFFLE_ENDS_AT");
-  if (endsAt <= startsAt) throw new Error("RAFFLE_ENDS_AT must be after RAFFLE_STARTS_AT");
-  return { id, startsAt, endsAt, qualifierUsd: 20, exclude: [] };
+  return id;
 }
 
 export function loadConfig(env: Env): WorkerConfig {
@@ -270,7 +213,7 @@ export function loadConfig(env: Env): WorkerConfig {
   const allowed = [...addrList(env.ALLOWED_TOKENS, "ALLOWED_TOKENS")];
   if (allowed.length && nativeBalance !== zeroAddress && !allowed.includes(nativeBalance)) allowed.push(nativeBalance);
   const rpc = rpcUrlOf(env);
-  const raffle = raffleConfigOf(env);
+  const raffleId = raffleIdOf(env);
   const configured = settlement !== zeroAddress && permit3 !== zeroAddress && lens !== zeroAddress && !!rpc.url;
 
   const admission: AdmissionPolicy = {
@@ -334,6 +277,6 @@ export function loadConfig(env: Env): WorkerConfig {
     // 16 bisection calls and 60 s per sweep: with the 8 s transport timeout (and one
     // retry) a dead RPC costs one sweep about a minute, not (chunks + 64) × 16 s.
     verifier: { maxRecheckCalls: 16, maxSweepMs: 60_000 },
-    ...(raffle ? { raffle } : {}),
+    ...(raffleId ? { raffleId } : {}),
   };
 }
