@@ -111,7 +111,7 @@ describe("prize draw — participation entries", () => {
     expect(list.body).toMatchObject({ promotion: PROMOTION, count: 1, entrants: [{ address: alice.address.toLowerCase() }] });
     // The public list carries no answers.
     expect(JSON.stringify(list.body)).not.toContain("answers");
-    expect((await call(book, "GET", "/raffle", undefined, ip())).body).toMatchObject({ live: true, entrants: 1, rules: { periodDays: 3, prizes: [25], prizeToken: "USDRIF" } });
+    expect((await call(book, "GET", "/raffle", undefined, ip())).body).toMatchObject({ live: true, entrants: 1, rules: { periodDays: 1, prizes: [10], prizeToken: "USDRIF" } });
   });
 
   it("refuses a forged participant, another promotion, a stale or bad form; the Terms are not part of feedback", async () => {
@@ -302,7 +302,7 @@ describe("raffleConfigOf", () => {
 
   it("is off without RAFFLE_ID and validates the rest", () => {
     expect(raffleConfigOf({})).toBeUndefined();
-    expect(raffleConfigOf({ RAFFLE_ID: "x", RAFFLE_TERMS_HASH: TERMS })).toMatchObject({ id: "x", startsAt: 0, periodDays: 3, minQualifiers: 3, prizes: [25], prizeToken: "USDRIF", onePrizePerAddress: true });
+    expect(raffleConfigOf({ RAFFLE_ID: "x", RAFFLE_TERMS_HASH: TERMS })).toMatchObject({ id: "x", startsAt: 0, periodDays: 1, minQualifiers: 3, prizes: [10], prizeToken: "USDRIF", onePrizePerAddress: true });
     expect(() => raffleConfigOf({ RAFFLE_ID: "Bad Id", RAFFLE_TERMS_HASH: TERMS })).toThrow(/RAFFLE_ID/);
     expect(() => raffleConfigOf({ RAFFLE_ID: "x" })).toThrow(/RAFFLE_TERMS_HASH/);
     expect(() => raffleConfigOf({ RAFFLE_ID: "x", RAFFLE_TERMS_HASH: TERMS, RAFFLE_STARTS_AT: "10", RAFFLE_ENDS_AT: "5" })).toThrow(/after/);

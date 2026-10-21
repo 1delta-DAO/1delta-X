@@ -38,8 +38,8 @@ const DEFAULT: Promotion = {
   // Fallback copy only: with a live orderbook the notice states the rules the desk
   // publishes (periodDays, qualifier, prizes; lib/raffle.ts `describeRules`).
   qualifier: "US$20",
-  pool: "around 200 USDRIF",
-  cadence: "roughly eight draws, one every three days",
+  pool: "around 100 USDRIF",
+  cadence: "roughly ten daily draws",
   support: "",
 };
 

@@ -177,11 +177,15 @@ export function parseRaffleConfig(raw: unknown): RaffleConfig {
   };
 }
 
-/** The rules a draw starts from (2026-10-21: 3-day periods, 25 USDRIF to one winner, at least 3 qualifiers). */
+/**
+ * The rules a draw starts from: what was announced (around 100 USDRIF over roughly ten
+ * DAILY draws — TC §2.1 says daily too), 10 USDRIF to one winner per day, at least 3
+ * qualifiers or the prize rides on the next day.
+ */
 export const DEFAULT_RULES: Pick<RaffleConfig, "periodDays" | "minQualifiers" | "prizes" | "prizeToken" | "onePrizePerAddress"> = {
-  periodDays: 3,
+  periodDays: 1,
   minQualifiers: 3,
-  prizes: [25],
+  prizes: [10],
   prizeToken: "USDRIF",
   onePrizePerAddress: true,
 };

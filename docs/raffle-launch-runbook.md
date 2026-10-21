@@ -85,10 +85,12 @@ whether or not it gave feedback; the feedback form is optional. The rules below 
 "number, timing and amount of prizes" (§6.2); the announcement line and the app notice
 are that communication. A winner confirms eligibility before payout (§7.5) by signing
 the claim in the app. The rules are console settings (Setup tab) and are published on
-`GET /raffle`, so the app notice always states what the desk runs. Defaults: a draw every **3 UTC
-days** from the start date, one ticket per day an address trades ≥ $20, at least
-**3** qualifying addresses, **25 USDRIF** to one winner, one prize per address while
-others are waiting. With 200 USDRIF that is 8 draws over 24 days.
+`GET /raffle`, so the app notice always states what the desk runs. Defaults match
+what was announced (around 100 USDRIF over roughly ten daily draws; TC §2.1 says
+daily draws too): a draw **every UTC day** from the start date, one ticket per day an
+address trades ≥ $20, at least **3** qualifying addresses or the prize is carried to
+the next day, **10 USDRIF** to one winner, one prize per address while others are
+waiting. Ten days = 100 USDRIF if every draw runs.
 
 On the console, Draws tab:
 

@@ -34,9 +34,9 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
   const [end, setEnd] = useState<number | null>(base && base.endsAt < NO_END ? base.endsAt : null);
   const [qualifier, setQualifier] = useState(String(base?.qualifierUsd ?? 20));
   const [exclude, setExclude] = useState((base?.exclude ?? []).join("\n"));
-  const [periodDays, setPeriodDays] = useState(String(base?.periodDays ?? 3));
+  const [periodDays, setPeriodDays] = useState(String(base?.periodDays ?? 1));
   const [minQualifiers, setMinQualifiers] = useState(String(base?.minQualifiers ?? 3));
-  const [prizes, setPrizes] = useState((base?.prizes ?? [25]).join(", "));
+  const [prizes, setPrizes] = useState((base?.prizes ?? [10]).join(", "));
   const [prizeToken, setPrizeToken] = useState(base?.prizeToken ?? "USDRIF");
   const [onePrize, setOnePrize] = useState(base?.onePrizePerAddress ?? true);
   const [busy, setBusy] = useState(false);
