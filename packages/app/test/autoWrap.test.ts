@@ -205,8 +205,6 @@ describe("spendable / Max / insufficient with RBTC", () => {
     expect(balanceState({ connected: false, onChain: false, value: 1, symbol: "WRBTC", wrappable: { value: 1, symbol: "RBTC" } }).kind).toBe(
       "disconnected",
     );
-    expect(balanceState({ connected: true, onChain: false, value: 1, symbol: "WRBTC", wrappable: { value: 1, symbol: "RBTC" } }).kind).toBe(
-      "wrong-network",
-    );
+    expect(balanceState({ connected: true, onChain: false, value: 1, symbol: "WRBTC", wrappable: { value: 1, symbol: "RBTC" } }).kind).toBe("ok");
   });
 });

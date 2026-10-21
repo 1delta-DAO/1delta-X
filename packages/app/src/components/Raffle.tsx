@@ -31,12 +31,15 @@ export function RaffleNotice({
   address,
   signer,
   onConnect,
+  onSwitch,
 }: {
   chainId: number;
   address: Address | null;
   /** Null while the wallet is off the draw's chain. */
   signer: TypedDataSigner | null;
   onConnect: () => void;
+  /** Set while the wallet is on another network: signing asks to switch first. */
+  onSwitch?: () => void;
 }) {
   const runs = promotionRunsOn(chainId) && !!ORDERBOOK_URL;
   const [status, setStatus] = useState<RaffleStatus | null>(null);
@@ -137,6 +140,7 @@ export function RaffleNotice({
           updating={view.kind === "entered"}
           onClose={() => setOpen(false)}
           onEntered={refresh}
+          {...(onSwitch ? { onSwitch } : {})}
         />
       )}
     </aside>

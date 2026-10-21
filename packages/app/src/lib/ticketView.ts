@@ -231,7 +231,8 @@ export function balanceState(a: {
   wrappable?: { value: number; symbol: string } | null;
 }): BalanceState {
   if (!a.connected) return { kind: "disconnected", text: "Connect wallet" };
-  if (!a.onChain) return { kind: "wrong-network", text: "Wrong network" };
+  // The wallet's network does not matter for a balance (read over the public RPC
+  // off-chain); signing asks to switch (2026-10-21).
   if (a.value === undefined) return { kind: "loading", text: "…" };
   const w = a.wrappable;
   if (w && w.value > 0) {

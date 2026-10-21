@@ -171,7 +171,8 @@ describe("balances", () => {
 
   it("balanceState: connect / wrong network / loading / a number", () => {
     expect(balanceState({ connected: false, onChain: false, value: 1, symbol: "WRBTC" })).toEqual({ kind: "disconnected", text: "Connect wallet" });
-    expect(balanceState({ connected: true, onChain: false, value: 1, symbol: "WRBTC" }).kind).toBe("wrong-network");
+    // Another network: the balance still shows (read over the public RPC); signing asks to switch.
+    expect(balanceState({ connected: true, onChain: false, value: 1, symbol: "WRBTC" })).toEqual({ kind: "ok", text: "1 WRBTC", value: 1 });
     expect(balanceState({ connected: true, onChain: true, value: undefined, symbol: "WRBTC" }).kind).toBe("loading");
     expect(balanceState({ connected: true, onChain: true, value: 0.1234, symbol: "WRBTC" })).toEqual({ kind: "ok", text: "0.1234 WRBTC", value: 0.1234 });
   });

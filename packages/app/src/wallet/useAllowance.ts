@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useState } from "react";
 import { createPublicClient, createWalletClient, custom, erc20Abi, type Address } from "viem";
 
 import { chainById } from "../config/chains";
+import { readClientFor } from "./readClient";
 import { readFundingState, userTxGas, verifyDeployment, type Reader } from "../lib/chain";
 import { fundingCalls, planFunding, revokeCalls, type Call, type FundingState, type WrapSource } from "../lib/funding";
 import { IDLE, inFlight, isRejection, runTx, txReducer, type TxState } from "../lib/txFlow";
@@ -71,15 +72,14 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
-    if (!provider || !owner || !token || !permit3 || !settlement || !onChain) {
+    const read = owner ? readClientFor(chainId, provider, onChain) : null;
+    if (!read || !owner || !token || !permit3 || !settlement) {
       setFunding(undefined);
       return;
     }
-    const config = chainById(chainId);
-    if (!config) return;
 
     let alive = true;
-    const client = createPublicClient({ chain: config.chain, transport: custom(provider) }) as unknown as Reader;
+    const client = read as unknown as Reader;
     void verifyDeployment(client, { settlement, permit3 })
       .then(() => {
         if (alive) setMismatch(null);

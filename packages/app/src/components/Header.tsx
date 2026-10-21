@@ -109,13 +109,15 @@ function Connect({
       <div className="menu" ref={ref}>
         <button
           type="button"
-          className={`netpill${wrongChain ? " warnpill" : ""}`}
+          className="netpill"
           aria-haspopup="true"
           aria-expanded={open}
+          // Another network is fine until something is signed: the sign button then asks to switch (2026-10-21).
+          title={wrongChain ? `Your wallet is on another network. You will be asked to switch to ${chainLabel(chainId)} when you sign.` : undefined}
           onClick={() => setOpen((o) => !o)}
         >
           <i className="dot" data-live={wrongChain ? "stale" : "live"} />
-          {wrongChain ? `Wrong network · ${shortHex(wallet.address, 6, 4)}` : shortHex(wallet.address, 6, 4)}
+          {shortHex(wallet.address, 6, 4)}
           <span className="car">▼</span>
         </button>
         {open && (

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { createPublicClient, custom } from "viem";
 
 import { chainById } from "../config/chains";
+import { readClientFor } from "../wallet/readClient";
 import type { DeploymentConfig } from "../config/deploymentConfig";
 import { marketById } from "../config/markets";
 import { readGasPrice } from "../lib/chain";
@@ -24,10 +24,9 @@ const NATIVE_POLL_MS = 60_000;
 function useGasPrice(provider: EIP1193Provider | null | undefined, chainId: number, onChain: boolean): bigint | null {
   const [wei, setWei] = useState<{ chainId: number; wei: bigint | null }>({ chainId, wei: null });
   useEffect(() => {
-    const config = chainById(chainId);
-    if (!provider || !onChain || !config || !FLOOR_PROFILES[chainId]) return;
+    const client = readClientFor(chainId, provider, onChain);
+    if (!client || !FLOOR_PROFILES[chainId]) return;
     let alive = true;
-    const client = createPublicClient({ chain: config.chain, transport: custom(provider) });
     const load = async () => {
       const v = await readGasPrice(client, FILLER_GAS_PRICE_MIN_MULT_BPS);
       if (alive) setWei({ chainId, wei: v });
@@ -39,7 +38,7 @@ function useGasPrice(provider: EIP1193Provider | null | undefined, chainId: numb
       clearInterval(t);
     };
   }, [provider, chainId, onChain]);
-  return onChain && wei.chainId === chainId ? wei.wei : null;
+  return wei.chainId === chainId ? wei.wei : null;
 }
 
 /**

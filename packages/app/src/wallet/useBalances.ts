@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createPublicClient, custom, erc20Abi, formatUnits } from "viem";
+import { erc20Abi, formatUnits } from "viem";
 
-import { chainById } from "../config/chains";
+import { readClientFor } from "./readClient";
 import type { EIP1193Provider } from "./eip6963";
 
 export interface BalanceArgs {
@@ -53,16 +53,16 @@ export function useBalances(args: BalanceArgs): Balances {
   }, [address, chainId]);
 
   useEffect(() => {
-    if (!provider || !address || !onChain) {
+    // Read whichever network the wallet is on: off-chain, through the public RPC.
+    const client = address ? readClientFor(chainId, provider, onChain) : null;
+    if (!address || !client) {
       setBalances({});
       setNative(undefined);
       return;
     }
-    const config = chainById(chainId);
-    if (!config || !tokens.length) return;
+    if (!tokens.length) return;
 
     let alive = true;
-    const client = createPublicClient({ chain: config.chain, transport: custom(provider) });
 
     // Per token, not one joined read: a single unresponsive ERC-20 would
     // otherwise leave every balance on the chain showing "—".

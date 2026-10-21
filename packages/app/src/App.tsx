@@ -55,6 +55,7 @@ import { MARKET_SLIPPAGE_BPS, expiryLabel, planTicket, requiredInputWei, sliceCa
 import type { RestingOrder, Side, SliceSpec } from "./lib/types";
 import { useAllowance } from "./wallet/useAllowance";
 import { useBalances } from "./wallet/useBalances";
+import { readClientFor } from "./wallet/readClient";
 import { useSigner } from "./wallet/useSigner";
 import { useWallet } from "./wallet/useWallet";
 
@@ -136,16 +137,15 @@ export default function App() {
   }, [wallet.address]);
 
   // When an order leaves the book without a reported fill, the book checks
-  // `Settlement.filled(hash)` (and a fill-once order's nonce bit) — through the wallet's provider (the CSP allows no
-  // direct RPC), and only for orders signed on the chain the wallet is on.
+  // `Settlement.filled(hash)` (and a fill-once order's nonce bit) — through the wallet's provider while it is on
+  // `chainId`, else the chain's public RPC (wallet/readClient.ts), only for orders signed on `chainId`.
   useEffect(() => {
-    const provider = wallet.provider;
-    const config = chainById(chainId);
-    if (!provider || !onChain || !config) {
+    const client = readClientFor(chainId, wallet.provider, onChain);
+    if (!client) {
       orderbook.setFillReader?.(null);
       return;
     }
-    const reader = createPublicClient({ chain: config.chain, transport: custom(provider) }) as unknown as Reader;
+    const reader = client as unknown as Reader;
     orderbook.setFillReader?.(async (signed) =>
       signed.deployed && signed.deployment.chainId === chainId
         ? readFillState(reader, signed.deployment.settlement, signed.order, signed.hash)
@@ -551,6 +551,10 @@ export default function App() {
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [signError, setSignError] = useState<string | null>(null);
   const [connectRequest, setConnectRequest] = useState(0);
+  // CHAIN SWITCH ON SIGN (2026-10-21): nothing in the app needs the wallet on Rootstock
+  // until the user signs or sends something (reads go over the public RPC). Every such
+  // action, clicked while the wallet is elsewhere, asks the wallet to switch instead.
+  const switchFirst = wallet.address && !onChain ? () => void wallet.switchChain(chainId) : null;
   // The page on screen, kept in the URL hash (#dashboard) so it can be linked and survives a reload.
   const [view, setView] = useState<AppView>(() => (typeof location !== "undefined" && location.hash === "#dashboard" ? "dashboard" : "trade"));
   const showView = useCallback((v: AppView) => {
@@ -837,6 +841,7 @@ export default function App() {
     async (o: RestingOrder) => {
       setOrderError(null);
       const domain = o.signed?.deployment ?? deployment;
+      if (wallet.address && !onChain) return void wallet.switchChain(chainId);
       if (!signer || !wallet.address || !domain) {
         setOrderError(`Connect a wallet on ${chainLabel(marketById(o.marketId).chainId)} to sign a cancel`);
         return;
@@ -851,7 +856,7 @@ export default function App() {
         setOrderError(errorText(e));
       }
     },
-    [deployment, signer, wallet.address],
+    [deployment, signer, wallet, onChain, chainId],
   );
 
   /**
@@ -865,6 +870,7 @@ export default function App() {
   const unwrap = useCallback(async () => {
     const address = wrappedSymbol ? pinnedToken(chainId, wrappedSymbol)?.address : undefined;
     const config = chainById(chainId);
+    if (wallet.address && !onChain) return void wallet.switchChain(chainId);
     if (!wallet.provider || !wallet.address || !onChain || !address || !config || !wrappedWei || wrappedWei <= 0n) return;
     const amount = fmtWei(wrappedWei);
     const ok = window.confirm(
@@ -890,7 +896,7 @@ export default function App() {
       rawBalances.refresh();
       allowanceState.refresh();
     }
-  }, [wrappedSymbol, chainId, wallet.provider, wallet.address, onChain, wrappedWei, nativeSymbol, rawBalances, allowanceState]);
+  }, [wrappedSymbol, chainId, wallet, onChain, wrappedWei, nativeSymbol, rawBalances, allowanceState]);
 
   /**
    * HARD cancel: `Settlement.cancelOrders(nonces)` for every signed order
@@ -905,6 +911,10 @@ export default function App() {
       setCancelling(o);
       const signedOrders = o.signedOrders ?? (o.signed ? [o.signed] : []);
       const settlement = signedOrders[0]?.deployment.settlement;
+      if (wallet.address && !onChain) {
+        setCancelling(null);
+        return void wallet.switchChain(chainId);
+      }
       if (!wallet.provider || !wallet.address || !onChain || !settlement || !signedOrders[0]?.deployed) {
         setOrderError("On-chain cancel needs a deployed Settlement and a wallet on its chain");
         return;
@@ -937,13 +947,14 @@ export default function App() {
         // the status line (cancelTx) says what happened
       }
     },
-    [onChain, wallet.address, wallet.provider, cancelTx],
+    [onChain, wallet, chainId, cancelTx],
   );
 
   /** Sign a TWAP's next due slice — the same order as slice 1, on a fresh nonce. */
   const signSlice = useCallback(
     async (o: RestingOrder) => {
       setOrderError(null);
+      if (wallet.address && !onChain) return void wallet.switchChain(chainId);
       if (!o.sliceSpec || !o.slices) return;
       try {
         const signedSlices = o.signedOrders?.length ?? (o.signed ? 1 : 0);
@@ -960,7 +971,7 @@ export default function App() {
         setOrderError(errorText(e));
       }
     },
-    [signDraft],
+    [signDraft, wallet, onChain, chainId],
   );
 
   // The order card's one status line: the in-flight phase until the book holds the
@@ -1033,6 +1044,7 @@ export default function App() {
             address={wallet.address}
             signer={signer}
             onConnect={() => setConnectRequest((n) => n + 1)}
+            {...(switchFirst ? { onSwitch: switchFirst } : {})}
           />
         ) : (
           chainId === 30 && <OnrampLink />

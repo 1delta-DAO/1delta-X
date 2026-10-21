@@ -19,6 +19,7 @@ export function ParticipateSheet({
   updating,
   onClose,
   onEntered,
+  onSwitch,
 }: {
   base: string;
   /** Null while the wallet is not on the draw's chain (EIP-712 signs the chain id). */
@@ -28,6 +29,8 @@ export function ParticipateSheet({
   promotion: string;
   /** Feedback already on file: this replaces the answers. */
   updating: boolean;
+  /** The wallet is on another network: the sign button asks to switch instead (2026-10-21). */
+  onSwitch?: () => void;
   onClose: () => void;
   onEntered: () => void;
 }) {
@@ -112,10 +115,15 @@ export function ParticipateSheet({
                 never published.
               </p>
               {error && <p className="signerr">{error}</p>}
-              {!signer && <p className="warn pqfine">Switch your wallet to Rootstock to sign.</p>}
-              <button type="button" className="cta" disabled={!signer || !!problem || busy} onClick={submit}>
-                {busy ? "Waiting for your wallet…" : updating ? "Sign & update" : "Sign & send feedback"}
-              </button>
+              {!signer && onSwitch ? (
+                <button type="button" className="cta" onClick={onSwitch}>
+                  Switch to Rootstock
+                </button>
+              ) : (
+                <button type="button" className="cta" disabled={!signer || !!problem || busy} onClick={submit}>
+                  {busy ? "Waiting for your wallet…" : updating ? "Sign & update" : "Sign & send feedback"}
+                </button>
+              )}
               {problem && Object.keys(answers).length > 0 && <p className="pqfine">{problem}</p>}
             </>
           )}
