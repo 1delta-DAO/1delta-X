@@ -718,7 +718,7 @@ export default function App() {
         setReceipt({
           hash: order.id,
           headline: `${fmtAmt(amount)} ${payToken} in ${ticket.slices} slices, ${ticket.everyMin} min apart`,
-          detail: `slice 1 signed at ${fmtPrice(plan.price, tick)} ${ticket.market.quote}/${ticket.market.base} — sign each later slice from Open orders when it comes due`,
+          detail: `slice 1 signed at ${fmtPrice(plan.price, tick)} ${ticket.market.quote}/${ticket.market.base}; sign each later slice from Open orders when it comes due`,
           note: `slice 1 of ${ticket.slices} signed · ${BOOK_IS_REMOTE ? "posted to the orderbook" : "simulated book"}${undeployed}`,
         });
         ticket.clearAmount();
@@ -800,13 +800,13 @@ export default function App() {
         note: `${
           BOOK_IS_REMOTE
             ? quoted
-              ? "signed at the filler's quote · posted to the orderbook — it fills at the quote within a block or two, down to your minimum if the price moves; not filled after ~2 blocks? cancel and re-quote"
+              ? "signed at the filler's quote · posted to the orderbook. It fills at the quote within a block or two, down to your minimum if the price moves; not filled after ~2 blocks? cancel and re-quote"
               : plan.kind === "limit"
-                ? `signed · posted to the orderbook at your limit — fills whenever the market, net of the filler's network fee, reaches it (lives ${expiryLabel(ticket.expiry)})`
-                : "signed · posted to the orderbook · awaiting a filler — fills appear when they settle on-chain"
+                ? `signed · posted to the orderbook at your limit; fills whenever the market, net of the filler's network fee, reaches it (lives ${expiryLabel(ticket.expiry)})`
+                : "signed · posted to the orderbook · awaiting a filler; fills appear when they settle on-chain"
             : plan.kind === "limit"
               ? "signed · resting in the simulated book"
-              : "signed · settlement simulated — nothing was broadcast"
+              : "signed · settlement simulated, nothing was broadcast"
         }${undeployed}`,
       });
       ticket.clearAmount();

@@ -195,7 +195,7 @@ describe("spendable / Max / insufficient with RBTC", () => {
       kind: "ok",
       text: "0.05995 WRBTC",
       value: 0.01 + 0.04995,
-      wrap: { tag: "+RBTC", note: "0.01 WRBTC + 0.04995 RBTC — the RBTC is wrapped to WRBTC when you sign (gas reserve kept)" },
+      wrap: { tag: "+RBTC", note: "0.01 WRBTC + 0.04995 RBTC; the RBTC is wrapped to WRBTC when you sign (gas reserve kept)" },
     });
     // nothing wrappable → the plain line
     expect(balanceState({ connected: true, onChain: true, value: 0.01, symbol: "WRBTC", wrappable: { value: 0, symbol: "RBTC" } }).text).toBe(

@@ -141,7 +141,7 @@ export async function signGaslessPermit(
     reader.readContract({ address: a.token, abi: ERC2612_ABI, functionName: "nonces", args: [a.owner] }) as Promise<bigint>,
   ]);
   if (onChain.toLowerCase() !== erc2612DomainSeparator(domain).toLowerCase()) {
-    throw new Error("the token's permit domain is not the one this app was built for — use approvals instead");
+    throw new Error("the token's permit domain is not the one this app was built for. Use approvals instead");
   }
   const value = permitValue(a.order, a.token);
   if (value === 0n) throw new Error("the order spends none of this token");

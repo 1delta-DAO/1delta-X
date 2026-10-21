@@ -32,8 +32,8 @@ export function GasZipLink({ children = "get RBTC for gas on Gas.zip" }: { child
 export function OnrampLink() {
   return (
     <p className="onramp">
-      No funds on Rootstock? <UsdtLink>Bridge USD₮0 from Arbitrum, Ethereum, Polygon and more on usdt0.to</UsdtLink> — it
-      trades with no RBTC needed — or <GasZipLink />.
+      No funds on Rootstock? <UsdtLink>Bridge USD₮0 from Arbitrum, Ethereum, Polygon and more on usdt0.to</UsdtLink> (it
+      trades with no RBTC needed) or <GasZipLink />.
     </p>
   );
 }

@@ -23,7 +23,7 @@ async function page(
   if (!res.ok)
     throw new Error(
       res.status === 429
-        ? "the orderbook is rate-limiting us — retrying shortly"
+        ? "the orderbook is rate-limiting us; retrying shortly"
         : `orderbook answered ${res.status}`,
     );
   const body = (await res.json()) as {

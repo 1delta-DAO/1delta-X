@@ -241,7 +241,7 @@ export function balanceState(a: {
       value: a.value + w.value,
       wrap: {
         tag: `+${w.symbol}`,
-        note: `${fmtBalance(a.value)} ${a.symbol} + ${fmtBalance(w.value)} ${w.symbol} — the ${w.symbol} is wrapped to ${a.symbol} when you sign (gas reserve kept)`,
+        note: `${fmtBalance(a.value)} ${a.symbol} + ${fmtBalance(w.value)} ${w.symbol}; the ${w.symbol} is wrapped to ${a.symbol} when you sign (gas reserve kept)`,
       },
     };
   }

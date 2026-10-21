@@ -174,9 +174,9 @@ async function httpError(res: Response, what: "order" | "cancel"): Promise<Order
   const s = res.status;
   const msg =
     s === 503
-      ? `The orderbook is temporarily unavailable (${reason}). The ${what} was NOT posted — try again.`
+      ? `The orderbook is temporarily unavailable (${reason}). The ${what} was NOT posted. Try again.`
       : s === 429
-        ? `The orderbook is rate-limiting this address (${reason}). The ${what} was NOT posted — wait and try again.`
+        ? `The orderbook is rate-limiting this address (${reason}). The ${what} was NOT posted. Wait and try again.`
         : s === 422
           ? `The orderbook rejected the ${what}: ${reason}`
           : s === 403
@@ -423,7 +423,7 @@ export class RemoteOrderbook implements OrderbookApi {
   async place(req: PlaceOrderRequest): Promise<RestingOrder> {
     if (!req.signed) throw new Error("the book only holds signed orders");
     if (!req.signed.deployed) {
-      throw new Error("No Settlement is deployed on this chain — the order was signed but cannot be posted to the orderbook");
+      throw new Error("No Settlement is deployed on this chain. The order was signed but cannot be posted to the orderbook");
     }
     // Throws on anything but 202 — so a rejected order never becomes a row.
     await postOrder(this.doFetch, this.baseUrl, req.signed);
@@ -493,7 +493,7 @@ export class RemoteOrderbook implements OrderbookApi {
   async addSlice(orderHash: string, signed: SignedOrder): Promise<void> {
     const o = this.rows.find((x) => x.id === orderHash);
     if (!o?.slices || o.cancelled || o.slices.signed >= o.slices.total) return;
-    if (!signed.deployed) throw new Error("No Settlement is deployed on this chain — the slice cannot be posted");
+    if (!signed.deployed) throw new Error("No Settlement is deployed on this chain, so the slice cannot be posted");
     await postOrder(this.doFetch, this.baseUrl, signed);
     o.signedOrders = [...(o.signedOrders ?? []), signed];
     o.slices.signed += 1;
@@ -745,7 +745,7 @@ export class RemoteOrderbook implements OrderbookApi {
       // Unknown here: the (in-memory) server restarted or evicted it long ago.
       t.statusDone = true;
       if (row && !row.cancelled && !row.offBook) {
-        row.offBook = "the orderbook no longer knows this order (server restarted?) — it is still fillable on-chain until expiry";
+        row.offBook = "the orderbook no longer knows this order (server restarted?). It is still fillable on-chain until expiry";
         return true;
       }
       return false;
@@ -793,7 +793,7 @@ export class RemoteOrderbook implements OrderbookApi {
         // does not say which, and the signature may still be fillable if the maker
         // re-funds — so the row says what is known.
         row.offBook =
-          "no longer distributed by the orderbook (expired, unfunded or invalidated) — cancel on-chain to be sure it cannot fill";
+          "no longer distributed by the orderbook (expired, unfunded or invalidated). Cancel on-chain to be sure it cannot fill";
         changed = true;
       }
     }

@@ -263,7 +263,7 @@ export function OrderBook(props: OrderBookProps) {
       ) : (
         <>
           <div className={`sh sh-ask${side === "buy" ? " on" : ""}`}>
-            <span className="t">Asks — offers to sell {base}</span>
+            <span className="t">Asks: offers to sell {base}</span>
             <span className="h">
               click a row to <b>buy</b>
             </span>
@@ -312,7 +312,7 @@ export function OrderBook(props: OrderBookProps) {
           </div>
 
           <div className={`sh sh-bid${side === "sell" ? " on" : ""}`}>
-            <span className="t">Bids — offers to buy {base}</span>
+            <span className="t">Bids: offers to buy {base}</span>
             <span className="h">
               click a row to <b>sell</b>
             </span>
@@ -340,7 +340,7 @@ export function OrderBook(props: OrderBookProps) {
                 {SOURCE_NAME[v.source]} {(v.feeBps / 10_000).toFixed(2)}%{" "}
                 <b className="m">{v.pool.slice(0, 6)}…{v.pool.slice(-4)}</b>
                 {v.error
-                  ? ` — ${v.error}`
+                  ? `: ${v.error}`
                   : phaseOf(v.pool) === "loading"
                     ? ` · ${v.rungs} rungs · refreshing`
                     : ` · ${v.rungs} rungs`}
@@ -364,10 +364,10 @@ export function OrderBook(props: OrderBookProps) {
           </div>
           <p className="bknote">
             A limit order does not have to cross. Name a price the book has not reached and the part that does
-            not fill <b>rests where you put it</b> — often inside the spread, marked in the ladder above. Pool
+            not fill <b>rests where you put it</b>, often inside the spread, marked in the ladder above. Pool
             depth is priced on each pool&rsquo;s curve and grouped into price bands of {view.width} bps from the
             touch: a row&rsquo;s price is what consuming the whole band costs on average, its size and cumulative
-            are exact sums, and a band filled from several pools says so (UNI+SUSHI) — hover a row for the
+            are exact sums, and a band filled from several pools says so (UNI+SUSHI); hover a row for the
             per-pool split. Clicking a band sets your limit at its far edge, so the order fills through it.{" "}
             <b>LMT</b> rows are signed orders a filler can take at any time, each at its own price.
           </p>

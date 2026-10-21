@@ -49,7 +49,7 @@ function parse(): Promotion {
   } catch {
     // A malformed override must not take the app down, and it must not invent a
     // draw either — it degrades to the compiled-in description.
-    console.warn("VITE_PROMOTION is not valid JSON — ignoring");
+    console.warn("VITE_PROMOTION is not valid JSON, ignoring it");
     return DEFAULT;
   }
 }

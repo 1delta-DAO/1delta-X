@@ -168,7 +168,7 @@ export function assertPoolTokens(
   if (t0 === base.address && t1 === quote.address) return { baseIsToken0: true };
   if (t1 === base.address && t0 === quote.address) return { baseIsToken0: false };
   throw new Error(
-    `pool ${pool} reported ${token0}/${token1}, which is not the pinned ${market.base}/${market.quote} pair — refusing it`,
+    `pool ${pool} reported ${token0}/${token1}, which is not the pinned ${market.base}/${market.quote} pair; refusing it`,
   );
 }
 

@@ -39,7 +39,7 @@ interface OrdersProps {
 
 /** Explains, per row, what a cancel has and has not done. */
 export const SOFT_CANCEL_NOTE =
-  "hidden from the book; still fillable on-chain until expiry by anyone holding the signed order — cancel on-chain to stop that";
+  "hidden from the book; still fillable on-chain until expiry by anyone holding the signed order. Cancel on-chain to stop that";
 
 /** The wallet column, shown only while "All wallets" is picked. */
 function Wallet({ maker, account }: { maker: string | undefined; account: string | undefined }) {
@@ -113,7 +113,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
             ? "signed orders · a free cancel only hides one; cancel on-chain to make it unfillable"
             : BOOK_IS_REMOTE
               ? "fills reported by the orderbook from the chain"
-              : "simulated fills — the in-browser book broadcasts nothing"}
+              : "simulated fills: the in-browser book broadcasts nothing"}
         </span>
       </div>
 
@@ -247,7 +247,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                               type="button"
                               className="x"
                               disabled={cancelTx ? cancelTx.kind === "wallet" || cancelTx.kind === "submitted" || cancelTx.kind === "confirming" : false}
-                              title="Settlement.cancelOrders — one transaction; afterwards no filler can settle it"
+                              title="Settlement.cancelOrders: one transaction; afterwards no filler can settle it"
                               onClick={() => onHardCancel(o)}
                             >
                               Cancel on-chain
@@ -327,7 +327,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                       <td className="dim">{f.size > 0 ? f.filler : "—"}</td>
                       <td>
                         {f.simulated ? (
-                          <span className="faint" title="Produced by the in-browser mock — no transaction exists">
+                          <span className="faint" title="Produced by the in-browser mock; no transaction exists">
                             simulated
                           </span>
                         ) : f.tx ? (

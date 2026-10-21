@@ -226,7 +226,7 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
     parsed = JSON.parse(raw) as RawDeployments;
   } catch {
     // A malformed override must not take the app down.
-    console.warn("VITE_DEPLOYMENTS is not valid JSON — ignoring");
+    console.warn("VITE_DEPLOYMENTS is not valid JSON, ignoring it");
     return {};
   }
   const out: Record<number, DeploymentConfig> = {};
@@ -244,7 +244,7 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
     const lens = addr(entry.lens, false);
     const solver = addr(entry.solver, false);
     if (!settlement || !permit3 || !lens || !solver || settlement === zeroAddress || permit3 === zeroAddress) {
-      console.warn(`VITE_DEPLOYMENTS[${key}] has a missing or invalid address — treating chain ${key} as not deployed`);
+      console.warn(`VITE_DEPLOYMENTS[${key}] has a missing or invalid address; treating chain ${key} as not deployed`);
       continue;
     }
     // Per-market solver overrides: every entry must be a valid non-zero address
@@ -268,7 +268,7 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       }
     }
     if (badMarket) {
-      console.warn(`VITE_DEPLOYMENTS[${key}].marketSolvers has an invalid entry — treating chain ${key} as not deployed`);
+      console.warn(`VITE_DEPLOYMENTS[${key}].marketSolvers has an invalid entry; treating chain ${key} as not deployed`);
       continue;
     }
     // Pull-market exclusivity windows: strict, like the addresses — a typo here
@@ -288,23 +288,23 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       }
     }
     if (badWindow || !pullExclusivity) {
-      console.warn(`VITE_DEPLOYMENTS[${key}] has an invalid pullExclusivity / marketExclusivity — treating chain ${key} as not deployed`);
+      console.warn(`VITE_DEPLOYMENTS[${key}] has an invalid pullExclusivity / marketExclusivity; treating chain ${key} as not deployed`);
       continue;
     }
     const fillGas = entry.fillGas === undefined ? { ...DEFAULT_FILL_GAS } : parseFillGas(entry.fillGas);
     if (!fillGas) {
-      console.warn(`VITE_DEPLOYMENTS[${key}].fillGas is invalid — treating chain ${key} as not deployed`);
+      console.warn(`VITE_DEPLOYMENTS[${key}].fillGas is invalid; treating chain ${key} as not deployed`);
       continue;
     }
     // Optional, strict like the others: a malformed module address drops the deployment.
     const nativeUnwrap = addr(entry.nativeUnwrap, false);
     if (nativeUnwrap === null) {
-      console.warn(`VITE_DEPLOYMENTS[${key}].nativeUnwrap is invalid — treating chain ${key} as not deployed`);
+      console.warn(`VITE_DEPLOYMENTS[${key}].nativeUnwrap is invalid; treating chain ${key} as not deployed`);
       continue;
     }
     const nativeBalance = addr(entry.nativeBalance, false);
     if (nativeBalance === null) {
-      console.warn(`VITE_DEPLOYMENTS[${key}].nativeBalance is invalid — treating chain ${key} as not deployed`);
+      console.warn(`VITE_DEPLOYMENTS[${key}].nativeBalance is invalid; treating chain ${key} as not deployed`);
       continue;
     }
     out[chainId] = {

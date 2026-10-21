@@ -145,7 +145,7 @@ export function planFunding(
       blocked =
         wrap.nativeBalance < shortfall
           ? `Not enough ${sym}: wrapping ${fmtWei(shortfall)} needs more than the ${fmtWei(wrap.nativeBalance)} you hold`
-          : `Wrapping ${fmtWei(shortfall)} ${sym} would leave less than ${fmtWei(reserve)} ${sym} for gas — lower the amount`;
+          : `Wrapping ${fmtWei(shortfall)} ${sym} would leave less than ${fmtWei(reserve)} ${sym} for gas. Lower the amount`;
     }
     steps.push({ kind: "wrap", amount: shortfall });
   }

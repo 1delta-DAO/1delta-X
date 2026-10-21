@@ -93,7 +93,7 @@ export function RaffleNotice({
           {view.kind === "locked" && (
             <span className="rfstate">
               Participate unlocks after your first swap.{" "}
-              No funds on Rootstock? <UsdtLink>Bridge USD₮0 on usdt0.to</UsdtLink> — no RBTC needed — or <GasZipLink />.
+              No funds on Rootstock? <UsdtLink>Bridge USD₮0 on usdt0.to</UsdtLink> (no RBTC needed) or <GasZipLink />.
             </span>
           )}
           {view.kind === "open" && (
@@ -109,7 +109,7 @@ export function RaffleNotice({
               </button>
             </span>
           )}
-          {view.kind === "terms-mismatch" && <span className="rfstate warn">The Terms were updated — reload the page to review them before entering.</span>}
+          {view.kind === "terms-mismatch" && <span className="rfstate warn">The Terms were updated. Reload the page to review them before entering.</span>}
           {view.kind !== "locked" && (
             <span className="rfsupport">
               No funds on Rootstock? <UsdtLink>Bridge USD₮0</UsdtLink> · <GasZipLink>RBTC via Gas.zip</GasZipLink>
@@ -123,7 +123,7 @@ export function RaffleNotice({
           )}
         </div>
         <p className="rffine">
-          Winners are picked <b>at random</b> from the qualifying addresses — trading qualifies you for a draw, it
+          Winners are picked <b>at random</b> from the qualifying addresses. Trading qualifies you for a draw, it
           does not earn a prize, and no amount of volume guarantees one. Figures are approximate and the criteria,
           schedule and pool can change. Not open to U.S. Persons or persons in sanctioned jurisdictions, and USDRIF
           carries its own transfer restrictions. Winning addresses may be published.{" "}

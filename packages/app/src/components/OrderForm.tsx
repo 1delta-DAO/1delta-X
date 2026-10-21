@@ -445,7 +445,7 @@ export function OrderForm(props: OrderFormProps) {
       </span>,
       figures.live ? "" : "warn",
     ]);
-    if (!figures.live) rows.push(["Status", "DRY RUN — the filler quotes but will not fill", "warn"]);
+    if (!figures.live) rows.push(["Status", "DRY RUN: the filler quotes but will not fill", "warn"]);
     if (figures.networkFeeBps !== null) {
       rows.push([
         "Network fee share",
@@ -606,11 +606,11 @@ export function OrderForm(props: OrderFormProps) {
               ) : tooSmall ? (
                 <span className="capnote">
                   fee ≈ {fmtUsd(tooSmall.gasUsd)} &gt; this ≈ {fmtUsd(tooSmall.ticketUsd)}
-                  {mode === "twap" ? " slice" : " ticket"} — enter ≥ {fmtUsd(tooSmall.gasUsd * 2)}
+                  {mode === "twap" ? " slice" : " ticket"}: enter ≥ {fmtUsd(tooSmall.gasUsd * 2)}
                 </span>
               ) : quote && isMarket && figures?.basis !== "quote" && quote.unfilledIn > 0 && amount > 0 ? (
                 <span className="capnote">
-                  book depth {fmtAmt(quote.filledIn)} {payToken} — sweeping all at {quote.avg > 0 ? fmtPrice(quote.avg, tick) : "—"}
+                  book depth {fmtAmt(quote.filledIn)} {payToken}, sweeping all at {quote.avg > 0 ? fmtPrice(quote.avg, tick) : "—"}
                 </span>
               ) : null}
             </div>
@@ -718,7 +718,7 @@ export function OrderForm(props: OrderFormProps) {
                     <span>Minimum received</span>
                     <span className="m">{minLine}</span>
                   </div>
-                  {!figures.live && <div className="minor warn">Dry run — this quote will not be filled</div>}
+                  {!figures.live && <div className="minor warn">Dry run: this quote will not be filled</div>}
                 </>
               ) : (
                 awaitingQuote ? (
@@ -797,7 +797,7 @@ export function OrderForm(props: OrderFormProps) {
                 The filler&rsquo;s network fee (≈ {fmtUsd(limitFee.gasUsd)}, {(limitFee.share * 100).toFixed(1)}% of this{" "}
                 {mode === "twap" ? "slice" : "order"}) comes out of the fill: it fills once the market reaches ≈{" "}
                 {fmtPrice(limitFee.fillsAt, tick)} {market.quote}/{market.base}
-                {limitFee.share > 0.03 ? " — a larger order wastes less of its price on gas" : ""}
+                {limitFee.share > 0.03 ? ". A larger order wastes less of its price on gas." : ""}
               </span>
             )}
             {mode === "limit" && (
@@ -904,7 +904,7 @@ export function OrderForm(props: OrderFormProps) {
                   }`
                 : quoteStatus === "loading"
                   ? "Asking the filler for a quote…"
-                  : `Filler quote unavailable${quoteError ? ` (${quoteError.slice(0, 80)})` : ""} — the order uses the gas-sized floor.`
+                  : `Filler quote unavailable${quoteError ? ` (${quoteError.slice(0, 80)})` : ""}. The order uses the gas-sized floor.`
             }
           />
         )}
@@ -948,7 +948,7 @@ export function OrderForm(props: OrderFormProps) {
                 </span>
               )}
               {domain.deployed && (
-                <div className="domain" title="EIP-712 verifyingContract — a signature is bound to this address and chain">
+                <div className="domain" title="EIP-712 verifyingContract: a signature is bound to this address and chain">
                   signing into Settlement <b>{shortHex(domain.settlement, 8, 6)}</b> on {domain.chainLabel}
                 </div>
               )}
@@ -1014,7 +1014,7 @@ export function OrderForm(props: OrderFormProps) {
                     onClick={allowance.approve}
                   >
                     {allowance.mismatch
-                      ? "Deployment mismatch — approvals disabled"
+                      ? "Deployment mismatch: approvals disabled"
                       : allowance.covered
                         ? `✓ ${fmtAmt(allowance.required)} ${payToken} funded`
                         : allowance.approving
@@ -1049,7 +1049,7 @@ export function OrderForm(props: OrderFormProps) {
                       tabIndex={0}
                       role="img"
                       aria-label="How the approval works"
-                      title={`One transaction: approve Settlement for exactly this order's ${payToken}. An approval already at or above it (left by an earlier order) covers it: no new transaction. Settlement can only spend it through an order you signed; it stays until fills use it or you revoke it. (Makers in Permit3 strict mode approve Permit3 and grant Settlement instead — two transactions, the grant lapsing shortly after the order.)`}
+                      title={`One transaction: approve Settlement for exactly this order's ${payToken}. An approval already at or above it (left by an earlier order) covers it: no new transaction. Settlement can only spend it through an order you signed; it stays until fills use it or you revoke it. (Makers in Permit3 strict mode approve Permit3 and grant Settlement instead: two transactions, the grant lapsing shortly after the order.)`}
                     >
                       i
                     </span>
@@ -1079,17 +1079,17 @@ export function OrderForm(props: OrderFormProps) {
           <div className="gas">
             {isMarket && figures?.networkFee !== null && figures?.networkFee !== undefined ? (
               <>
-                Signing is <b>free</b> — the network fee above{allowance.gasless?.selected ? ", your permit included," : ""} is already taken out of what you receive
+                Signing is <b>free</b>: the network fee above{allowance.gasless?.selected ? ", your permit included," : ""} is already taken out of what you receive
               </>
             ) : (
               <>
-                Signing is <b>free</b> — the filler&rsquo;s network fee comes out of the fill, not your wallet
+                Signing is <b>free</b>: the filler&rsquo;s network fee comes out of the fill, not your wallet
               </>
             )}
             {allowance.gasless?.selected && !overBalance && (
               <>
                 <br />
-                no transaction to send — the filler relays your permit
+                no transaction to send, the filler relays your permit
               </>
             )}
             {allowance.spender !== null && !allowance.covered && !overBalance && (
@@ -1101,8 +1101,8 @@ export function OrderForm(props: OrderFormProps) {
             )}
           </div>
           {!domain.deployed && (
-            <div className="domain" title="EIP-712 verifyingContract — a signature is bound to this address and chain">
-              no Settlement deployed on {domain.chainLabel} — signatures are real but <b className="warn">not fillable</b>
+            <div className="domain" title="EIP-712 verifyingContract: a signature is bound to this address and chain">
+              no Settlement deployed on {domain.chainLabel}: signatures are real but <b className="warn">not fillable</b>
             </div>
           )}
           {signError && <div className="signerr">{signError}</div>}

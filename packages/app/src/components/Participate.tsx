@@ -79,7 +79,7 @@ export function ParticipateSheet({
       onEntered();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setError(/rejected|denied/i.test(msg) ? "You declined the signature — nothing was sent." : msg.split("\n")[0]!);
+      setError(/rejected|denied/i.test(msg) ? "You declined the signature. Nothing was sent." : msg.split("\n")[0]!);
     } finally {
       setBusy(false);
     }
@@ -102,7 +102,7 @@ export function ParticipateSheet({
               </h2>
               <p className="pqnote">
                 Every day you trade the qualifying amount from now on goes into that day&rsquo;s draw. Thank you for the
-                feedback — you can update it from the notice at any time.
+                feedback. You can update it from the notice at any time.
               </p>
               <button type="button" className="cta" onClick={onClose}>
                 Close
@@ -114,7 +114,7 @@ export function ParticipateSheet({
                 {updating ? "Update your answers" : "One minute, then you're in"}
               </h2>
               <p className="pqnote">
-                Your answers shape what we fix before the audited launch. Signing is free — it is a message, not a
+                Your answers shape what we fix before the audited launch. Signing is free: it is a message, not a
                 transaction.
               </p>
               {PARTICIPATION_QUESTIONS.map((q) => (
@@ -134,7 +134,7 @@ export function ParticipateSheet({
                 ))}
               </fieldset>
               <p className="pqfine">
-                Stored with your address: your answers, the signature and the time — nothing personal. Answers are
+                Stored with your address: your answers, the signature and the time. Nothing personal. Answers are
                 never published. Winners are announced by wallet address and paid to it.
               </p>
               {error && <p className="signerr">{error}</p>}

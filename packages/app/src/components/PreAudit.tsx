@@ -117,7 +117,7 @@ export function PreAuditGate({
               Token approvals are capped at the exact amount of the order you are signing. They are{" "}
               <b>not removed automatically</b>: an approval stays until a fill uses it or you revoke it (the app
               offers a one-click revoke), including after a cancel, an expiry or a partial fill. This bounds the
-              risk — it does not remove it.
+              risk; it does not remove it.
             </li>
             <li>
               Orders are signed messages. A filler can settle any order you have signed that has not expired or

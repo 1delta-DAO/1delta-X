@@ -231,7 +231,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
           // are planned against what the wrap actually left.
           const after = await reread();
           plan = planFunding(after, amount, ttlSeconds, Math.floor(Date.now() / 1000), await wrapSource());
-          if (plan.steps.some((s) => s.kind === "wrap")) throw new Error(`${nativeSymbol} wrapped, but the balance is still short — try again`);
+          if (plan.steps.some((s) => s.kind === "wrap")) throw new Error(`${nativeSymbol} wrapped, but the balance is still short. Try again`);
         }
         return fundingCalls(plan.steps, targets);
       }),

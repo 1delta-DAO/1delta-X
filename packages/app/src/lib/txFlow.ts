@@ -187,13 +187,13 @@ export function txLine(s: TxState): TxLine {
   const step = s.of > 1 ? `Step ${s.step} of ${s.of}` : "";
   switch (s.kind) {
     case "wallet":
-      return { step, text: `${s.label} — confirm in your wallet…`, tone: "busy", hash: null, retry: false };
+      return { step, text: `${s.label}: confirm in your wallet…`, tone: "busy", hash: null, retry: false };
     case "submitted":
-      return { step, text: `${s.label} — submitted`, tone: "busy", hash: s.hash, retry: false };
+      return { step, text: `${s.label}: submitted`, tone: "busy", hash: s.hash, retry: false };
     case "confirming":
       return {
         step,
-        text: `${s.label} — submitted · confirming…${s.sinceBlock !== null ? ` (sent after block ${s.sinceBlock.toString()})` : " (waiting for a block)"}`,
+        text: `${s.label}: submitted · confirming…${s.sinceBlock !== null ? ` (sent after block ${s.sinceBlock.toString()})` : " (waiting for a block)"}`,
         tone: "busy",
         hash: s.hash,
         retry: false,
@@ -201,14 +201,14 @@ export function txLine(s: TxState): TxLine {
     case "confirmed":
       return {
         step,
-        text: `${s.label} — confirmed ✓${s.block !== null ? ` in block ${s.block.toString()}` : ""}`,
+        text: `${s.label}: confirmed ✓${s.block !== null ? ` in block ${s.block.toString()}` : ""}`,
         tone: "confirmed",
         hash: s.hash,
         retry: false,
       };
     case "failed":
-      return { step, text: `${s.label} — failed: ${s.reason}`, tone: "failed", hash: s.hash, retry: true };
+      return { step, text: `${s.label} failed: ${s.reason}`, tone: "failed", hash: s.hash, retry: true };
     case "rejected":
-      return { step, text: `${s.label} — rejected in wallet`, tone: "rejected", hash: null, retry: true };
+      return { step, text: `${s.label}: rejected in wallet`, tone: "rejected", hash: null, retry: true };
   }
 }

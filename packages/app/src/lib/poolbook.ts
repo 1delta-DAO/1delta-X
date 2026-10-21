@@ -239,7 +239,7 @@ export async function fetchVenue(
       }
       if (hopOf?.other) {
         const counter = (isToken0 ? meta.token1 : meta.token0).address.toLowerCase();
-        if (counter !== hopOf.other.address.toLowerCase()) throw new Error(`pool is not the pinned ${base.symbol}/${hopOf.other.symbol} pair — refusing it`);
+        if (counter !== hopOf.other.address.toLowerCase()) throw new Error(`pool is not the pinned ${base.symbol}/${hopOf.other.symbol} pair; refusing it`);
       }
 
       // Rungs are priced net of the pool's fee (task 15), so a market quote — and the
