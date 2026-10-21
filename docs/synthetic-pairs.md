@@ -165,7 +165,7 @@ a direct market. The book marks them `LMT` as usual.
 - **Book:** `ALLOWED_TOKENS` (orderbook-worker) gained RIF, which the RIF markets
   needed anyway.
 - **Validation (the listing gate):**
-  - Command: `LIVE_RSK=1 VITE_OKU_BASE=https://omni.icarus.tools npx vitest run test/synthetic.live.test.ts`.
+  - Command: `LIVE_RSK=1 VITE_OKU_BASE=https://cush.lat.gfx.town npx vitest run test/synthetic.live.test.ts`.
   - Result on 2026-10-12: the composed book (Uniswap pools only) vs QuoterV2
     `quoteExactInput` on WRBTC →0.3 %→ USD₮0 →0.05 %→ USDRIF stayed within **0.02 bps**
     at $10 / $100 / $1k / $10k, on both sides.

@@ -2,7 +2,7 @@
  * LIVE gate for a synthetic market (docs/synthetic-pairs.md "Validation"): the composed
  * book vs Uniswap's QuoterV2 on the same multi-hop path, Rootstock mainnet.
  *
- *   LIVE_RSK=1 VITE_OKU_BASE=https://omni.icarus.tools npx vitest run test/synthetic.live.test.ts
+ *   LIVE_RSK=1 VITE_OKU_BASE=https://cush.lat.gfx.town npx vitest run test/synthetic.live.test.ts
  *
  * Skipped by default (network). Only the Uniswap (Oku) pools are composed here, so
  * both sides price the same liquidity. The app also adds Sushi's pool to hop 1, which

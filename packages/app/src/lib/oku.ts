@@ -5,11 +5,17 @@ import { asSigned, type PoolLiquidity, type RawTick } from "./univ3";
  * signup, but see {@link OKU_BASE}: its CORS policy decides whether the browser
  * may call it directly.
  *
- * Base: `https://omni.icarus.tools/{chain}/cush/{method}`, POST `{id, params}`.
+ * Base: `https://cush.lat.gfx.town/{chain}/cush/{method}`, POST `{id, params}`.
  * Spec: https://oku.trade/api (OpenAPI at unpkg.com/@gfxlabs/oku/openapi.yaml).
  */
-/** Upstream, for the two proxies that forward to it. Never called from the browser. */
-export const OKU_ORIGIN = "https://omni.icarus.tools";
+/**
+ * Upstream, for the two proxies that forward to it. Never called from the browser.
+ * MOVED 2026-10-21: `omni.icarus.tools` now answers every request with a Cloudflare
+ * block page (403); oku.trade's own bundle calls this host instead (its config
+ * `ChainRpc.omni`). Same paths, same `{id, params}` body. Keep `public/_worker.js`'s
+ * `OKU_ORIGIN` and `vite.config.ts`'s proxy target in step with it.
+ */
+export const OKU_ORIGIN = "https://cush.lat.gfx.town";
 
 /**
  * Oku is ALWAYS reached through this app's own origin, never directly.

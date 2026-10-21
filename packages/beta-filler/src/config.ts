@@ -850,7 +850,7 @@ function loadDiscovery(env: Env, onRootstock: boolean): DiscoveryConfig {
     multicall: optAddr(env, "MULTICALL3", onRootstock ? ROOTSTOCK.multicall3 : undefined),
     source: env.ROUTE_DISCOVERY_SOURCE === "indexers" ? "indexers" : "rpc",
     indexers: {
-      okuBase: env.OKU_API_BASE ?? "https://omni.icarus.tools",
+      okuBase: env.OKU_API_BASE ?? "https://cush.lat.gfx.town",
       okuChain: env.OKU_CHAIN ?? (onRootstock ? "rootstock" : ""),
       sushiSubgraph:
         env.SUSHI_V3_SUBGRAPH ?? (onRootstock ? "https://api.goldsky.com/api/public/project_clslspm3c0knv01wvgfb2fqyq/subgraphs/sushiswap/v3-rootstock-3/gn" : ""),

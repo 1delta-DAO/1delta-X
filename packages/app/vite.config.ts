@@ -36,7 +36,7 @@ export default defineConfig({
     // request path the app uses is identical in development and production.
     proxy: {
       "/api/oku": {
-        target: "https://omni.icarus.tools",
+        target: "https://cush.lat.gfx.town",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/oku/, ""),
       },

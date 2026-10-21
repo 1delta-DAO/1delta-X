@@ -22,7 +22,7 @@ import { getAddress, type Address } from "viem";
 import type { GraphPool } from "./poolGraph";
 
 export interface IndexerConfig {
-  /** Oku's cush API base (`https://omni.icarus.tools`) and chain slug (`rootstock`). */
+  /** Oku's cush API base (`https://cush.lat.gfx.town`) and chain slug (`rootstock`). */
   okuBase: string;
   okuChain: string;
   /** Sushi v3 subgraph (GraphQL) URL; "" = venue 1 from the RPC probe only. */

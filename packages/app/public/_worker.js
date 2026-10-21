@@ -24,7 +24,7 @@
  * for map entry 'BOOK_MAX_BODY_BYTES'". Tests read these values through the worker's
  * behaviour (response headers, the 413 boundary), never through an export.
  */
-const OKU_ORIGIN = "https://omni.icarus.tools";
+const OKU_ORIGIN = "https://cush.lat.gfx.town";
 const PROXY_PREFIX = "/api/oku/";
 
 /**
