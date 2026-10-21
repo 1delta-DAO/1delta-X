@@ -17,6 +17,11 @@ export interface RaffleConfig {
   qualifierUsd: number;
   exclude: string[];
   testers: string[];
+  periodDays: number;
+  minQualifiers: number;
+  prizes: number[];
+  prizeToken: string;
+  onePrizePerAddress: boolean;
 }
 
 export interface AdminConfig {
@@ -51,6 +56,27 @@ export interface PromotionRow {
 
 export interface SavedDraw extends Snapshot {
   updatedAt: number;
+  /** Winners who have confirmed eligibility (signed in the app, or recorded by an admin). */
+  claimed: string[];
+}
+
+export interface Win {
+  day: string;
+  payout: number;
+  token: string;
+  drawnAt: number;
+  claimBy: number;
+  claimed: boolean;
+  claimedAt?: number;
+}
+
+export interface Claim {
+  day: string;
+  address: string;
+  claimedAt: number;
+  source: "signed" | "manual";
+  note: string | null;
+  signature: string;
 }
 
 export class AdminError extends Error {
@@ -93,11 +119,12 @@ export class AdminApi {
   revertToEnv = () => this.req<AdminConfig>("DELETE", "/raffle/admin/config");
   promotions = () => this.req<{ promotions: PromotionRow[] }>("GET", "/raffle/admin/promotions");
   entries = (promotion?: string) => this.req<{ promotion: string; questions: Question[]; count: number; entries: AdminEntry[] }>("GET", "/raffle/admin/entries", undefined, promotion);
-  addManual = (e: { address: string; note: string; enteredAt?: number; overwrite?: boolean }, promotion?: string) =>
-    this.req<{ entry: AdminEntry }>("POST", "/raffle/admin/entries", e, promotion);
   removeEntry = (address: string, promotion?: string) => this.req<{ removed: boolean }>("DELETE", `/raffle/admin/entries/${address.toLowerCase()}`, undefined, promotion);
+  claims = (promotion?: string) => this.req<{ promotion: string; claims: Claim[] }>("GET", "/raffle/admin/claims", undefined, promotion);
+  confirmClaim = (c: { address: string; day: string; note: string }, promotion?: string) => this.req<{ claim: Claim }>("POST", "/raffle/admin/claims", c, promotion);
+  removeClaim = (day: string, address: string, promotion?: string) => this.req<{ removed: boolean }>("DELETE", `/raffle/admin/claims/${day}/${address.toLowerCase()}`, undefined, promotion);
   lookup = (address: string, promotion?: string) =>
-    this.req<{ address: string; promotion: string | null; fills: number; firstFillAt: number | null; entered: boolean; entry?: AdminEntry }>(
+    this.req<{ address: string; promotion: string | null; fills: number; firstFillAt: number | null; entered: boolean; entry?: AdminEntry; wins: Win[]; claims: Claim[] }>(
       "GET",
       `/raffle/admin/status?address=${address.toLowerCase()}`,
       undefined,

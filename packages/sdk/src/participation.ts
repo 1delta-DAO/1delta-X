@@ -1,60 +1,94 @@
 import { keccak256, toBytes, type Address, type Hex } from "viem";
 
 /**
- * THE PRIZE-DRAW PARTICIPATION FORM (2026-10-20).
+ * THE PRIZE DRAW'S TWO SIGNATURES (2026-10-21).
  *
- * Entering the trading promotion is one gasless EIP-712 signature over a feedback
- * form: the signer states the eligibility confirmations in {@link PARTICIPATION_STATEMENT}
- * (shown verbatim by the wallet), names the Terms version it accepts by hash, and
- * commits to its answers by hash. The app builds the message from
- * {@link PARTICIPATION_QUESTIONS}; the orderbook worker re-derives the same hash from
- * the posted answers and verifies the signature. Both import this one module, so the
- * form the user filled in and the form the server checks cannot drift apart.
+ * The Promotion Terms (TC.md §4.1, reviewed and frozen) say there is NO registration:
+ * every wallet that trades is considered automatically. So nothing here is an entry.
  *
- * Not an order: the domain carries no `verifyingContract`, and no contract ever reads
- * this signature. It is evidence that this address made these statements.
+ *   • FEEDBACK — optional. After a first swap, a user may rate the app; the signature
+ *     (gasless EIP-712) proves the wallet gave these answers and commits to them by
+ *     hash. It changes nothing about the draw.
+ *   • CLAIM — a drawn winner confirms eligibility before payout (TC §3, §7.5): not a
+ *     U.S. Person, not in a sanctioned jurisdiction, of legal age, accepts the Terms
+ *     (by hash), agrees to the address being published. The orderbook stores it; the
+ *     operator pays only claimed prizes.
+ *
+ * The app builds both messages from this module and the orderbook worker re-derives
+ * them, so what a user signed and what the server checks cannot drift apart. Neither
+ * is an order: the domain carries no `verifyingContract`, and no contract reads them.
  */
 
-/** The confirmations an entrant makes. Changing a word means bumping {@link PARTICIPATION_DOMAIN_VERSION}. */
-export const PARTICIPATION_STATEMENT =
-  "I confirm that I am not a U.S. Person, that I am not located in, resident in or a national of a sanctioned jurisdiction, " +
-  "and that I am of legal age where I live. I accept the Promotion Terms identified by `terms`. " +
-  "I agree that my wallet address may be published if I am selected. My answers are identified by `answers`.";
-
 export const PARTICIPATION_DOMAIN_NAME = "1delta Prize Draw";
-export const PARTICIPATION_DOMAIN_VERSION = "1";
+export const PARTICIPATION_DOMAIN_VERSION = "2";
 
-export const PARTICIPATION_TYPES = {
-  Participation: [
+/** Shown verbatim by the wallet. Changing a word means bumping {@link PARTICIPATION_DOMAIN_VERSION}. */
+export const FEEDBACK_STATEMENT = "I am giving 1delta feedback about its app. My answers are identified by `answers`. This is not an entry and changes nothing about the prize draw.";
+
+export const FEEDBACK_TYPES = {
+  Feedback: [
     { name: "participant", type: "address" },
     { name: "promotion", type: "string" },
-    { name: "terms", type: "bytes32" },
     { name: "answers", type: "bytes32" },
     { name: "statement", type: "string" },
     { name: "issuedAt", type: "uint64" },
   ],
 } as const;
 
-export interface ParticipationMessage {
+export interface FeedbackMessage {
   participant: Address;
   /** The promotion id the operator configured (e.g. "rootstock-beta-1"). */
   promotion: string;
-  /** keccak256 of the Terms text the entrant was shown. */
-  terms: Hex;
   /** {@link answersHash} of the answers. */
   answers: Hex;
-  statement: string;
   /** Unix seconds. */
   issuedAt: bigint;
 }
 
 /** The typed data to hand to `signTypedData` / `verifyTypedData`. */
-export function participationTypedData(chainId: number, m: Omit<ParticipationMessage, "statement">) {
+export function feedbackTypedData(chainId: number, m: FeedbackMessage) {
   return {
     domain: { name: PARTICIPATION_DOMAIN_NAME, version: PARTICIPATION_DOMAIN_VERSION, chainId },
-    types: PARTICIPATION_TYPES,
-    primaryType: "Participation" as const,
-    message: { ...m, statement: PARTICIPATION_STATEMENT },
+    types: FEEDBACK_TYPES,
+    primaryType: "Feedback" as const,
+    message: { ...m, statement: FEEDBACK_STATEMENT },
+  };
+}
+
+/** The eligibility confirmations a winner makes before payout (TC §3.1, §3.2, §7.5, §8). */
+export const CLAIM_STATEMENT =
+  "I claim the prize drawn for my wallet address in the draw identified by `draw`. I confirm that I am not a U.S. Person, " +
+  "that I am not located in, resident in or a national of a sanctioned jurisdiction, that I am of legal age and have legal capacity, " +
+  "that I control this wallet address, and that I am permitted to receive the prize. I accept the Promotion Terms identified by `terms`. " +
+  "I agree that my wallet address may be published.";
+
+export const CLAIM_TYPES = {
+  Claim: [
+    { name: "participant", type: "address" },
+    { name: "promotion", type: "string" },
+    { name: "draw", type: "string" },
+    { name: "terms", type: "bytes32" },
+    { name: "statement", type: "string" },
+    { name: "issuedAt", type: "uint64" },
+  ],
+} as const;
+
+export interface ClaimMessage {
+  participant: Address;
+  promotion: string;
+  /** The draw record's key ("YYYY-MM-DD", the period's first day). */
+  draw: string;
+  /** keccak256 of the Terms text the winner was shown. */
+  terms: Hex;
+  issuedAt: bigint;
+}
+
+export function claimTypedData(chainId: number, m: ClaimMessage) {
+  return {
+    domain: { name: PARTICIPATION_DOMAIN_NAME, version: PARTICIPATION_DOMAIN_VERSION, chainId },
+    types: CLAIM_TYPES,
+    primaryType: "Claim" as const,
+    message: { ...m, statement: CLAIM_STATEMENT },
   };
 }
 
@@ -68,7 +102,8 @@ export type Question =
 
 /**
  * About a minute, and about the product: four 1–5 ratings (overall, ease, how
- * safe a pending order felt, the fill), then optional detail. Nothing the chain
+ * safe a pending order felt, the fill), then optional detail. Optional, and never a
+ * condition of the draw (TC §4.1: no registration). Nothing the chain
  * already says (what was traded, how much, when) is asked, and nothing about where
  * a user's funds come from — a question crypto users read as a reason not to answer.
  * No personal data either: a winner is known by the wallet address the draw picked

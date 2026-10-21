@@ -4,9 +4,25 @@ import { TOKENS } from "@app/config/markets";
 import { nettedUsd, toDashFill, type FillWire } from "@app/lib/dashboard";
 
 /**
- * The prize draw's rules — who qualifies for a UTC day, and who is drawn — shared by
- * the admin page (components/admin) and the CLI (scripts/raffle-draw.ts), so a
- * published result can be re-derived from its snapshot by either.
+ * THE DRAW RULES (2026-10-21), shared by the console (tabs/DrawsTab.tsx) and the CLI
+ * (scripts/raffle-draw.ts), so a published result can be re-derived from its record
+ * by either.
+ *
+ *   • Draw PERIODS of `periodDays` UTC days, counted from the UTC midnight of the
+ *     promotion's start. Period k = [start + k·p days, start + (k+1)·p days).
+ *   • One TICKET per UTC day an address reaches the qualifier in maker volume (valued
+ *     the way the Dashboard values fills). At most `periodDays` tickets. EVERY maker is
+ *     considered — the Terms (§4.1) promise no registration — except the excluded ones.
+ *   • A period with fewer than `minQualifiers` qualifying addresses is NOT drawn: its
+ *     prizes are carried forward and added to the first prize of the next period.
+ *   • `prizes.length` winners, drawn without replacement, each ticket one chance. With
+ *     `onePrizePerAddress`, an address that already won in this promotion is set aside
+ *     and only drawn once every other qualifier of the period has won.
+ *   • The FINAL draw (optional, after the last period) spends whatever was carried
+ *     forward and never paid, among addresses with ≥ 2 qualifying days overall.
+ *
+ * Everything the selection depends on is in the record (tickets, prior winners, the
+ * carry, the prices) and the record's hash is published before the draw block exists.
  */
 
 /** The beta's own fillers: never a qualifying "maker" even if one ever signs an order. */
@@ -18,43 +34,91 @@ export const ALWAYS_EXCLUDED = [
 const STABLES = ["USD₮0", "USDT", "USDC.e", "USDRIF"];
 /** A draw block must be this deep before it is used. */
 export const DRAW_CONFIRMATIONS = 12n;
-/** Default distance of the draw block from the head when the snapshot is taken (~1 h at 29.3 s). */
+/** Default distance of the draw block from the head when the record is saved (~1 h at 29.3 s). */
 export const DRAW_DELAY_BLOCKS = 120n;
+export const DAY = 86_400;
+/** The final draw: an address needs this many qualifying days over the whole promotion. */
+export const FINAL_MIN_DAYS = 2;
+
+export interface Rules {
+  qualifierUsd: number;
+  periodDays: number;
+  minQualifiers: number;
+  prizes: number[];
+  prizeToken: string;
+  onePrizePerAddress: boolean;
+}
 
 export interface Volume {
   address: string;
+  /** USD over the whole period. */
   usd: number;
   fills: number;
   /** Fills the book could not size (no served order / no price): review before publishing. */
   unsized: number;
+  /** UTC days in the period at or above the qualifier = tickets. */
+  days: number;
 }
 
-/** One day's draw record — what is published, and later its result. */
+/** One draw record — what is published, and later its result. Keyed by its period's start date. */
 export interface Snapshot {
   promotion: string;
+  /** "YYYY-MM-DD" (UTC): the period's first day — the record's key — or the final draw's date. */
   day: string;
-  /** Unix seconds: [from, to) of the UTC day. */
+  kind: "period" | "final";
+  /** Period index from the start (0-based); absent for the final draw. */
+  period?: number;
+  /** Unix seconds: [from, to) of the period (the whole promotion for the final draw). */
   window: [number, number];
-  /** Entrants who had entered by this time are in. */
+  /** When the record was computed (fills up to here). */
   cutoff: number;
-  qualifierUsd: number;
+  rules: Rules;
   prices: Record<string, number>;
   excluded: string[];
-  /** Every entrant's volume that day (qualifying or not), for the record. */
+  /** Every maker's volume in the window (qualifying or not), for the record. */
   volumes: Volume[];
-  /** The draw list: qualifying addresses, sorted. */
+  /** Tickets per qualifying address, sorted by address. */
+  tickets: Array<[string, number]>;
+  /** Addresses with a ticket, sorted. */
   list: string[];
+  /** Earlier winners of this promotion (set aside under onePrizePerAddress). */
+  priorWinners: string[];
+  /** Prize amounts carried in from skipped periods (added to the first prize). */
+  carriedIn: number;
+  /** What this draw pays per winner, in rules.prizeToken. Empty when skipped. */
+  payouts: number[];
+  /** True when fewer than minQualifiers qualified: no draw, prizes carried forward. */
+  skipped: boolean;
+  /** What the next period starts with. */
+  carriedOut: number;
+  /** keccak256 over the tickets, so the published list cannot be changed after the fact. */
   listHash: Hex;
+  /** "" for a skipped period. */
   drawBlock: string;
   result?: { blockHash: Hex; winners: string[]; skipped: string[]; drawnAt: number };
 }
 
-/** Unix seconds [from, to) of a `YYYY-MM-DD` UTC day. */
-export function dayWindow(day: string): [number, number] {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("day must be YYYY-MM-DD");
-  const from = Date.parse(`${day}T00:00:00Z`) / 1000;
-  if (!Number.isFinite(from)) throw new Error("not a date");
-  return [from, from + 86_400];
+export const dateOf = (sec: number): string => new Date(sec * 1000).toISOString().slice(0, 10);
+
+/** Unix seconds of the UTC midnight of `sec`'s day. */
+export const utcMidnight = (sec: number): number => Math.floor(sec / DAY) * DAY;
+
+/** Period `k`'s window, from the promotion start (floored to its UTC day). */
+export function periodWindow(startsAt: number, periodDays: number, k: number): [number, number] {
+  const from = utcMidnight(startsAt) + k * periodDays * DAY;
+  return [from, from + periodDays * DAY];
+}
+
+/** The periods that have ENDED by `now` (k, window), newest first. */
+export function completedPeriods(startsAt: number, periodDays: number, now: number, endsAt = Number.MAX_SAFE_INTEGER): Array<{ k: number; window: [number, number] }> {
+  if (startsAt <= 0) return [];
+  const out: Array<{ k: number; window: [number, number] }> = [];
+  for (let k = 0; k < 400; k++) {
+    const w = periodWindow(startsAt, periodDays, k);
+    if (w[1] > now || w[0] >= endsAt) break;
+    out.push({ k, window: w });
+  }
+  return out.reverse();
 }
 
 /** Symbol → USD for the pinned Rootstock tokens: stables at 1, the rest from a price table (address → USD). */
@@ -69,76 +133,202 @@ export function pricesFrom(table: Record<string, number>, chainId = 30): Record<
 }
 
 /**
- * Each eligible entrant's USD maker volume in `window`, valued the way the Dashboard
- * does (anchor leg × price; opposite fills in one tx netted).
+ * Each maker's volume in `window` (excluded addresses left out), valued the way the Dashboard does
+ * (anchor leg × price; opposite fills in one tx netted), and the number of UTC days in
+ * the window on which it reached `qualifierUsd`.
  */
-export function volumesFor(args: { fills: readonly FillWire[]; eligible: ReadonlySet<string>; window: [number, number]; prices: Record<string, number>; chainId?: number }): Volume[] {
+export function volumesFor(args: {
+  fills: readonly FillWire[];
+  excluded: ReadonlySet<string>;
+  window: [number, number];
+  prices: Record<string, number>;
+  qualifierUsd: number;
+  chainId?: number;
+}): Volume[] {
   const [from, to] = args.window;
-  const inDay = args.fills.filter((f) => typeof f.at === "number" && f.at >= from && f.at < to);
-  const dash = inDay.map((f) => toDashFill(args.chainId ?? 30, f, (s) => args.prices[s]));
-  const share = nettedUsd(dash);
-  const byMaker = new Map<string, { usd: number; fills: number; unsized: number }>();
-  for (const f of dash) {
-    if (!args.eligible.has(f.maker)) continue;
-    const m = byMaker.get(f.maker) ?? { usd: 0, fills: 0, unsized: 0 };
+  const inWindow = args.fills.filter((f) => typeof f.at === "number" && f.at >= from && f.at < to);
+  const dash = inWindow.map((f) => ({ f: toDashFill(args.chainId ?? 30, f, (s) => args.prices[s]), at: f.at as number }));
+  const share = nettedUsd(dash.map((d) => d.f));
+  const byMaker = new Map<string, { usd: number; fills: number; unsized: number; byDay: Map<number, number> }>();
+  for (const { f, at } of dash) {
+    if (args.excluded.has(f.maker)) continue;
+    const m = byMaker.get(f.maker) ?? { usd: 0, fills: 0, unsized: 0, byDay: new Map() };
     m.fills++;
     if (f.usd === undefined) m.unsized++;
-    else m.usd += share.get(f.id) ?? 0;
+    else {
+      const usd = share.get(f.id) ?? 0;
+      m.usd += usd;
+      const d = utcMidnight(at);
+      m.byDay.set(d, (m.byDay.get(d) ?? 0) + usd);
+    }
     byMaker.set(f.maker, m);
   }
-  return [...byMaker.entries()].map(([address, v]) => ({ address, usd: Math.round(v.usd * 100) / 100, fills: v.fills, unsized: v.unsized })).sort((a, b) => b.usd - a.usd || a.address.localeCompare(b.address));
+  return [...byMaker.entries()]
+    .map(([address, v]) => ({
+      address,
+      usd: Math.round(v.usd * 100) / 100,
+      fills: v.fills,
+      unsized: v.unsized,
+      days: [...v.byDay.values()].filter((x) => Math.round(x * 100) / 100 >= args.qualifierUsd).length,
+    }))
+    .sort((a, b) => b.days - a.days || b.usd - a.usd || a.address.localeCompare(b.address));
 }
 
-/** Build a day's snapshot (without the draw block, which the caller fixes from the chain head). */
+const round2 = (x: number) => Math.round(x * 100) / 100;
+
+/** The prize list with the carry added to the first prize. */
+export function payoutsOf(prizes: readonly number[], carriedIn: number): number[] {
+  return prizes.map((p, i) => round2(i === 0 ? p + carriedIn : p));
+}
+
+/** Winners (and their payouts) of the saved records so far — what `onePrizePerAddress` sets aside. */
+export function priorWinnersOf(records: readonly Snapshot[]): string[] {
+  return [...new Set(records.flatMap((r) => r.result?.winners ?? []).map((a) => a.toLowerCase()))].sort();
+}
+
+/**
+ * What the next draw starts with: the carry the latest decided record passes on.
+ * Records without a result (saved, not yet drawn) pass their own carry on unchanged;
+ * a skipped record passes carriedIn + its prizes.
+ */
+export function carriedForward(records: readonly Snapshot[], upToPeriod?: number): number {
+  const prior = records.filter((r) => r.kind === "period" && (upToPeriod === undefined || (r.period ?? 0) < upToPeriod)).sort((a, b) => (a.period ?? 0) - (b.period ?? 0));
+  const last = prior[prior.length - 1];
+  return last ? last.carriedOut : 0;
+}
+
+/** Build a period's record (without the draw block, which the caller fixes from the chain head). */
 export function buildSnapshot(args: {
   promotion: string;
-  day: string;
+  startsAt: number;
+  period: number;
   fills: readonly FillWire[];
-  entrants: ReadonlyArray<{ address: string; enteredAt: number }>;
   cutoff: number;
-  qualifierUsd: number;
+  rules: Rules;
   prices: Record<string, number>;
   exclude: readonly string[];
+  /** The promotion's saved records so far (for the carry and the prior winners). */
+  records: readonly Snapshot[];
   drawBlock: bigint;
 }): Snapshot {
-  const window = dayWindow(args.day);
+  const window = periodWindow(args.startsAt, args.rules.periodDays, args.period);
   const excluded = [...new Set([...ALWAYS_EXCLUDED, ...args.exclude.map((a) => a.toLowerCase())])];
-  const eligible = new Set(args.entrants.filter((e) => e.enteredAt <= args.cutoff).map((e) => e.address.toLowerCase()));
-  const volumes = volumesFor({ fills: args.fills, eligible, window, prices: args.prices });
-  const list = volumes.filter((v) => v.usd >= args.qualifierUsd && !excluded.includes(v.address)).map((v) => v.address).sort();
+  const volumes = volumesFor({ fills: args.fills, excluded: new Set(excluded), window, prices: args.prices, qualifierUsd: args.rules.qualifierUsd });
+  const tickets = volumes
+    .filter((v) => v.days > 0)
+    .map((v): [string, number] => [v.address, v.days])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  const list = tickets.map(([a]) => a);
+  const carriedIn = carriedForward(args.records, args.period);
+  const skipped = list.length < args.rules.minQualifiers;
+  const payouts = skipped ? [] : payoutsOf(args.rules.prizes, carriedIn);
+  const prizeTotal = args.rules.prizes.reduce((a, b) => a + b, 0);
   return {
     promotion: args.promotion,
-    day: args.day,
+    day: dateOf(window[0]),
+    kind: "period",
+    period: args.period,
     window,
     cutoff: args.cutoff,
-    qualifierUsd: args.qualifierUsd,
+    rules: args.rules,
     prices: args.prices,
     excluded,
     volumes,
+    tickets,
     list,
-    listHash: listHashOf(list),
-    drawBlock: args.drawBlock.toString(),
+    priorWinners: args.rules.onePrizePerAddress ? priorWinnersOf(args.records) : [],
+    carriedIn,
+    payouts,
+    skipped,
+    carriedOut: skipped ? round2(carriedIn + prizeTotal) : 0,
+    listHash: listHashOf(tickets),
+    drawBlock: skipped ? "" : args.drawBlock.toString(),
   };
 }
 
-/** keccak256 of the sorted, lower-case, newline-joined list — what is published before the draw. */
-export function listHashOf(list: readonly string[]): Hex {
-  return keccak256(toBytes([...list].map((a) => a.toLowerCase()).sort().join("\n")));
+/** The final draw: the carry nobody won, one winner, among addresses with ≥ FINAL_MIN_DAYS qualifying days overall. */
+export function buildFinalSnapshot(args: {
+  promotion: string;
+  startsAt: number;
+  endsAt: number;
+  fills: readonly FillWire[];
+  cutoff: number;
+  rules: Rules;
+  prices: Record<string, number>;
+  exclude: readonly string[];
+  records: readonly Snapshot[];
+  drawBlock: bigint;
+}): Snapshot {
+  const window: [number, number] = [utcMidnight(args.startsAt), Math.min(args.endsAt, args.cutoff)];
+  const excluded = [...new Set([...ALWAYS_EXCLUDED, ...args.exclude.map((a) => a.toLowerCase())])];
+  const volumes = volumesFor({ fills: args.fills, excluded: new Set(excluded), window, prices: args.prices, qualifierUsd: args.rules.qualifierUsd });
+  const tickets = volumes
+    .filter((v) => v.days >= FINAL_MIN_DAYS)
+    .map((v): [string, number] => [v.address, v.days])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  const list = tickets.map(([a]) => a);
+  const carriedIn = carriedForward(args.records);
+  const skipped = carriedIn <= 0 || list.length < args.rules.minQualifiers;
+  return {
+    promotion: args.promotion,
+    day: dateOf(args.cutoff),
+    kind: "final",
+    window,
+    cutoff: args.cutoff,
+    rules: args.rules,
+    prices: args.prices,
+    excluded,
+    volumes,
+    tickets,
+    list,
+    priorWinners: args.rules.onePrizePerAddress ? priorWinnersOf(args.records) : [],
+    carriedIn,
+    payouts: skipped ? [] : [round2(carriedIn)],
+    skipped,
+    carriedOut: skipped ? round2(carriedIn) : 0,
+    listHash: listHashOf(tickets),
+    drawBlock: skipped ? "" : args.drawBlock.toString(),
+  };
 }
 
-/** Draw `k` winners from `list` (without replacement) seeded by the block hash. */
-export function pickWinners(list: readonly string[], blockHash: Hex, k: number, skip: readonly string[] = []): string[] {
-  const listHash = listHashOf(list);
-  const pool = [...list].map((a) => a.toLowerCase()).sort().filter((a) => !skip.includes(a));
+/** keccak256 of "address:tickets" lines, sorted — what is published before the draw. */
+export function listHashOf(tickets: ReadonlyArray<readonly [string, number]>): Hex {
+  return keccak256(toBytes([...tickets].map(([a, n]) => `${a.toLowerCase()}:${n}`).sort().join("\n")));
+}
+
+/**
+ * Draw `k` winners seeded by the block hash: every ticket is one chance, a winner's
+ * other tickets leave the pool. `deferred` addresses (earlier winners) are drawn only
+ * once nobody else is left; `skip` addresses (excluded after review) never are.
+ */
+export function pickWinners(tickets: ReadonlyArray<readonly [string, number]>, blockHash: Hex, k: number, skip: readonly string[] = [], deferred: readonly string[] = []): string[] {
+  const listHash = listHashOf(tickets);
+  const lower = (a: readonly string[]) => a.map((x) => x.toLowerCase());
+  const skipSet = new Set(lower(skip));
+  const deferSet = new Set(lower(deferred));
+  const expand = (rows: ReadonlyArray<readonly [string, number]>) => rows.flatMap(([a, n]) => Array<string>(Math.max(0, Math.floor(n))).fill(a.toLowerCase()));
+  const sorted = [...tickets].map(([a, n]): [string, number] => [a.toLowerCase(), n]).sort((x, y) => x[0].localeCompare(y[0]));
+  let fresh = expand(sorted.filter(([a]) => !skipSet.has(a) && !deferSet.has(a)));
+  let held = expand(sorted.filter(([a]) => !skipSet.has(a) && deferSet.has(a)));
   const winners: string[] = [];
-  for (let j = 0; j < k && pool.length > 0; j++) {
+  for (let j = 0; j < k; j++) {
+    const pool = fresh.length ? fresh : held;
+    if (!pool.length) break;
     const seed = BigInt(keccak256(concat([blockHash, listHash, `0x${j.toString(16).padStart(64, "0")}`])));
-    winners.push(pool.splice(Number(seed % BigInt(pool.length)), 1)[0]!);
+    const w = pool[Number(seed % BigInt(pool.length))]!;
+    winners.push(w);
+    fresh = fresh.filter((a) => a !== w);
+    held = held.filter((a) => a !== w);
   }
   return winners;
 }
 
 /** The announcement line to publish before the draw block. */
 export function announcement(s: Snapshot): string {
-  return `${s.day} draw · ${s.list.length} qualifying address${s.list.length === 1 ? "" : "es"} · listHash ${s.listHash} · draw block ${s.drawBlock}`;
+  const span = `${dateOf(s.window[0])} → ${dateOf(s.window[1] - 1)}`;
+  if (s.skipped) {
+    return `${s.kind === "final" ? "Final draw" : `Draw ${span}`}: ${s.list.length} qualifying address${s.list.length === 1 ? "" : "es"}, fewer than ${s.rules.minQualifiers} — carried forward, ${s.carriedOut} ${s.rules.prizeToken} rides on the next draw`;
+  }
+  const total = s.tickets.reduce((a, [, n]) => a + n, 0);
+  return `${s.kind === "final" ? "Final draw" : `Draw ${span}`} · ${s.list.length} qualifying address${s.list.length === 1 ? "" : "es"}, ${total} ticket${total === 1 ? "" : "s"} · prizes ${s.payouts.join(" / ")} ${s.rules.prizeToken} · listHash ${s.listHash} · draw block ${s.drawBlock}`;
 }

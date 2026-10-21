@@ -4,6 +4,16 @@ import { NO_END, type AdminApi, type AdminConfig, type RaffleConfig } from "../a
 import { errorText, parseAddresses, rsk, utc } from "../AdminApp";
 import { DateTimeField, useZone, ZoneSwitch } from "../DateTimeField";
 import { toUnix, fromUnix } from "../time";
+import { utcMidnight } from "../draw";
+
+/** "25" or "50, 25, 25" → amounts, or a message. */
+function parsePrizes(text: string): { ok: number[]; bad?: string } {
+  const parts = text.split(/[,\s]+/).filter(Boolean);
+  if (parts.length === 0) return { ok: [], bad: "At least one prize." };
+  const ok = parts.map(Number);
+  if (ok.some((x) => !Number.isFinite(x) || x <= 0)) return { ok: [], bad: "Prizes must be positive amounts, separated by commas." };
+  return { ok };
+}
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const DAY = 86_400;
@@ -24,14 +34,20 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
   const [end, setEnd] = useState<number | null>(base && base.endsAt < NO_END ? base.endsAt : null);
   const [qualifier, setQualifier] = useState(String(base?.qualifierUsd ?? 20));
   const [exclude, setExclude] = useState((base?.exclude ?? []).join("\n"));
+  const [periodDays, setPeriodDays] = useState(String(base?.periodDays ?? 3));
+  const [minQualifiers, setMinQualifiers] = useState(String(base?.minQualifiers ?? 3));
+  const [prizes, setPrizes] = useState((base?.prizes ?? [25]).join(", "));
+  const [prizeToken, setPrizeToken] = useState(base?.prizeToken ?? "USDRIF");
+  const [onePrize, setOnePrize] = useState(base?.onePrizePerAddress ?? true);
   const [busy, setBusy] = useState(false);
   const [checks, setChecks] = useState<Check[] | null>(null);
   const [resetId, setResetId] = useState("");
   const [note, setNote] = useState<string | null>(null);
 
-  useEffect(() => setNote(null), [id, terms, start, end, qualifier, exclude]);
+  useEffect(() => setNote(null), [id, terms, start, end, qualifier, exclude, periodDays, minQualifiers, prizes, prizeToken, onePrize]);
 
   const ex = parseAddresses(exclude);
+  const prizeList = parsePrizes(prizes);
   const draft: RaffleConfig = {
     id: id.trim(),
     terms: terms.trim().toLowerCase() as `0x${string}`,
@@ -42,7 +58,14 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
     // The worker still accepts a tester list (a closed test); the console does not use it:
     // rehearse publicly under a throwaway id and reset it afterwards.
     testers: [],
+    periodDays: Number(periodDays),
+    minQualifiers: Number(minQualifiers),
+    prizes: prizeList.ok,
+    prizeToken: prizeToken.trim(),
+    onePrizePerAddress: onePrize,
   };
+  const prizeTotal = prizeList.ok.reduce((a, b) => a + b, 0);
+  const periodsInWindow = start !== null && end !== null && Number(periodDays) > 0 ? Math.floor((end - utcMidnight(start)) / (Number(periodDays) * 86_400)) : null;
 
   const run = async (f: () => Promise<unknown>, done?: string) => {
     setBusy(true);
@@ -141,11 +164,43 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
             />
           </div>
           {start !== null && end !== null && end <= start && <p className="warn pqfine">Entries close before the start.</p>}
-          <label className="pq adnarrow">
-            <span className="pqlabel">Daily qualifier, $</span>
-            <input className="pqtext m" inputMode="decimal" value={qualifier} onChange={(e) => setQualifier(e.target.value)} />
-            <span className="pqfine">USD of maker fills in one UTC day to enter that day&rsquo;s draw. For a rehearsal, $1 keeps test swaps cheap.</span>
+          <div className="adrow adrules">
+            <label className="pq">
+              <span className="pqlabel">Draw every … days</span>
+              <input className="pqtext m" inputMode="numeric" value={periodDays} onChange={(e) => setPeriodDays(e.target.value.replace(/\D/g, ""))} />
+              <span className="pqfine">Periods of whole UTC days from the start date.</span>
+            </label>
+            <label className="pq">
+              <span className="pqlabel">Daily qualifier, $</span>
+              <input className="pqtext m" inputMode="decimal" value={qualifier} onChange={(e) => setQualifier(e.target.value)} />
+              <span className="pqfine">Each UTC day at or above this = 1 ticket. $1 for a rehearsal.</span>
+            </label>
+            <label className="pq">
+              <span className="pqlabel">Minimum qualifiers</span>
+              <input className="pqtext m" inputMode="numeric" value={minQualifiers} onChange={(e) => setMinQualifiers(e.target.value.replace(/\D/g, ""))} />
+              <span className="pqfine">Fewer than this in a period: no draw, the prize is carried forward.</span>
+            </label>
+          </div>
+          <div className="adrow adrules">
+            <label className="pq">
+              <span className="pqlabel">Prizes per draw</span>
+              <input className="pqtext m" value={prizes} onChange={(e) => setPrizes(e.target.value)} placeholder="25  or  50, 25, 25" />
+              <span className={prizeList.bad ? "warn pqfine" : "pqfine"}>{prizeList.bad ?? `One amount per winner; carried-forward prizes are added to the first. ${prizeTotal} ${prizeToken.trim()} per draw.`}</span>
+            </label>
+            <label className="pq adnarrow">
+              <span className="pqlabel">Prize token</span>
+              <input className="pqtext m" value={prizeToken} onChange={(e) => setPrizeToken(e.target.value)} />
+            </label>
+          </div>
+          <label className="check">
+            <input type="checkbox" checked={onePrize} onChange={(e) => setOnePrize(e.target.checked)} />
+            <span>One prize per address: an earlier winner is drawn again only once every other qualifier of the period has won.</span>
           </label>
+          {periodsInWindow !== null && (
+            <p className="pqfine">
+              {periodsInWindow} full draw{periodsInWindow === 1 ? "" : "s"} fit the window: up to {periodsInWindow * prizeTotal} {prizeToken.trim()} if every one runs.
+            </p>
+          )}
           <label className="pq">
             <span className="pqlabel">
               Excluded from draws <span className="pqopt-tag">· team, contractors, ambassadors (TC §3.3); our fillers are always excluded</span>
@@ -155,7 +210,7 @@ export function SetupTab({ api, config, buildTerms, onChanged, onError }: { api:
           </label>
           {note && <p className="good pqfine">{note}</p>}
           <div className="adrow">
-            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || (start !== null && end !== null && end <= start)} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
+            <button type="button" className="cta" disabled={busy || ex.bad.length > 0 || !!prizeList.bad || !Number(periodDays) || !Number(minQualifiers) || !prizeToken.trim() || (start !== null && end !== null && end <= start)} onClick={() => run(() => api.saveConfig(draft), "Saved — live on the orderbook now.")}>
               Save
             </button>
             <button type="button" className="cta line" disabled={busy || config.source === "disabled"} onClick={() => run(() => api.disable(), "Switched off: no notice, no entries.")}>

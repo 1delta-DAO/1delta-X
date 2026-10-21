@@ -95,6 +95,20 @@ export interface RaffleConfig {
   /** Addresses the draw tool never lists (team, ambassadors, fillers) — lower-case. */
   exclude: string[];
   /**
+   * THE DRAW RULES (2026-10-21), published on `GET /raffle` so the app notice and the
+   * draw tool read one source. Draw periods of `periodDays` UTC days, counted from the
+   * UTC midnight of `startsAt`; each UTC day an address reaches `qualifierUsd` is one
+   * ticket in that period's draw. A period with fewer than `minQualifiers` qualifying
+   * addresses is not drawn: its prizes are carried forward to the next one. `prizes` is
+   * one amount per winner, in `prizeToken`. With `onePrizePerAddress`, an earlier
+   * winner's tickets count only once every other qualifier of the period has won.
+   */
+  periodDays: number;
+  minQualifiers: number;
+  prizes: number[];
+  prizeToken: string;
+  onePrizePerAddress: boolean;
+  /**
    * TEST MODE when non-empty: the desk is live ONLY for these addresses (lower-case);
    * everyone else sees `live: false` and no notice, so a draw can be rehearsed on the
    * production book before it is announced.
@@ -117,7 +131,8 @@ function addrArray(v: unknown, name: string): string[] {
 export function parseRaffleConfig(raw: unknown): RaffleConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("config must be an object");
   const r = raw as Record<string, unknown>;
-  for (const k of Object.keys(r)) if (!["id", "terms", "startsAt", "endsAt", "qualifierUsd", "exclude", "testers"].includes(k)) throw new Error(`unknown field "${k}"`);
+  const known = ["id", "terms", "startsAt", "endsAt", "qualifierUsd", "exclude", "testers", "periodDays", "minQualifiers", "prizes", "prizeToken", "onePrizePerAddress"];
+  for (const k of Object.keys(r)) if (!known.includes(k)) throw new Error(`unknown field "${k}"`);
   const id = typeof r.id === "string" ? r.id.trim() : "";
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error("id must be lower-case letters, digits and dashes (≤ 64)");
   const terms = typeof r.terms === "string" ? r.terms.trim().toLowerCase() : "";
@@ -133,8 +148,43 @@ export function parseRaffleConfig(raw: unknown): RaffleConfig {
   if (endsAt <= startsAt) throw new Error("endsAt must be after startsAt");
   const q = r.qualifierUsd === undefined ? 20 : Number(r.qualifierUsd);
   if (!Number.isFinite(q) || q < 0) throw new Error("qualifierUsd must be a non-negative number");
-  return { id, terms: terms as `0x${string}`, startsAt, endsAt, qualifierUsd: q, exclude: addrArray(r.exclude, "exclude"), testers: addrArray(r.testers, "testers") };
+  const periodDays = r.periodDays === undefined ? DEFAULT_RULES.periodDays : Number(r.periodDays);
+  if (!Number.isInteger(periodDays) || periodDays < 1 || periodDays > 31) throw new Error("periodDays must be a whole number of days, 1 to 31");
+  const minQualifiers = r.minQualifiers === undefined ? DEFAULT_RULES.minQualifiers : Number(r.minQualifiers);
+  if (!Number.isInteger(minQualifiers) || minQualifiers < 1 || minQualifiers > 1000) throw new Error("minQualifiers must be a whole number, 1 to 1000");
+  let prizes = [...DEFAULT_RULES.prizes];
+  if (r.prizes !== undefined) {
+    if (!Array.isArray(r.prizes) || r.prizes.length === 0 || r.prizes.length > 20) throw new Error("prizes must be a list of 1 to 20 amounts");
+    prizes = r.prizes.map((x) => Number(x));
+    if (prizes.some((x) => !Number.isFinite(x) || x <= 0)) throw new Error("every prize must be a positive amount");
+  }
+  const prizeToken = r.prizeToken === undefined ? DEFAULT_RULES.prizeToken : typeof r.prizeToken === "string" ? r.prizeToken.trim() : "";
+  if (!/^[A-Za-z0-9₮$.-]{1,16}$/.test(prizeToken)) throw new Error("prizeToken must be a short token symbol");
+  const onePrizePerAddress = r.onePrizePerAddress === undefined ? DEFAULT_RULES.onePrizePerAddress : r.onePrizePerAddress === true;
+  return {
+    id,
+    terms: terms as `0x${string}`,
+    startsAt,
+    endsAt,
+    qualifierUsd: q,
+    exclude: addrArray(r.exclude, "exclude"),
+    testers: addrArray(r.testers, "testers"),
+    periodDays,
+    minQualifiers,
+    prizes,
+    prizeToken,
+    onePrizePerAddress,
+  };
 }
+
+/** The rules a draw starts from (2026-10-21: 3-day periods, 25 USDRIF to one winner, at least 3 qualifiers). */
+export const DEFAULT_RULES: Pick<RaffleConfig, "periodDays" | "minQualifiers" | "prizes" | "prizeToken" | "onePrizePerAddress"> = {
+  periodDays: 3,
+  minQualifiers: 3,
+  prizes: [25],
+  prizeToken: "USDRIF",
+  onePrizePerAddress: true,
+};
 
 export interface WorkerConfig {
   chain: OrderbookConfig;
@@ -265,7 +315,7 @@ export function raffleConfigOf(env: Pick<Env, "RAFFLE_ID" | "RAFFLE_TERMS_HASH" 
   const startsAt = num(env.RAFFLE_STARTS_AT, 0, "RAFFLE_STARTS_AT");
   const endsAt = num(env.RAFFLE_ENDS_AT, Number.MAX_SAFE_INTEGER, "RAFFLE_ENDS_AT");
   if (endsAt <= startsAt) throw new Error("RAFFLE_ENDS_AT must be after RAFFLE_STARTS_AT");
-  return { id, terms: terms as `0x${string}`, startsAt, endsAt, qualifierUsd: 20, exclude: [], testers: [] };
+  return { id, terms: terms as `0x${string}`, startsAt, endsAt, qualifierUsd: 20, exclude: [], testers: [], ...DEFAULT_RULES, prizes: [...DEFAULT_RULES.prizes] };
 }
 
 export function loadConfig(env: Env): WorkerConfig {

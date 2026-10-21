@@ -1,6 +1,6 @@
 # 1delta Rootstock Trading Promotion — Terms & Conditions
 
-**Last updated:** 20 October 2026
+**Last updated:** 2 September 2026
 
 > **Important:** This Promotion is not open to U.S. Persons or persons located or resident in sanctioned jurisdictions. USDRIF is subject to geographic and other transfer restrictions. Participants are responsible for ensuring that they are legally permitted to participate and receive any prize.
 
@@ -35,7 +35,7 @@
 
 ## 4. Entry and Qualifying Activity
 
-4.1. To enter, a wallet address must (a) complete at least one trade on the 1delta Rootstock deployment during the Promotion Period and then (b) submit the participation form offered in the 1delta interface, signed with that wallet address. The signature costs no transaction fee. Only addresses that have entered in this way are considered for a draw, and only for draws held after their entry. Entering again with the same address updates the form and does not create an additional entry.
+4.1. There is no separate registration process. Eligible wallet addresses may be automatically considered for a daily draw based on their trading activity on the 1delta Rootstock deployment.
 
 4.2. The minimum trading activity or other qualifying criteria applicable to each draw will be determined and communicated by 1delta through its official channels or promotional materials.
 
@@ -44,10 +44,6 @@
 4.4. Trading activity does not guarantee that a wallet address will be selected as a winner.
 
 4.5. Trading volume and qualifying activity will be determined using on-chain data and 1delta's own indexing, logging and monitoring systems.
-
-4.6. The participation form asks for feedback on the 1delta interface and for the eligibility confirmations described in Section 3. By signing it you confirm that the statements in it are true. 1delta may treat an entry made with false confirmations as invalid at any time, including after a draw.
-
-4.7. 1delta stores the signed form, its answers, the wallet address and the time of entry to operate the Promotion and to improve its products. The form asks for no personal contact details. Answers are not published.
 
 ## 5. Exclusion and Fair Play
 
@@ -89,7 +85,7 @@
 
 ## 8. Winner Announcement
 
-8.1. Winning wallet addresses may be announced publicly through 1delta's official communication channels. Because 1delta holds no contact details for participants, this announcement is how a winner is notified, and any request under Section 7.5 is made through the same channels. Prizes are paid to the winning wallet address.
+8.1. Winning wallet addresses may be announced publicly through 1delta's official communication channels.
 
 8.2. 1delta may publish a wallet address in full, in shortened form, or in another form sufficient to identify the winning address.
 

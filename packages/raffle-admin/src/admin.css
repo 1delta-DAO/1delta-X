@@ -37,3 +37,4 @@
 .addtpresets { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; }
 .adtimes > .pq { flex: 1 1 320px; }
 .adnarrow { max-width: 320px; }
+.adrules > .pq { flex: 1 1 220px; }

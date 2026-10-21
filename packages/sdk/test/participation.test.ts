@@ -5,9 +5,11 @@ import { recoverTypedDataAddress } from "viem";
 import {
   answersHash,
   canonicalAnswers,
-  participationTypedData,
+  CLAIM_STATEMENT,
+  claimTypedData,
+  FEEDBACK_STATEMENT,
+  feedbackTypedData,
   PARTICIPATION_QUESTIONS,
-  PARTICIPATION_STATEMENT,
   termsHash,
   validateAnswers,
 } from "../src";
@@ -56,17 +58,25 @@ describe("participation form", () => {
     expect(validateAnswers({ ...valid, contact: "@someone" })).toMatch(/unknown question/);
   });
 
-  it("signs the fixed statement and recovers the participant", async () => {
-    const td = participationTypedData(30, {
-      participant: account.address,
-      promotion: "rootstock-beta-1",
-      terms: termsHash("# Terms"),
-      answers: answersHash(valid),
-      issuedAt: 1_760_000_000n,
-    });
-    expect(td.message.statement).toBe(PARTICIPATION_STATEMENT);
+  it("feedback: signs the fixed statement (no confirmations, no Terms) and recovers the signer", async () => {
+    const td = feedbackTypedData(30, { participant: account.address, promotion: "rootstock-beta-1", answers: answersHash(valid), issuedAt: 1_760_000_000n });
+    expect(td.message.statement).toBe(FEEDBACK_STATEMENT);
+    expect(td.message.statement).toMatch(/not an entry/);
+    expect("terms" in td.message).toBe(false);
     expect("verifyingContract" in td.domain).toBe(false);
     const signature = await account.signTypedData(td);
     expect(await recoverTypedDataAddress({ ...td, signature })).toBe(account.address);
+  });
+
+  it("claim: a drawn winner's eligibility confirmations, bound to the draw and the Terms", async () => {
+    const td = claimTypedData(30, { participant: account.address, promotion: "rootstock-beta-1", draw: "2026-10-25", terms: termsHash("# Terms"), issuedAt: 1_760_000_000n });
+    expect(td.message.statement).toBe(CLAIM_STATEMENT);
+    expect(CLAIM_STATEMENT).toMatch(/not a U\.S\. Person/);
+    expect(CLAIM_STATEMENT).toMatch(/sanctioned jurisdiction/);
+    expect(CLAIM_STATEMENT).toMatch(/may be published/);
+    const signature = await account.signTypedData(td);
+    expect(await recoverTypedDataAddress({ ...td, signature })).toBe(account.address);
+    // Another draw or other Terms is another message.
+    expect(td.message).not.toEqual(claimTypedData(30, { ...td.message, draw: "2026-10-28" }).message);
   });
 });

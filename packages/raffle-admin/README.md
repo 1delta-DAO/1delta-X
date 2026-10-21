@@ -6,10 +6,10 @@ bundle. The app's `/api/book` proxy cannot reach a `/raffle/admin/*` route.
 
 | Tab | What it does |
 |---|---|
-| Setup & tests | Edit the draw's config: promotion id, Terms hash, window, qualifier, exclusions. This overrides the orderbook's `RAFFLE_*` without a deploy. Also: switch the draw off, revert to the deploy defaults, run checks, **reset** a promotion (deletes its entries and draws). |
-| Feedback | Per-question tallies, every entry with its answers, CSV download. |
-| Support | Look up an address (fills, first fill, entry). Add an entry by hand with a required note, e.g. "I signed up but I'm not listed". Remove an entry. |
-| Draws | For a UTC day: compute the qualifiers, run a dry-run draw, save the list and fix a future draw block, then draw from that block's hash. Exclude a winner and redraw. Records are public at `GET /raffle/draws`. |
+| Setup & tests | Edit the draw's config: promotion id, Terms hash, window, period length, qualifier, minimum qualifiers, prizes and token, one-prize-per-address, exclusions. This overrides the orderbook's `RAFFLE_*` without a deploy. Also: switch the draw off, revert to the deploy defaults, run checks, **reset** a promotion (deletes its entries and draws). |
+| Feedback | Per-question tallies of the optional feedback forms, every form with its answers, CSV download. |
+| Support | Look up an address: fills, feedback, the draws it won and whether it claimed. Record a claim a winner confirmed another way (note required). Delete feedback on request. There is nothing to "add to the draw": every trader is in (TC §4.1). |
+| Draws | Per draw period (N UTC days from the start): compute tickets (one per qualifying day), the carry from skipped periods and the prior winners set aside; record a carry-forward when fewer than the minimum qualified, else dry-run, save with a future draw block, then draw from that block's hash (every ticket one chance, prior winners deferred). Exclude a winner and redraw. Winners then claim in the app (eligibility confirmations, TC §7.5); the table shows who has. A final draw spends the carry after the end date. Records are public at `GET /raffle/draws`. |
 
 Every action is a `/raffle/admin/*` call that the orderbook worker authorises with
 its `RAFFLE_ADMIN_TOKEN` secret. The console asks for the token and keeps it only

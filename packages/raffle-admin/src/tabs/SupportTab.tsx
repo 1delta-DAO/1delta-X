@@ -1,24 +1,22 @@
 import { useState } from "react";
 import { isAddress } from "viem";
 
-import type { AdminApi, AdminConfig, AdminEntry } from "../adminApi";
-import { errorText, utc } from "../AdminApp";
-import { DateTimeField, useZone, ZoneSwitch } from "../DateTimeField";
+import type { AdminApi, AdminConfig, AdminEntry, Claim, Win } from "../adminApi";
+import { errorText, short, utc } from "../AdminApp";
 
-type Lookup = { address: string; fills: number; firstFillAt: number | null; entered: boolean; entry?: AdminEntry };
+type Lookup = { address: string; fills: number; firstFillAt: number | null; entered: boolean; entry?: AdminEntry; wins: Win[]; claims: Claim[] };
 
 /**
- * Support cases. Look an address up (its fills on the book, its entry), add it by hand
- * when it should have been entered ("I signed and I'm not listed" — the note says why),
- * or remove an entry (a wrong address, a disqualification).
+ * Support cases. Look an address up: its fills on the book, its feedback, the draws it
+ * won and whether it has claimed. A winner who confirmed eligibility another way (a
+ * signed message in Telegram, a call) is recorded here with a note. Feedback can be
+ * removed on request (a data-deletion case). There is nothing to "add to the draw":
+ * the Terms (§4.1) promise no registration, every trader is in.
  */
 export function SupportTab({ api, promotion, config }: { api: AdminApi; promotion: string; config: AdminConfig }) {
   const [address, setAddress] = useState("");
   const [found, setFound] = useState<Lookup | null>(null);
   const [note, setNote] = useState("");
-  const [enteredAt, setEnteredAt] = useState<number | null>(null);
-  const [zone, setZone] = useZone();
-  const [overwrite, setOverwrite] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const valid = isAddress(address.trim(), { strict: false });
@@ -36,6 +34,8 @@ export function SupportTab({ api, promotion, config }: { api: AdminApi; promotio
       setBusy(false);
     }
   };
+
+  const unclaimed = found?.wins.filter((w) => !w.claimed) ?? [];
 
   return (
     <div className="adgrid">
@@ -58,12 +58,22 @@ export function SupportTab({ api, promotion, config }: { api: AdminApi; promotio
               </div>
               <div className="pqrow">
                 <dt>First fill since the promotion start</dt>
-                <dd className="m">{found.firstFillAt === null ? "none — Participate never unlocked for it" : utc(found.firstFillAt)}</dd>
+                <dd className="m">{found.firstFillAt === null ? "none: not in any draw yet, feedback form locked" : utc(found.firstFillAt)}</dd>
               </div>
               <div className="pqrow">
-                <dt>Entry</dt>
+                <dt>Feedback</dt>
+                <dd className="m">{found.entry ? `given ${utc(found.entry.enteredAt)}${found.entry.updatedAt !== found.entry.enteredAt ? `, updated ${utc(found.entry.updatedAt)}` : ""}` : "none (optional)"}</dd>
+              </div>
+              <div className="pqrow">
+                <dt>Draws won</dt>
                 <dd className="m">
-                  {found.entry ? `${found.entry.source} · ${utc(found.entry.enteredAt)}${found.entry.note ? ` · ${found.entry.note}` : ""}` : "not entered"}
+                  {found.wins.length === 0
+                    ? "none"
+                    : found.wins.map((w) => (
+                        <div key={w.day}>
+                          {w.day}: {w.payout} {w.token} · {w.claimed ? `claimed ${utc(w.claimedAt ?? 0)}` : `unclaimed, window until ${utc(w.claimBy)}`}
+                        </div>
+                      ))}
                 </dd>
               </div>
             </dl>
@@ -72,63 +82,73 @@ export function SupportTab({ api, promotion, config }: { api: AdminApi; promotio
         </div>
       </section>
 
-      {found && (
+      {found && unclaimed.length > 0 && (
         <section className="box">
           <div className="boxhead">
-            <span className="lbl">{found.entered ? "Change the entry" : "Add by hand"}</span>
+            <span className="lbl">Confirm a claim by hand</span>
           </div>
           <div className="boxbody">
             {notRunning && <p className="warn pqfine">You are editing "{promotion}", which is not the running promotion.</p>}
-            {found.firstFillAt === null && <p className="warn pqfine">This address has no fill since the start — the desk would not have let it enter.</p>}
+            <p className="pqnote">
+              For a winner who confirmed eligibility (TC §3, §7.5) outside the app, e.g. with a signed message on Telegram after
+              the 14-day window. The note says how; the payout review still happens.
+            </p>
             <label className="pq">
-              <span className="pqlabel">Note (required — why, e.g. support ticket)</span>
-              <input className="pqtext" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ticket #12: signed on 10-24, entry missing" />
+              <span className="pqlabel">Note (required)</span>
+              <input className="pqtext" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Signed message in Telegram, 2026-10-30, link…" />
             </label>
-            <ZoneSwitch zone={zone} onChange={setZone} />
-            <DateTimeField
-              label="Entered at"
-              hint="optional; a day's draw counts entrants entered by its snapshot"
-              value={enteredAt}
-              onChange={setEnteredAt}
-              zone={zone}
-              empty="Now (when you save)"
-              presets={[{ label: "Clear", value: () => null }]}
-            />
-            {found.entry?.source === "signed" && (
-              <label className="check">
-                <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
-                <span>Replace the user&rsquo;s signed answers with a manual entry (their feedback is dropped)</span>
-              </label>
-            )}
             <div className="adrow">
-              <button
-                type="button"
-                className="cta"
-                disabled={busy || !note.trim() || (found.entry?.source === "signed" && !overwrite)}
-                onClick={() =>
-                  act(async () => {
-                    await api.addManual({ address: found.address, note: note.trim(), ...(enteredAt !== null ? { enteredAt } : {}), overwrite }, promotion);
-                    setNote("");
-                    return "Entered by hand.";
-                  })
-                }
-              >
-                {found.entered ? "Save manual entry" : "Add to the draw"}
-              </button>
-              {found.entered && (
+              {unclaimed.map((w) => (
                 <button
+                  key={w.day}
+                  type="button"
+                  className="cta"
+                  disabled={busy || !note.trim()}
+                  onClick={() =>
+                    act(async () => {
+                      await api.confirmClaim({ address: found.address, day: w.day, note: note.trim() }, promotion);
+                      setNote("");
+                      return `Claim for ${w.day} recorded.`;
+                    })
+                  }
+                >
+                  Confirm {w.day} ({w.payout} {w.token})
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {found && (found.claims.length > 0 || found.entry) && (
+        <section className="box">
+          <div className="boxhead">
+            <span className="lbl">Records to remove</span>
+          </div>
+          <div className="boxbody">
+            <div className="adrow">
+              {found.claims.map((c) => (
+                <button
+                  key={c.day}
                   type="button"
                   className="cta line"
                   disabled={busy}
                   onClick={() =>
-                    window.confirm(`Remove ${found.address} from "${promotion}"?`) &&
-                    act(async () => {
-                      await api.removeEntry(found.address, promotion);
-                      return "Entry removed.";
-                    })
+                    window.confirm(`Remove the ${c.day} claim of ${short(found.address)} (${c.source}${c.note ? `: ${c.note}` : ""})?`) &&
+                    act(async () => (await api.removeClaim(c.day, found.address, promotion), `Claim for ${c.day} removed.`))
                   }
                 >
-                  Remove entry
+                  Remove {c.day} claim
+                </button>
+              ))}
+              {found.entry && (
+                <button
+                  type="button"
+                  className="cta line"
+                  disabled={busy}
+                  onClick={() => window.confirm(`Delete the feedback of ${found.address}? Its answers are gone for good.`) && act(async () => (await api.removeEntry(found.address, promotion), "Feedback deleted."))}
+                >
+                  Delete feedback
                 </button>
               )}
             </div>

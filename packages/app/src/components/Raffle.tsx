@@ -5,9 +5,9 @@ import { ORDERBOOK_URL } from "../backend/book";
 import { chainLabel } from "../config/chains";
 import { PROMOTION, promotionRunsOn } from "../config/promotion";
 import { TERMS_HASH } from "../config/terms";
-import { fetchRaffleStatus, fetchRaffleSummary, participateView, type RaffleStatus, type TypedDataSigner } from "../lib/raffle";
+import { claimView, describeRules, fetchRaffleStatus, fetchRaffleSummary, participateView, type RaffleStatus, type TypedDataSigner } from "../lib/raffle";
 import { GasZipLink, OnrampLink, UsdtLink } from "./Onramp";
-import { ParticipateSheet } from "./Participate";
+import { ClaimSheet, ParticipateSheet } from "./Participate";
 import { TermsLink } from "./TermsLink";
 
 /** Re-read the desk this often while the page is open — a first fill unlocks Participate. */
@@ -43,6 +43,7 @@ export function RaffleNotice({
   const [status, setStatus] = useState<RaffleStatus | null>(null);
   const [entrants, setEntrants] = useState<number | null>(null);
   const [open, setOpen] = useState(false);
+  const [claimOpen, setClaimOpen] = useState(false);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((n) => n + 1), []);
 
@@ -72,50 +73,63 @@ export function RaffleNotice({
   // for this visitor — switched off, outside its window, or a closed test (the operator console, packages/raffle-admin)
   // all hide the notice. A build without an orderbook keeps the static notice.
   if (ORDERBOOK_URL && status?.live !== true) return <OnrampLink />;
-  const view = participateView(status, address, TERMS_HASH);
+  const view = participateView(status, address);
+  const claim = claimView(status, address, TERMS_HASH);
+  const rules = describeRules(status?.rules);
 
   return (
     <aside className="raffle">
       <span className="pill pill-violet">Prize draw</span>
       <div className="rfbody">
         <p className="rflead">
-          Trading on {chainLabel(PROMOTION.chainId)} can qualify your address for a daily prize draw. Addresses
-          that trade at least <b>{PROMOTION.qualifier}</b> in a day go into that day&rsquo;s draw, and{" "}
-          <b>{PROMOTION.pool}</b> is paid out over {PROMOTION.cadence}. To take part, make one swap, then press{" "}
-          <b>Participate</b> and answer a short feedback form.
+          {rules ? (
+            rules.lead
+          ) : (
+            <>
+              Trading on {chainLabel(PROMOTION.chainId)} puts your address in a prize draw, no sign-up needed. Each day
+              you trade at least <b>{PROMOTION.qualifier}</b> is a ticket, and <b>{PROMOTION.pool}</b> is paid out over{" "}
+              {PROMOTION.cadence}.
+            </>
+          )}{" "}
+          After your first swap you can also <b>rate the app</b>: a minute of feedback, optional.
         </p>
         <div className="rfactions">
+          {claim && !claim.termsMismatch && (
+            <button type="button" className="cta rfbtn" onClick={() => setClaimOpen(true)}>
+              You won {claim.win.payout} {claim.win.token}: claim it
+            </button>
+          )}
+          {claim?.termsMismatch && <span className="rfstate warn">You won a prize. The Terms were updated: reload the page to review them, then claim.</span>}
           {view.kind === "connect" && (
             <button type="button" className="cta line rfbtn" onClick={onConnect}>
-              Connect to participate
+              Connect wallet
             </button>
           )}
           {view.kind === "locked" && (
             <span className="rfstate">
-              Participate unlocks after your first swap.{" "}
+              Trade once and you are in; the feedback form unlocks after that first swap.{" "}
               No funds on Rootstock? <UsdtLink>Bridge USD₮0 on usdt0.to</UsdtLink> (no RBTC needed) or <GasZipLink />.
             </span>
           )}
           {view.kind === "open" && (
-            <button type="button" className="cta rfbtn" onClick={() => setOpen(true)}>
-              Participate
+            <button type="button" className="cta line rfbtn" onClick={() => setOpen(true)}>
+              Rate the app
             </button>
           )}
           {view.kind === "entered" && (
             <span className="rfstate">
-              <span className="good">✓ You&rsquo;re in the draw.</span>{" "}
+              <span className="good">✓ Thanks for the feedback.</span>{" "}
               <button type="button" className="linkbtn" onClick={() => setOpen(true)}>
-                Update your answers
+                Update it
               </button>
             </span>
           )}
-          {view.kind === "terms-mismatch" && <span className="rfstate warn">The Terms were updated. Reload the page to review them before entering.</span>}
           {view.kind !== "locked" && (
             <span className="rfsupport">
               No funds on Rootstock? <UsdtLink>Bridge USD₮0</UsdtLink> · <GasZipLink>RBTC via Gas.zip</GasZipLink>
             </span>
           )}
-          {entrants !== null && entrants > 0 && <span className="rfstate m">{entrants} participating</span>}
+          {entrants !== null && entrants > 0 && <span className="rfstate m">{entrants} rated the app</span>}
           {PROMOTION.support && (
             <a className="linkbtn rfsupport" href={PROMOTION.support} target="_blank" rel="noreferrer">
               Stuck? Report a problem
@@ -123,24 +137,37 @@ export function RaffleNotice({
           )}
         </div>
         <p className="rffine">
-          Winners are picked <b>at random</b> from the qualifying addresses. Trading qualifies you for a draw, it
-          does not earn a prize, and no amount of volume guarantees one. Figures are approximate and the criteria,
+          Winners are picked <b>at random</b> from the tickets. Trading qualifies you for a draw, it does not earn a
+          prize, and no amount of volume guarantees one. {rules?.fine} Winners are announced by wallet address on the
+          official channels and see a claim button here. Figures are approximate and the criteria,
           schedule and pool can change. Not open to U.S. Persons or persons in sanctioned jurisdictions, and USDRIF
           carries its own transfer restrictions. Winning addresses may be published.{" "}
           <TermsLink>Full Terms</TermsLink>
         </p>
       </div>
-      {open && address && status?.promotion && status.terms && ORDERBOOK_URL && (
+      {open && address && status?.promotion && ORDERBOOK_URL && (
         <ParticipateSheet
           base={ORDERBOOK_URL}
           signer={signer}
           chainId={PROMOTION.chainId}
           participant={address}
           promotion={status.promotion}
-          terms={status.terms}
           updating={view.kind === "entered"}
           onClose={() => setOpen(false)}
           onEntered={refresh}
+        />
+      )}
+      {claimOpen && claim && address && status?.promotion && status.terms && ORDERBOOK_URL && (
+        <ClaimSheet
+          base={ORDERBOOK_URL}
+          signer={signer}
+          chainId={PROMOTION.chainId}
+          participant={address}
+          promotion={status.promotion}
+          terms={status.terms}
+          win={claim.win}
+          onClose={() => setClaimOpen(false)}
+          onClaimed={refresh}
         />
       )}
     </aside>

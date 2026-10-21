@@ -18,7 +18,7 @@ only when the steps in §1 are done.
 
 | # | Step | Command / where |
 |---|---|---|
-| 1 | Counsel signs off TC.md: §4.1 (entry = one trade + the signed form), §4.6–4.7 (form and data), and the confirmation wording in `packages/sdk/src/participation.ts` (`PARTICIPATION_STATEMENT`) | — |
+| 1 | TC.md is the reviewed 2 September 2026 text and must not change. The claim wording a winner signs (`CLAIM_STATEMENT` in `packages/sdk/src/participation.ts`) restates §3/§7.5/§8; show it to counsel if in doubt | — |
 | 2 | Decide the promotion window and the support link | `PROMOTION.support` in `VITE_PROMOTION` (Telegram group or form URL) |
 | 3 | Grant-thread commitments not in the app as of 2026-10-14 (per-user ~1,000 USDRIF cap, total cap, time-bounded allowances): ship them, or say in the thread why not, before promoting on the Collective | `docs/local/rootstock-grant-m1-checklist.md` |
 
@@ -73,28 +73,49 @@ Do this from a fresh wallet that holds **no RBTC on Rootstock**:
 2. Open the app on Rootstock. Sell 5 USD₮0 for **RBTC** (market order), using the gasless permit path.
    - Expected: native RBTC arrives through solver v3 + NativeBalance, and the wallet never paid gas.
    - This combination (permit-funded order + native RBTC out) has not been filled live before. If it fails, RBTC delivery is the thing to fix.
-3. After the fill is indexed (about 20 s), **Participate** appears. Fill in the form and sign. Expect the "You're in the draw" message.
-4. Check that the entry appears under **Feedback** on the console.
+3. After the fill is indexed (about 20 s), **Rate the app** appears. Fill in the form and sign. Expect the "Thank you" message.
+4. Check that the feedback appears under **Feedback** on the console, and that the address shows up under Draws → Compute for the current period (it is in the draw without any form).
 
-## 4. Daily draw (each UTC day, the morning after)
+## 4. The draws (one per period, the morning after it ends)
+
+**Compliance with the reviewed Terms (TC.md, 2 September 2026, unchanged):** there
+is no registration (§4.1), so the draw lists EVERY wallet with qualifying fills,
+whether or not it gave feedback; the feedback form is optional. The rules below are
+"qualifying criteria communicated through official channels" (§4.2/4.3) and 1delta's
+"number, timing and amount of prizes" (§6.2); the announcement line and the app notice
+are that communication. A winner confirms eligibility before payout (§7.5) by signing
+the claim in the app. The rules are console settings (Setup tab) and are published on
+`GET /raffle`, so the app notice always states what the desk runs. Defaults: a draw every **3 UTC
+days** from the start date, one ticket per day an address trades ≥ $20, at least
+**3** qualifying addresses, **25 USDRIF** to one winner, one prize per address while
+others are waiting. With 200 USDRIF that is 8 draws over 24 days.
+
+On the console, Draws tab:
+
+1. Pick the period that just ended (the newest one without a record is preselected) and **Compute**. Review the `unsized` column and the "set aside" list.
+2. If fewer than the minimum qualified, press **Record carry-forward**. Nothing is drawn; the prize rides on the next period. Publish the announcement line anyway, so the carry is public.
+3. Otherwise **Save & fix draw block**, then **publish** the announcement line (tickets, `listHash`, draw block) in the official channel **before that block** (about an hour).
+4. After the block is 12 deep (about 6 minutes more), press **Draw**.
+5. Publish the winners by address (TC §8.1). This is how a winner learns they won: the app then shows that wallet a **claim** button, and the claim (TC §3, §7.5 confirmations, Terms accepted by hash) is signed in the app. The window is 14 days; a winner who confirms another way is recorded under Support.
+6. Review each claimed winner (TC §5, §7.5): funding-source clusters, wallet age, whether its only activity is our raffle. If a winner is excluded, **exclude …** redraws deterministically.
+7. Pay claimed prizes from the treasury wallet, then publish the payout txs.
+
+After the end date a **Final draw** option appears: it spends whatever was carried
+forward and never paid, among addresses with ≥ 2 qualifying days overall. If even
+that has fewer than the minimum, nothing is paid.
+
+The CLI equivalent (records as JSON files, same rules):
 
 ```sh
 cd packages/raffle-admin
-pnpm raffle-draw snapshot --day 2026-10-25 --book https://<app>/api/book --exclude team.txt --out raffle/
-# prints: N qualifying · listHash 0x… · draw block B (~1 h out)
+pnpm raffle-draw snapshot --book https://<app>/api/book --exclude team.txt --out raffle/   # next period without a record
+pnpm raffle-draw draw --snapshot raffle/<day>.json [--skip <address>]
+pnpm raffle-draw snapshot --final --book https://<app>/api/book --out raffle/            # after the end date
 ```
 
-1. Review the `⚠ unsized` line, if any, and the CSV.
-2. **Publish** the line it prints (day, count, `listHash`, draw block) in the official channel **before block B**. Publish `raffle/<day>.json` with it.
-3. After block B + 12, run:
-   ```sh
-   pnpm raffle-draw draw --snapshot raffle/2026-10-25.json --winners 1
-   ```
-4. Do the eligibility review of the winner (TC §5, §7.5): look for funding-source clusters among entrants and ask for confirmation if needed. If the winner is excluded, run `draw … --skip <address>`, which deterministically picks the next one.
-5. Pay from the treasury wallet, then publish the winner and the payout tx.
-
 `team.txt` lists the addresses of employees, contractors and ambassadors (TC §3.3;
-ambassadors run on their own pool). One address per line.
+ambassadors run on their own pool). One address per line. The console uses the
+exclusion list from Setup instead.
 
 ## 5. Close
 

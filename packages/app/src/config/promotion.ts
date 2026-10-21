@@ -18,7 +18,7 @@ export interface Promotion {
   live: boolean;
   /** The chain qualifying trades have to happen on. */
   chainId: number;
-  /** What an address has to do in a day to qualify. */
+  /** What an address has to do in a day for a ticket. */
   qualifier: string;
   /** The prize pool, in the promoter's own words. */
   pool: string;
@@ -35,9 +35,11 @@ export interface Promotion {
 const DEFAULT: Promotion = {
   live: true,
   chainId: 30,
+  // Fallback copy only: with a live orderbook the notice states the rules the desk
+  // publishes (periodDays, qualifier, prizes; lib/raffle.ts `describeRules`).
   qualifier: "US$20",
-  pool: "around 100 USDRIF",
-  cadence: "roughly ten daily draws",
+  pool: "around 200 USDRIF",
+  cadence: "roughly eight draws, one every three days",
   support: "",
 };
 

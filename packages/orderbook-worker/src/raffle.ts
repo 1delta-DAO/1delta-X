@@ -1,11 +1,4 @@
-import {
-  answersHash,
-  canonicalAnswers,
-  participationTypedData,
-  validateAnswers,
-  PARTICIPATION_QUESTIONS,
-  type ParticipationAnswers,
-} from "@1delta-x/sdk";
+import { answersHash, canonicalAnswers, claimTypedData, feedbackTypedData, validateAnswers, PARTICIPATION_QUESTIONS, type ParticipationAnswers } from "@1delta-x/sdk";
 import { hashTypedData, isAddress, recoverTypedDataAddress, type Address, type Hex } from "viem";
 
 import { parseRaffleConfig, type RaffleConfig, type WorkerConfig } from "./config";
@@ -14,39 +7,42 @@ import { ROUTE_COST } from "./ratelimit";
 import { count, getMeta, setMeta, type Sql } from "./store";
 
 /**
- * THE PRIZE DRAW'S ENTRY DESK (2026-10-20).
+ * THE PRIZE DRAW'S DESK (2026-10-21).
  *
- * An address enters by posting the participation form signed as EIP-712 typed data
- * (`@1delta-x/sdk` participation.ts). The desk takes it only when:
+ * The Promotion Terms (TC.md, reviewed and frozen) govern what this does:
  *
- *   • a draw is configured and open (`startsAt ≤ now < endsAt`) — and, in TEST MODE
- *     (`testers` non-empty), only from a listed tester;
- *   • it names this draw and the Terms version configured (`terms`);
- *   • the answers fit the form and hash to the signed `answers`;
- *   • the address has at least one indexed fill AS MAKER since the start — the
- *     "Participate after your first swap" gate is enforced here, not trusted to the app;
- *   • the signature recovers to the address (or its ERC-1271 `isValidSignature` accepts it).
+ *   • §4.1 — NO registration: every wallet that trades is considered automatically.
+ *     Nothing here is an entry. The draw tool (packages/raffle-admin) lists qualifiers
+ *     from the fill index alone; `raffle_entries` holds optional FEEDBACK forms.
+ *   • §4.2/4.3, §6.2 — the qualifying criteria and the number, timing and amount of
+ *     prizes are 1delta's to set and communicate: the published `rules` on GET /raffle
+ *     (period length, qualifier, minimum qualifiers with carry-forward, prizes, one
+ *     prize per address) are that communication, and the app notice repeats them.
+ *   • §3, §7.5, §8 — a drawn winner CLAIMS the prize by signing the eligibility
+ *     confirmations (`raffle_claims`); the operator pays claimed prizes only, and may
+ *     forfeit one not confirmed within 14 days.
  *
- * One row per (promotion, address); a later signature (higher `issuedAt`) replaces the
- * answers, an older or equal one is refused, so a replayed form cannot roll an update back.
+ * Feedback: posted as EIP-712 typed data (`@1delta-x/sdk` participation.ts) by an
+ * address with at least one indexed fill as maker since the start (so ratings come
+ * from users), one row per (promotion, address), a newer signature replaces the
+ * answers. Claims: typed data naming the promotion, the draw record and the Terms
+ * hash, accepted only for an address the saved draw result names.
  *
  * CONFIGURATION: `RAFFLE_*` is the deploy-time default; an admin can override it from
- * the operator console, packages/raffle-admin (`PUT /raffle/admin/config`, stored in `meta`), switch it off, run it in
- * test mode, reset a promotion's entries and draws, and add or remove an entry by hand
- * (a support case: "I signed up but I'm not listed"). Every `/raffle/admin/*` route needs
- * the `RAFFLE_ADMIN_TOKEN` bearer, checked by the entry worker.
+ * the console (`PUT /raffle/admin/config`, stored in `meta`), switch it off, reset a
+ * promotion's feedback, draws and claims, and confirm a claim by hand. Every
+ * `/raffle/admin/*` route needs the `RAFFLE_ADMIN_TOKEN` bearer, checked by the entry
+ * worker.
  *
- * Whether an entrant QUALIFIES for a day (volume, exclusions) is decided by the draw
- * tool (the admin page / scripts/raffle-draw.ts), which saves its record here.
- *
- * No personal data: the form asks none (a winner is the wallet address the draw picks,
- * and is paid to it). The table's old `contact` column is always NULL (store.ts).
+ * No personal data: the forms ask none; a winner is the wallet address the draw picks.
  */
 
 /** A signed form older or newer than this (vs the worker clock) is refused. */
 export const ISSUED_AT_SKEW_SECONDS = 24 * 3600;
-/** The desk stops taking NEW addresses past this many entries (updates still land). */
+/** The desk stops taking NEW addresses past this many feedback forms (updates still land). */
 export const MAX_ENTRIES = 50_000;
+/** A winner may claim this long after the draw (TC §7.5: 14 days); later, an admin confirms by hand. */
+export const CLAIM_WINDOW_SECONDS = 14 * 24 * 3600;
 /** A saved draw record (the snapshot JSON) is at most this large. */
 export const MAX_DRAW_BYTES = 200_000;
 const CONFIG_KEY = "raffleConfig";
@@ -69,6 +65,15 @@ interface EntryRow {
   updated_at: number;
   issued_at: number;
   answers: string;
+  signature: string;
+  source: string;
+  note: string | null;
+}
+
+interface ClaimRow {
+  day: string;
+  address: string;
+  claimed_at: number;
   signature: string;
   source: string;
   note: string | null;
@@ -117,6 +122,7 @@ export async function handleRaffle(ctx: RaffleContext, path: string, method: str
   if (path === "/raffle/entrants") return method === "GET" ? (ctx.gate(ip, ROUTE_COST.query) ?? entrants(ctx, r)) : notAllowed("GET");
   if (path === "/raffle/draws") return method === "GET" ? (ctx.gate(ip, ROUTE_COST.query) ?? publicDraws(ctx, r)) : notAllowed("GET");
   if (path === "/raffle/entries") return method === "POST" ? await postEntry(ctx, r, request, ip) : notAllowed("POST");
+  if (path === "/raffle/claims") return method === "POST" ? await postClaim(ctx, r, request, ip) : notAllowed("POST");
   return undefined;
 }
 
@@ -143,6 +149,15 @@ function head(ctx: RaffleContext, r: RaffleConfig | undefined, address?: string)
     startsAt: r.startsAt,
     endsAt: r.endsAt === Number.MAX_SAFE_INTEGER ? null : r.endsAt,
     chainId: ctx.cfg.chain.chainId,
+    // The published rules: what the app notice says and what the draw tool applies.
+    rules: {
+      qualifierUsd: r.qualifierUsd,
+      periodDays: r.periodDays,
+      minQualifiers: r.minQualifiers,
+      prizes: r.prizes,
+      prizeToken: r.prizeToken,
+      onePrizePerAddress: r.onePrizePerAddress,
+    },
     ...(r.testers.length ? { testMode: true } : {}),
   };
 }
@@ -175,7 +190,39 @@ function status(ctx: RaffleContext, r: RaffleConfig | undefined, address: string
     traded: firstFill(ctx, address, r.startsAt) !== null,
     entered: !!entry,
     ...(entry ? { enteredAt: entry.entered_at, updatedAt: entry.updated_at } : {}),
+    wins: winsOf(ctx, r.id, address),
   });
+}
+
+interface DrawRecord {
+  day: string;
+  skipped?: boolean;
+  payouts?: number[];
+  rules?: { prizeToken?: string };
+  result?: { winners: string[]; drawnAt: number };
+}
+
+function drawRecords(ctx: RaffleContext, promotion: string): DrawRecord[] {
+  return ctx.sql
+    .exec<{ day: string; snapshot: string }>(`SELECT day, snapshot FROM raffle_draws WHERE promotion = ? ORDER BY day ASC`, promotion)
+    .toArray()
+    .map((d) => ({ ...(JSON.parse(d.snapshot) as DrawRecord), day: d.day }));
+}
+
+function claimOf(ctx: RaffleContext, promotion: string, day: string, address: string): ClaimRow | undefined {
+  return ctx.sql.exec<ClaimRow>(`SELECT * FROM raffle_claims WHERE promotion = ? AND day = ? AND address = ?`, promotion, day, address).toArray()[0];
+}
+
+/** The draws `address` won: what it is owed, whether it has claimed, and until when it can. */
+function winsOf(ctx: RaffleContext, promotion: string, address: string) {
+  const out: Array<{ day: string; payout: number; token: string; drawnAt: number; claimBy: number; claimed: boolean; claimedAt?: number }> = [];
+  for (const d of drawRecords(ctx, promotion)) {
+    const i = d.result?.winners.map((w) => w.toLowerCase()).indexOf(address) ?? -1;
+    if (i < 0 || !d.result) continue;
+    const c = claimOf(ctx, promotion, d.day, address);
+    out.push({ day: d.day, payout: d.payouts?.[i] ?? 0, token: d.rules?.prizeToken ?? "", drawnAt: d.result.drawnAt, claimBy: d.result.drawnAt + CLAIM_WINDOW_SECONDS, claimed: !!c, ...(c ? { claimedAt: c.claimed_at } : {}) });
+  }
+  return out;
 }
 
 function entrants(ctx: RaffleContext, r: RaffleConfig | undefined): Response {
@@ -192,18 +239,18 @@ function publicDraws(ctx: RaffleContext, r: RaffleConfig | undefined): Response 
 }
 
 function draws(ctx: RaffleContext, promotion: string): unknown[] {
+  const claims = ctx.sql.exec<{ day: string; address: string }>(`SELECT day, address FROM raffle_claims WHERE promotion = ?`, promotion).toArray();
   return ctx.sql
     .exec<{ day: string; snapshot: string; updated_at: number }>(`SELECT day, snapshot, updated_at FROM raffle_draws WHERE promotion = ? ORDER BY day ASC`, promotion)
     .toArray()
-    .map((d) => ({ day: d.day, updatedAt: d.updated_at, ...(JSON.parse(d.snapshot) as Record<string, unknown>) }));
+    .map((d) => ({ day: d.day, updatedAt: d.updated_at, ...(JSON.parse(d.snapshot) as Record<string, unknown>), claimed: claims.filter((c) => c.day === d.day).map((c) => c.address).sort() }));
 }
 
-// ──────────────────── POST /raffle/entries ────────────────────
+// ──────────────────── POST /raffle/entries (feedback) ────────────────────
 
 interface EntryBody {
   participant: Address;
   promotion: string;
-  terms: Hex;
   issuedAt: bigint;
   answers: ParticipationAnswers;
   signature: Hex;
@@ -212,10 +259,9 @@ interface EntryBody {
 function parseEntry(body: unknown): EntryBody | string {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return "body must be a JSON object";
   const b = body as Record<string, unknown>;
-  for (const k of Object.keys(b)) if (!["participant", "promotion", "terms", "issuedAt", "answers", "signature"].includes(k)) return `unknown field "${k}"`;
+  for (const k of Object.keys(b)) if (!["participant", "promotion", "issuedAt", "answers", "signature"].includes(k)) return `unknown field "${k}"`;
   if (typeof b.participant !== "string" || !ADDRESS.test(b.participant) || !isAddress(b.participant, { strict: false })) return "participant must be an address";
   if (typeof b.promotion !== "string") return "promotion must be a string";
-  if (typeof b.terms !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(b.terms)) return "terms must be a 32-byte hash";
   const issued = typeof b.issuedAt === "number" ? String(b.issuedAt) : b.issuedAt;
   if (typeof issued !== "string" || !/^\d{1,12}$/.test(issued)) return "issuedAt must be unix seconds";
   if (typeof b.signature !== "string" || !SIG.test(b.signature) || b.signature.length > 2 + 2 * 4096) return "signature must be hex";
@@ -224,7 +270,6 @@ function parseEntry(body: unknown): EntryBody | string {
   return {
     participant: b.participant.toLowerCase() as Address,
     promotion: b.promotion,
-    terms: b.terms.toLowerCase() as Hex,
     issuedAt: BigInt(issued),
     answers: b.answers as ParticipationAnswers,
     signature: b.signature as Hex,
@@ -245,8 +290,6 @@ async function postEntry(ctx: RaffleContext, r: RaffleConfig | undefined, reques
   if (!w.open) return json({ error: w.reason }, 403);
   if (r.testers.length && !r.testers.includes(e.participant)) return json({ error: "the promotion is in a closed test" }, 403);
   if (e.promotion !== r.id) return json({ error: "this form is for another promotion" }, 409);
-  // The Terms the user was shown are not the ones running: they must re-read and re-sign.
-  if (e.terms !== r.terms) return json({ error: "the Terms have changed since this page loaded — reload and review them" }, 409);
   const now = ctx.deps.now();
   if (Math.abs(Number(e.issuedAt) - now) > ISSUED_AT_SKEW_SECONDS) return json({ error: "the signed form is stale — sign it again" }, 400);
   if (firstFill(ctx, e.participant, r.startsAt) === null) return json({ error: "make at least one swap with this address first" }, 403);
@@ -259,13 +302,7 @@ async function postEntry(ctx: RaffleContext, r: RaffleConfig | undefined, reques
   const billed = ctx.gateKey(`rf:${e.participant}`, ROUTE_COST.write);
   if (billed) return billed;
 
-  const td = participationTypedData(ctx.cfg.chain.chainId, {
-    participant: e.participant,
-    promotion: e.promotion,
-    terms: e.terms,
-    answers: answersHash(e.answers),
-    issuedAt: e.issuedAt,
-  });
+  const td = feedbackTypedData(ctx.cfg.chain.chainId, { participant: e.participant, promotion: e.promotion, answers: answersHash(e.answers), issuedAt: e.issuedAt });
   if (!(await signedBy(ctx, td, e.participant, e.signature))) return json({ error: "the signature does not match the participant and form" }, 401);
 
   // Synchronous from here: re-read the row the awaits may have raced.
@@ -290,15 +327,66 @@ async function postEntry(ctx: RaffleContext, r: RaffleConfig | undefined, reques
   return json({ entered: true, updated: !!current, address: e.participant, enteredAt: row.entered_at, updatedAt: row.updated_at }, current ? 200 : 201);
 }
 
-async function signedBy(ctx: RaffleContext, td: ReturnType<typeof participationTypedData>, signer: Address, signature: Hex): Promise<boolean> {
+// ──────────────────── POST /raffle/claims ────────────────────
+
+/**
+ * A drawn winner confirms eligibility (TC §3, §7.5) and accepts the Terms by hash. Only
+ * an address the saved draw result names, only for the running promotion, only within
+ * the claim window; a second claim of the same prize is a no-op.
+ */
+async function postClaim(ctx: RaffleContext, r: RaffleConfig | undefined, request: Request, ip: string): Promise<Response> {
+  const { json } = ctx;
+  if (!r) return json({ error: "no promotion is running" }, 404);
+  const refused = ctx.gate(ip, ROUTE_COST.write);
+  if (refused) return refused;
+  const raw = await ctx.readJsonBody(request);
+  if (raw instanceof Response) return raw;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return json({ error: "body must be a JSON object" }, 400);
+  const b = raw as Record<string, unknown>;
+  for (const k of Object.keys(b)) if (!["participant", "promotion", "draw", "terms", "issuedAt", "signature"].includes(k)) return json({ error: `unknown field "${k}"` }, 400);
+  if (typeof b.participant !== "string" || !ADDRESS.test(b.participant)) return json({ error: "participant must be an address" }, 400);
+  if (typeof b.promotion !== "string" || b.promotion !== r.id) return json({ error: "this claim is for another promotion" }, 409);
+  if (typeof b.draw !== "string" || !DAY.test(b.draw)) return json({ error: "draw must be a record key (YYYY-MM-DD)" }, 400);
+  if (typeof b.terms !== "string" || b.terms.toLowerCase() !== r.terms) return json({ error: "the Terms have changed since this page loaded — reload and review them" }, 409);
+  const issued = typeof b.issuedAt === "number" ? String(b.issuedAt) : b.issuedAt;
+  if (typeof issued !== "string" || !/^\d{1,12}$/.test(issued)) return json({ error: "issuedAt must be unix seconds" }, 400);
+  if (typeof b.signature !== "string" || !SIG.test(b.signature) || b.signature.length > 2 + 2 * 4096) return json({ error: "signature must be hex" }, 400);
+  const participant = b.participant.toLowerCase() as Address;
+  const now = ctx.deps.now();
+  if (Math.abs(Number(issued) - now) > ISSUED_AT_SKEW_SECONDS) return json({ error: "the signed claim is stale — sign it again" }, 400);
+
+  const win = winsOf(ctx, r.id, participant).find((w) => w.day === b.draw);
+  if (!win) return json({ error: "this address was not drawn in that draw" }, 403);
+  if (win.claimed) return json({ claimed: true, already: true, day: win.day, claimedAt: win.claimedAt }, 200);
+  if (now > win.claimBy) return json({ error: "the claim window for this draw has closed — contact 1delta through its official channels" }, 403);
+  const billed = ctx.gateKey(`rc:${participant}`, ROUTE_COST.write);
+  if (billed) return billed;
+
+  const td = claimTypedData(ctx.cfg.chain.chainId, { participant, promotion: r.id, draw: b.draw, terms: r.terms, issuedAt: BigInt(issued) });
+  if (!(await signedBy(ctx, td, participant, b.signature as Hex))) return json({ error: "the signature does not match the winner and claim" }, 401);
+  ctx.sql.exec(
+    `INSERT INTO raffle_claims (promotion, day, address, claimed_at, signature, source) VALUES (?, ?, ?, ?, ?, 'signed')
+     ON CONFLICT(promotion, day, address) DO NOTHING`,
+    r.id,
+    b.draw,
+    participant,
+    now,
+    b.signature as string,
+  );
+  return json({ claimed: true, day: b.draw, payout: win.payout, token: win.token, claimedAt: now }, 201);
+}
+
+async function signedBy(ctx: RaffleContext, td: ReturnType<typeof feedbackTypedData> | ReturnType<typeof claimTypedData>, signer: Address, signature: Hex): Promise<boolean> {
+  // The two typed-data shapes are checked the same way; viem's generics want one shape, so widen.
+  const any = td as unknown as Parameters<typeof hashTypedData>[0];
   try {
-    const recovered = await recoverTypedDataAddress({ ...td, signature });
+    const recovered = await recoverTypedDataAddress({ ...any, signature });
     if (recovered.toLowerCase() === signer) return true;
   } catch {
     // Not a 65-byte ECDSA signature: a contract wallet's, perhaps.
   }
   if (!ctx.deps.isValidSignature) return false;
-  return ctx.deps.isValidSignature(signer, hashTypedData(td), signature);
+  return ctx.deps.isValidSignature(signer, hashTypedData(any), signature);
 }
 
 // ──────────────────── /raffle/admin/* ────────────────────
@@ -366,8 +454,7 @@ async function adminRoute(ctx: RaffleContext, sub: string, method: string, reque
     const promotion = promotionOf(ctx, url);
     if (!promotion) return json({ error: "no promotion: pass ?promotion=" }, 400);
     if (method === "GET") return exportEntries(ctx, promotion);
-    if (method === "POST") return manualEntry(ctx, promotion, request);
-    return notAllowed("GET, POST");
+    return notAllowed("GET");
   }
 
   const one = /^\/entries\/(0x[0-9a-fA-F]{40})$/.exec(sub);
@@ -390,7 +477,57 @@ async function adminRoute(ctx: RaffleContext, sub: string, method: string, reque
     const first = firstFill(ctx, a, r?.startsAt ?? 0);
     const entry = promotion ? entryOf(ctx, promotion, a) : undefined;
     const fills = count(ctx.sql, `SELECT COUNT(*) AS n FROM fills WHERE maker = ?`, a);
-    return json({ address: a, promotion: promotion ?? null, fills, firstFillAt: first, entered: !!entry, ...(entry ? { entry: entryJson(entry) } : {}) });
+    return json({
+      address: a,
+      promotion: promotion ?? null,
+      fills,
+      firstFillAt: first,
+      entered: !!entry,
+      ...(entry ? { entry: entryJson(entry) } : {}),
+      wins: promotion ? winsOf(ctx, promotion, a) : [],
+      claims: promotion ? ctx.sql.exec<ClaimRow>(`SELECT * FROM raffle_claims WHERE promotion = ? AND address = ?`, promotion, a).toArray().map(claimJson) : [],
+    });
+  }
+
+  if (sub === "/claims") {
+    const promotion = promotionOf(ctx, url);
+    if (!promotion) return json({ error: "no promotion: pass ?promotion=" }, 400);
+    if (method === "GET") {
+      return json({ promotion, claims: ctx.sql.exec<ClaimRow>(`SELECT * FROM raffle_claims WHERE promotion = ? ORDER BY day ASC, claimed_at ASC`, promotion).toArray().map(claimJson) });
+    }
+    if (method === "POST") {
+      // A winner confirmed another way (a signed message in Telegram, a call): the admin
+      // records it, with a note saying how. The payout review still happens.
+      const b = await body(ctx, request);
+      if (b instanceof Response) return b;
+      const address = typeof b.address === "string" ? b.address.trim().toLowerCase() : "";
+      const day = typeof b.day === "string" ? b.day : "";
+      const note = typeof b.note === "string" ? b.note.trim() : "";
+      if (!ADDRESS.test(address)) return json({ error: "address must be an address" }, 400);
+      if (!DAY.test(day)) return json({ error: "day must be a draw record key (YYYY-MM-DD)" }, 400);
+      if (!note || note.length > 500) return json({ error: "a note (how the winner confirmed, ≤ 500 chars) is required" }, 400);
+      if (!winsOf(ctx, promotion, address).some((w) => w.day === day)) return json({ error: "this address was not drawn in that draw" }, 409);
+      ctx.sql.exec(
+        `INSERT INTO raffle_claims (promotion, day, address, claimed_at, signature, source, note) VALUES (?, ?, ?, ?, '', 'manual', ?)
+         ON CONFLICT(promotion, day, address) DO UPDATE SET note = excluded.note`,
+        promotion,
+        day,
+        address,
+        ctx.deps.now(),
+        note,
+      );
+      return json({ promotion, claim: claimJson(claimOf(ctx, promotion, day, address)!) }, 201);
+    }
+    return notAllowed("GET, POST");
+  }
+
+  const oneClaim = /^\/claims\/(\d{4}-\d{2}-\d{2})\/(0x[0-9a-fA-F]{40})$/.exec(sub);
+  if (oneClaim) {
+    if (method !== "DELETE") return notAllowed("DELETE");
+    const promotion = promotionOf(ctx, url);
+    if (!promotion) return json({ error: "no promotion: pass ?promotion=" }, 400);
+    ctx.sql.exec(`DELETE FROM raffle_claims WHERE promotion = ? AND day = ? AND address = ?`, promotion, oneClaim[1]!, oneClaim[2]!.toLowerCase());
+    return json({ promotion, day: oneClaim[1], address: oneClaim[2]!.toLowerCase(), removed: true });
   }
 
   if (sub === "/reset") {
@@ -402,9 +539,11 @@ async function adminRoute(ctx: RaffleContext, sub: string, method: string, reque
     if (!promotion || b.confirm !== promotion) return json({ error: "reset needs {promotion, confirm} with confirm equal to the promotion id" }, 400);
     const entries = count(ctx.sql, `SELECT COUNT(*) AS n FROM raffle_entries WHERE promotion = ?`, promotion);
     const drawn = count(ctx.sql, `SELECT COUNT(*) AS n FROM raffle_draws WHERE promotion = ?`, promotion);
+    const claims = count(ctx.sql, `SELECT COUNT(*) AS n FROM raffle_claims WHERE promotion = ?`, promotion);
     ctx.sql.exec(`DELETE FROM raffle_entries WHERE promotion = ?`, promotion);
     ctx.sql.exec(`DELETE FROM raffle_draws WHERE promotion = ?`, promotion);
-    return json({ promotion, entriesRemoved: entries, drawsRemoved: drawn });
+    ctx.sql.exec(`DELETE FROM raffle_claims WHERE promotion = ?`, promotion);
+    return json({ promotion, entriesRemoved: entries, drawsRemoved: drawn, claimsRemoved: claims });
   }
 
   if (sub === "/draws") {
@@ -435,6 +574,7 @@ async function adminRoute(ctx: RaffleContext, sub: string, method: string, reque
     }
     if (method === "DELETE") {
       ctx.sql.exec(`DELETE FROM raffle_draws WHERE promotion = ? AND day = ?`, promotion, d[1]!);
+      ctx.sql.exec(`DELETE FROM raffle_claims WHERE promotion = ? AND day = ?`, promotion, d[1]!);
       return json({ promotion, day: d[1], removed: true });
     }
     return notAllowed("PUT, DELETE");
@@ -476,43 +616,6 @@ function exportEntries(ctx: RaffleContext, promotion: string): Response {
   return ctx.json({ promotion, questions: PARTICIPATION_QUESTIONS, count: rows.length, entries: rows.map(entryJson) });
 }
 
-/**
- * A support case: add (or annotate) an entry by hand. No signature and no fill check
- * — the admin vouches for it and says why in `note`; the row is marked `manual` so the
- * draw tool and the export show it. A later signed form from the address replaces it.
- */
-async function manualEntry(ctx: RaffleContext, promotion: string, request: Request): Promise<Response> {
-  const { json } = ctx;
-  const b = await body(ctx, request);
-  if (b instanceof Response) return b;
-  const address = typeof b.address === "string" ? b.address.trim().toLowerCase() : "";
-  if (!ADDRESS.test(address)) return json({ error: "address must be an address" }, 400);
-  const note = typeof b.note === "string" ? b.note.trim() : "";
-  if (!note || note.length > 500) return json({ error: "a note (why it is added by hand, ≤ 500 chars) is required" }, 400);
-  const answers = (b.answers ?? {}) as ParticipationAnswers;
-  if (Object.keys(answers).length) {
-    const bad = validateAnswers(answers);
-    if (bad) return json({ error: bad }, 400);
-  }
-  const now = ctx.deps.now();
-  const enteredAt = b.enteredAt === undefined ? now : Number(b.enteredAt);
-  if (!Number.isSafeInteger(enteredAt) || enteredAt < 0) return json({ error: "enteredAt must be unix seconds" }, 400);
-  const existing = entryOf(ctx, promotion, address);
-  if (existing && existing.source === "signed" && !b.overwrite) {
-    return json({ error: "this address has a signed entry; pass overwrite: true to replace its answers by hand" }, 409);
-  }
-  ctx.sql.exec(
-    `INSERT INTO raffle_entries (promotion, address, entered_at, updated_at, issued_at, answers, signature, source, note)
-     VALUES (?, ?, ?, ?, 0, ?, '', 'manual', ?)
-     ON CONFLICT(promotion, address) DO UPDATE SET
-       entered_at = excluded.entered_at, updated_at = excluded.updated_at, answers = excluded.answers,
-       signature = '', issued_at = 0, source = 'manual', note = excluded.note`,
-    promotion,
-    address,
-    enteredAt,
-    now,
-    canonicalAnswers(answers),
-    note,
-  );
-  return json({ promotion, entry: entryJson(entryOf(ctx, promotion, address)!) }, existing ? 200 : 201);
+function claimJson(c: ClaimRow) {
+  return { day: c.day, address: c.address, claimedAt: c.claimed_at, source: c.source, note: c.note, signature: c.signature };
 }

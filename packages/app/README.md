@@ -745,13 +745,16 @@ capped key.
 
 **The prize draw.** `config/promotion.ts` is the single place the draw is
 described, and `components/Raffle.tsx` is the only place it is mentioned in the
-trading UI. ENTRY (2026-10-20): the notice reads the orderbook's `/raffle/status`
-and shows **Participate** once the connected address has a fill as maker; it opens
-`components/Participate.tsx`, a short feedback form whose gasless EIP-712 signature
-(SDK `participation.ts`, which the worker re-verifies) is the entry. The form names
-the Terms by hash: `TERMS_HASH` is keccak256 of `TC.md` at build time
-(`vite.config.ts` `define`, `pnpm terms-hash`) and must equal the worker's
-`RAFFLE_TERMS_HASH`, or the notice says the Terms changed instead of offering a form.
+trading UI. NO ENTRY (TC §4.1, the reviewed Terms): every wallet that trades is in
+the draw. The notice reads the orderbook's `/raffle/status` and shows **Rate the app**
+once the connected address has a fill as maker; it opens `components/Participate.tsx`,
+an optional feedback form whose gasless EIP-712 signature (SDK `feedbackTypedData`,
+which the worker re-verifies) proves the answers come from a user. A drawn winner sees
+a **claim** button (`claimView`, from `status.wins`) and signs the eligibility
+confirmations (`ClaimSheet`, SDK `claimTypedData`), which name the Terms by hash:
+`TERMS_HASH` is keccak256 of `TC.md` at build time (`vite.config.ts` `define`,
+`pnpm terms-hash`) and must equal the worker's `RAFFLE_TERMS_HASH`, or the notice asks
+the winner to reload before claiming.
 The daily selection lives in `packages/raffle-admin` (console + `scripts/raffle-draw.ts`) (snapshot → publish `listHash` and a
 future block → draw); `PROMOTION.support` adds an ungated "Report a problem" link.
 The notice is shown only while the orderbook's desk says the draw is live for this
