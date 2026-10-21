@@ -492,11 +492,17 @@ footer a { color: var(--dim); }
 
 .hide { display: none !important; }
 
-@media (max-width: 1000px) { .deck { grid-template-columns: 1fr; } }
+/* minmax(0, 1fr), not 1fr: a bare 1fr track is minmax(auto, 1fr), so the ticket's 21px amount input
+   (intrinsic ~20ch) widened the column past the phone viewport and clipped the right edge. */
+@media (max-width: 1000px) { .deck { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 640px) {
   .lvl, .bkcols { grid-template-columns: 1fr 1fr 64px; padding-inline: 16px; }
   .lvl .cum, .bkcols span:nth-child(3) { display: none; }
-  .nav { gap: 10px; }
+  .nav { gap: 10px; padding-inline: 16px; }
+  /* phone gutter: 16px page edge, 16px card padding (desktop 24 / 22) */
+  main { padding-inline: 16px; }
+  .boxhead { padding-inline: 16px; }
+  .boxbody { padding: 18px 16px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition-duration: .001ms !important; } }
 
