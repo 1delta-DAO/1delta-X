@@ -167,6 +167,8 @@ interface OrderFormProps {
   fillGasUsd?: number;
   /** Set when the ticket is worth less than one fill's network gas (App): refused, never quoted. */
   tooSmall?: { ticketUsd: number; gasUsd: number } | null;
+  /** The pre-audit cap for this wallet (lib/betaCap.ts); `over` refuses the ticket. */
+  betaCap?: { capUsd: number; usedUsd: number; leftUsd: number; over: boolean } | null;
   /** USD per one token (lib/usdPrices: Sushi's price API, else stables / the market mid); display only. */
   usdOf?: (symbol: string) => number | undefined;
   onConnect: () => void;
@@ -337,6 +339,7 @@ export function OrderForm(props: OrderFormProps) {
     unwrap,
     usdOf,
     tooSmall,
+    betaCap,
     fillGasUsd,
     onConnect,
     onSign,
@@ -514,7 +517,8 @@ export function OrderForm(props: OrderFormProps) {
     quoting: quoteStatus === "loading",
     priced: isMarket ? !!figures : !!quote && quote.totalIn > 0,
   });
-  const canSign = !sb.disabled && !needsApproval && !tooSmall;
+  const overCap = !!betaCap?.over;
+  const canSign = !sb.disabled && !needsApproval && !tooSmall && !overCap;
 
   return (
     <div className="box ticketbox">
@@ -602,6 +606,10 @@ export function OrderForm(props: OrderFormProps) {
                 <span className="capnote">
                   exceeds {autoWrap && autoWrap.value > 0 ? "spendable" : "your balance of"} {fmtBalance(paySpendable ?? 0)} {payToken}
                   {autoWrap && autoWrap.value > 0 ? ` (incl. ${autoWrap.symbol} to wrap)` : ""}
+                </span>
+              ) : overCap && betaCap ? (
+                <span className="capnote">
+                  beta limit: {fmtUsd(betaCap.leftUsd)} left of {fmtUsd(betaCap.capUsd)} per wallet
                 </span>
               ) : tooSmall ? (
                 <span className="capnote">
@@ -1009,7 +1017,8 @@ export function OrderForm(props: OrderFormProps) {
                       allowance.required <= 0 ||
                       allowance.mismatch !== null ||
                       allowance.blocked !== null ||
-                      !!tooSmall
+                      !!tooSmall ||
+                      overCap
                     }
                     onClick={allowance.approve}
                   >
@@ -1072,7 +1081,7 @@ export function OrderForm(props: OrderFormProps) {
                 </>
               )}
               <button type="button" className="cta" disabled={!canSign} onClick={onSign}>
-                {tooSmall ? "Amount too small to fill" : sb.label}
+                {overCap && betaCap ? `Over the ${fmtUsd(betaCap.capUsd)} beta limit` : tooSmall ? "Amount too small to fill" : sb.label}
               </button>
             </>
           )}
