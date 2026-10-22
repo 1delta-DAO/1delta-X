@@ -18,7 +18,7 @@ import { TermsLink } from "./components/TermsLink";
 import { chainById, chainLabel } from "./config/chains";
 import { deploymentFor, exclusivityForMarket, nativeOutFor, solverForMarket, type NativeOutShape } from "./config/deployments";
 import { marketById, pairsWith, pinnedToken, symbolsOn, wrappedNativeSymbol } from "./config/markets";
-import { betaCapFor, capCheck, usedUsd } from "./lib/betaCap";
+import { betaCapFor, capCheck } from "./lib/betaCap";
 import { useChainPools } from "./hooks/useChainPools";
 import { useMarketFloorInputs } from "./hooks/useMarketFloor";
 import { useUsdPrices } from "./hooks/useUsdPrices";
@@ -306,32 +306,10 @@ export default function App() {
   const ticketUsd = payPx !== undefined && ticket.amount > 0 ? (ticket.amount / (ticket.mode === "twap" ? Math.max(1, ticket.slices) : 1)) * payPx : undefined;
   const tooSmall = ticketUsd !== undefined && fillGasUsd !== undefined && ticketUsd < fillGasUsd ? { ticketUsd, gasUsd: fillGasUsd } : null;
 
-  // PRE-AUDIT CAP (lib/betaCap.ts): per wallet, the USD it has had filled + what its open
-  // orders can still fill + this whole ticket (a TWAP's every slice) may not pass the cap.
+  // PRE-AUDIT CAP (lib/betaCap.ts): no single order (a TWAP's whole size) worth more than the cap.
   const capUsd = betaCapFor(chainId);
-  const capUsed = useMemo(() => {
-    if (!wallet.address || capUsd === undefined) return 0;
-    const safe = (m: string) => {
-      try {
-        return marketById(m);
-      } catch {
-        return undefined;
-      }
-    };
-    return usedUsd({
-      account: wallet.address,
-      chainId,
-      fills,
-      orders: allOrders,
-      baseUsd: (m) => {
-        const mk = safe(m);
-        return mk ? usdOf(mk.base) : undefined;
-      },
-      chainOf: (m) => safe(m)?.chainId ?? -1,
-    }).usd;
-  }, [wallet.address, capUsd, chainId, fills, allOrders, usdOf]);
   const ticketTotalUsd = payPx !== undefined && ticket.amount > 0 ? ticket.amount * payPx : undefined;
-  const betaCap = wallet.address && capUsd !== undefined ? capCheck(capUsd, capUsed, ticketTotalUsd) : null;
+  const betaCap = capUsd !== undefined ? capCheck(capUsd, ticketTotalUsd) : null;
 
   // MARKET tickets are priced by the FILLER's indicative quote (lib/quote.ts): the order
   // starts at what the filler would deliver now (route output − gas − its gas margin)
@@ -437,9 +415,9 @@ export default function App() {
   const maxAmount = (() => {
     if (payWei === undefined || payMeta.decimals === undefined) return undefined;
     const all = formatUnits(maxSpendableWei(payWei, false), payMeta.decimals);
-    // "Max" never goes past the pre-audit cap's room left (floored to 6 decimals).
+    // "Max" never goes past the per-order pre-audit cap (floored to 6 decimals).
     if (!betaCap || payPx === undefined || !(payPx > 0)) return all;
-    const room = Math.floor((betaCap.leftUsd / payPx) * 1e6) / 1e6;
+    const room = Math.floor((betaCap.capUsd / payPx) * 1e6) / 1e6;
     return room < Number(all) ? String(room) : all;
   })();
   // 25 % / 50 % of the same spendable figure, exact in wei (floored).
