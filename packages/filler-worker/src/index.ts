@@ -43,7 +43,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method.toUpperCase();
-    // Unauthenticated liveness: ok + last tick age, nothing else.
+    // Unauthenticated liveness: ok + last tick age, and the pre-audit total fill cap (filled so far / cap).
     if (path === "/health") {
       if (method !== "GET") return json({ error: "method not allowed" }, 405, { allow: "GET" });
       return stubFor(env).fetch(new Request("https://filler/health"));

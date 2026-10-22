@@ -58,6 +58,8 @@ export interface FillerState {
   gasRatios?: GasRatioState;
   /** Indicative quotes issued and the orders matched to them (quote.ts; ≤ MAX_QUOTES). */
   quotes?: QuoteBookState;
+  /** USD (6 dec, decimal string) of everything filled so far, for the pre-audit total cap (./totalCap.ts). */
+  filledUsd6?: string;
   /** The route strategy's discovered pool graph (poolGraph.ts): survives restarts, refreshed every ROUTE_DISCOVERY_SECONDS. */
   poolGraph?: PoolGraphState;
 }

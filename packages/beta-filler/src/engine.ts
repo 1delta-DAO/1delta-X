@@ -1,5 +1,5 @@
 import type { Address } from "viem";
-import { withSendGasPrice, type Chain } from "./chain";
+import { quoteRifToUsdt0, quoteWrbtcToUsdt0, withSendGasPrice, type Chain } from "./chain";
 import { AUCTION_RECHECK_MS, legacyRouteConfig, type Config } from "./config";
 import { dispatch, type Strategy } from "./dispatch";
 import { Filler, type FillOutcome } from "./filler";
@@ -14,6 +14,7 @@ import { SPOT_BUDGET_KEY, SpotFiller } from "./spot";
 import { ROUTE_FILLS, RouteFiller } from "./routeFiller";
 import { sanitize } from "./sanitize";
 import { STATE_KEY, type FillerState, type RecentEvent, type StateStore } from "./state";
+import { fillUsd6 } from "./totalCap";
 
 export type Log = (m: string) => void;
 
@@ -214,6 +215,7 @@ export class Engine {
     this.rebalancer = new Rebalancer(cfg, chain, log, this.guard, { ...(state.rebalance ?? {}) }, mark, dexQuote);
     this.quoter = new Quoter(cfg, chain, this.guard, this.quotes, { route: this.route, inventory: this.filler }, this.now, (m) => this.o.log(m));
     this.cursor = state.cursor;
+    this.filledUsd6 = state.filledUsd6 !== undefined && /^\d+$/.test(state.filledUsd6) ? BigInt(state.filledUsd6) : undefined;
     this.recentEvents = [...(state.recent ?? [])];
     for (const [h, until, fillable] of state.ownFills ?? []) this.holds.set(h, { until, fillable, why: "filled" });
   }
@@ -221,6 +223,49 @@ export class Engine {
   static async create(o: EngineOptions): Promise<Engine> {
     const state = (await o.store.get<FillerState>(STATE_KEY)) ?? {};
     return new Engine(o, state);
+  }
+
+  /**
+   * PRE-AUDIT TOTAL FILL CAP (./totalCap.ts): USD (6 dec) of everything filled so far.
+   * `undefined` until the host seeds it from its fill log ({@link seedFilledUsd6}); counted
+   * from 0 then.
+   */
+  private filledUsd6: bigint | undefined;
+  private capLogged = false;
+
+  /** Seed the filled total once (the Worker sums its fill log); later fills add to it. */
+  seedFilledUsd6(v: bigint): void {
+    if (this.filledUsd6 !== undefined) return;
+    this.filledUsd6 = v;
+    this.dirty = true;
+  }
+
+  get filledTotalUsd6(): bigint | undefined {
+    return this.filledUsd6;
+  }
+
+  /** Whether the pre-audit total fill cap is reached: no fills, no quotes. */
+  get totalCapReached(): boolean {
+    const cap = this.cfg.policy.totalFillCapUsd6;
+    return cap > 0n && (this.filledUsd6 ?? 0n) >= cap;
+  }
+
+  /** USD (6 dec) of `amount` of `token`: USD₮0 at face, USDRIF at $1, RBTC/WRBTC and RIF at the pools, else the route's pool quote. */
+  async priceUsd6(token: Address, amount: bigint): Promise<bigint | undefined> {
+    const t = token.toLowerCase();
+    const k = this.cfg.tokens;
+    if (amount === 0n) return 0n;
+    if (t === k.usdt0.toLowerCase()) return amount;
+    if (t === k.usdrif.toLowerCase()) return amount / 10n ** 12n;
+    const nb = this.cfg.route?.nativeBalance?.toLowerCase();
+    if (t === this.cfg.wrbtc.toLowerCase() || (nb && t === nb)) return this.filler ? this.filler.rbtcToUsdt0(amount) : quoteWrbtcToUsdt0(this.chain, this.cfg, amount);
+    if (t === k.rif.toLowerCase()) return quoteRifToUsdt0(this.chain, this.cfg, amount);
+    return this.route?.dexQuote(token, k.usdt0, amount);
+  }
+
+  /** USD (6 dec) of one fill, from its legs (./totalCap.ts `fillUsd6`). */
+  fillUsd6(leg: { payToken?: string | null; paid?: string | null; recvToken?: string | null; received?: string | null }): Promise<bigint | undefined> {
+    return fillUsd6(this.cfg, leg, (t, a) => this.priceUsd6(t, a));
   }
 
   /** The outstanding tx, if any. */
@@ -248,6 +293,7 @@ export class Engine {
       recent: this.recentEvents,
       ...(ownFills.length ? { ownFills } : {}),
       gasRatios: this.gasRatios.toJSON(),
+      ...(this.filledUsd6 !== undefined ? { filledUsd6: this.filledUsd6.toString() } : {}),
       ...(this.quotes.size ? { quotes: this.quotes.toJSON() } : {}),
       ...(this.route?.graphState() ? { poolGraph: this.route.graphState()! } : {}),
     };
@@ -259,6 +305,7 @@ export class Engine {
    * Read-only on the chain; never sends anything.
    */
   async quote(req: QuoteRequest): Promise<Verdict<{ quote: QuoteResult }>> {
+    if (this.totalCapReached) return { ok: false, reason: `the pre-audit beta's total fill cap ($${Number(this.cfg.policy.totalFillCapUsd6) / 1e6}) is reached: no new fills until the audit` };
     return this.quoter.quote(req);
   }
 
@@ -335,6 +382,15 @@ export class Engine {
             this.o.log(`MoC op id read failed: ${errMsg(e)}`);
           }
         }
+        // The pre-audit total: every mined fill adds its USD value.
+        if (p.kind === "fill" && p.info) {
+          const usd = await this.fillUsd6(p.info).catch(() => undefined);
+          if (usd !== undefined) {
+            this.filledUsd6 = (this.filledUsd6 ?? 0n) + usd;
+            this.dirty = true;
+            if (this.totalCapReached) this.o.log(`PRE-AUDIT TOTAL FILL CAP reached: $${Number(this.filledUsd6) / 1e6} filled of $${Number(this.cfg.policy.totalFillCapUsd6) / 1e6}; no more fills or quotes`);
+          }
+        }
         this.record({ type: p.kind === "fill" ? "filled" : "sent", strategy: p.strategy, kind: p.kind, orderHash: p.orderHash, tx: p.hash, reason: p.kind === "fill" ? undefined : "mined" });
         break;
       case "reverted":
@@ -390,6 +446,12 @@ export class Engine {
     let evaluated = 0;
     let bounded = false;
     let held = 0;
+    // The pre-audit total fill cap (./totalCap.ts): reached = nothing is filled any more.
+    if (this.totalCapReached) {
+      if (!this.capLogged) this.o.log(`pre-audit total fill cap reached ($${Number(this.filledUsd6 ?? 0n) / 1e6} of $${Number(this.cfg.policy.totalFillCapUsd6) / 1e6}): not filling`);
+      this.capLogged = true;
+      return { evaluated, outcomes, held: entries.length };
+    }
     if (this.guard.pending) return { evaluated, outcomes, sent: undefined, held };
     this.beginSweep();
     this.quotes.prune(this.now(), this.cfg.quote.matchGraceSeconds);

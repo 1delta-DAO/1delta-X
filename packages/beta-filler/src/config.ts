@@ -1,4 +1,5 @@
 import { MAX_POOL_HOPS, nativeBalanceOf } from "@1delta-x/sdk";
+import { DEFAULT_TOTAL_FILL_CAP_USD } from "./totalCap";
 import { getAddress, isAddress, type Address, type Hex } from "viem";
 
 import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK, type NordsternConfig } from "./nordstern";
@@ -352,6 +353,8 @@ export interface Policy {
   usdrifPegToleranceBps: bigint;
   /** SPOT reserves (INVENTORY-POLICY §9): small reserves the wallet fills small tickets from. */
   spot: SpotPolicy;
+  /** `TOTAL_FILL_CAP_USD` (default 25,000, USD₮0 units): stop filling and quoting once the total filled reaches it (./totalCap.ts); 0 = no cap. */
+  totalFillCapUsd6: bigint;
 }
 
 /** One spot reserve: a token held around a USD target, rebalanced against USD₮0 on one pool. */
@@ -956,6 +959,7 @@ export function loadConfig(env: Env): Config {
     railSwapSlippageBps: bps(env, "RAIL_SWAP_SLIPPAGE_BPS", 30),
     railUsdrifBatch: fixed(env, "RAIL_USDRIF_BATCH", "100", USDRIF_DECIMALS),
     usdrifPegToleranceBps: bps(env, "USDRIF_PEG_TOLERANCE_BPS", 50),
+    totalFillCapUsd6: fixed(env, "TOTAL_FILL_CAP_USD", String(DEFAULT_TOTAL_FILL_CAP_USD), USDT0_DECIMALS),
     spot: {
       reserves: parseSpotReserves(env.SPOT_RESERVES),
       bandBps: bps(env, "SPOT_BAND_BPS", 5000),

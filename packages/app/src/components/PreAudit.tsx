@@ -47,7 +47,7 @@ export function PreAuditStrip({ onDetails }: { onDetails: () => void }) {
     <div className="preaudit" role="note">
       <span className="pill pill-orange">Pre-audit beta</span>
       <span>
-        These contracts are <b>unaudited</b>. Each order is capped at <b>$1,000</b> during the beta, and approvals
+        These contracts are <b>unaudited</b>. Orders are capped at <b>$1,000</b> per order and per wallet during the beta, and approvals
         are capped at the size of each order. Trade only what you can afford to lose.
       </span>
       <button type="button" className="linkbtn" onClick={onDetails}>

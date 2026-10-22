@@ -213,12 +213,13 @@ describe("admin API", () => {
     expect(await safeEqual("a".repeat(1000), "a")).toBe(false);
   });
 
-  it("the admin routes do not answer on *.workers.dev; /health does, unauthenticated, with ok + age only", async () => {
+  it("the admin routes do not answer on *.workers.dev; /health does, unauthenticated, with ok + age (+ the public pre-audit total cap once the engine runs)", async () => {
     expect((await worker.fetch(req("/status", { token: ADMIN, host: "filler-1delta-rsk.acct.workers.dev" }), testEnv)).status).toBe(404);
     const h = await worker.fetch(req("/health", { host: "filler-1delta-rsk.acct.workers.dev" }), testEnv);
     expect(h.status).toBe(200);
     const body = (await h.json()) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(["lastTickAgeSeconds", "ok"]);
+    const keys = Object.keys(body).sort();
+    expect(keys.filter((k) => !["totalCapReached", "totalFillCapUsd", "totalFilledUsd"].includes(k))).toEqual(["lastTickAgeSeconds", "ok"]);
   });
 
   it("POST /tick runs a tick; wrong methods are 405; unknown paths 404", async () => {

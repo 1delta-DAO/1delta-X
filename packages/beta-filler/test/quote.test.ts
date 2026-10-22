@@ -490,6 +490,25 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(rail.ok && rail.quote.strategy).toBe("route");
   });
 
+  it("PRE-AUDIT TOTAL FILL CAP: at the cap no quote and no fill; below it, as before", async () => {
+    const cfg = loadConfig({ ...ENV, TOTAL_FILL_CAP_USD: "100" });
+    expect(cfg.policy.totalFillCapUsd6).toBe(100_000_000n);
+    expect(loadConfig(ENV).policy.totalFillCapUsd6).toBe(25_000_000_000n);
+    const below = await Engine.create({ cfg, chain: fake().chain, store: new MemoryStateStore(), log: () => {} });
+    below.seedFilledUsd6(99_000_000n);
+    expect(below.totalCapReached).toBe(false);
+    expect((await below.quote(sellReq())).ok).toBe(true);
+    const at = await Engine.create({ cfg, chain: fake().chain, store: new MemoryStateStore(), log: () => {} });
+    at.seedFilledUsd6(100_000_000n);
+    at.seedFilledUsd6(0n); // seeded once only
+    expect(at.totalCapReached).toBe(true);
+    const q = await at.quote(sellReq());
+    expect(!q.ok && q.reason).toMatch(/total fill cap/);
+    const sw = await at.sweep([{ orderHash: ("0x" + "11".repeat(32)) as never } as never]);
+    expect([sw.evaluated, sw.outcomes.length, sw.sent]).toEqual([0, 0, undefined]);
+    expect(at.snapshot().filledUsd6).toBe("100000000");
+  });
+
   it("inventory refuses what it could not fill (wallet balance): the route quote stands", async () => {
     const { chain } = fake({ usdt0Balance: 1_000_000n });
     const e = await Engine.create({ cfg: loadConfig({ ...ENV, INVENTORY_ENABLED: "1" }), chain, store: new MemoryStateStore(), log: () => {} });

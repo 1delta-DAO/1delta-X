@@ -167,8 +167,8 @@ interface OrderFormProps {
   fillGasUsd?: number;
   /** Set when the ticket is worth less than one fill's network gas (App): refused, never quoted. */
   tooSmall?: { ticketUsd: number; gasUsd: number } | null;
-  /** The per-order pre-audit cap (lib/betaCap.ts); `over` refuses the ticket. */
-  betaCap?: { capUsd: number; over: boolean } | null;
+  /** The pre-audit caps (lib/betaCap.ts); `over` refuses the ticket, `note` states every limit. */
+  betaCap?: { capUsd: number; leftUsd: number; over: boolean; kind?: "order" | "wallet"; note: string } | null;
   /** USD per one token (lib/usdPrices: Sushi's price API, else stables / the market mid); display only. */
   usdOf?: (symbol: string) => number | undefined;
   onConnect: () => void;
@@ -609,7 +609,12 @@ export function OrderForm(props: OrderFormProps) {
                 </span>
               ) : overCap && betaCap ? (
                 <span className="capnote">
-                  beta limit: {fmtUsd(betaCap.capUsd)} per order
+                  {betaCap.kind === "wallet"
+                    ? `beta limit: ${fmtUsd(betaCap.leftUsd)} left beside your open orders`
+                    : `beta limit: ${fmtUsd(betaCap.capUsd)} per order`}{" "}
+                  <span className="info" tabIndex={0} role="img" aria-label={betaCap.note} title={betaCap.note}>
+                    i
+                  </span>
                 </span>
               ) : tooSmall ? (
                 <span className="capnote">

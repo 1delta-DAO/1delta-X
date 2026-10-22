@@ -257,7 +257,19 @@ export class FillerDO extends DurableObject<Env> {
       return fetch(input, init);
     }) as typeof fetch;
     const chain = deps.makeChain(cfg, { fetchFn, count });
-    return Engine.create({ cfg, chain, store: this.store, log: this.log, now: () => deps.now(), onEvent: (e) => this.onEvent(e) });
+    const engine = await Engine.create({ cfg, chain, store: this.store, log: this.log, now: () => deps.now(), onEvent: (e) => this.onEvent(e) });
+    // PRE-AUDIT TOTAL FILL CAP: seed the filled total once from the fill log (later fills add to it in the engine).
+    if (engine.filledTotalUsd6 === undefined) {
+      let total = 0n;
+      for (const r of listFills(this.sql, { limit: 20_000, kind: "fill", status: "filled" })) {
+        const usd = await engine.fillUsd6({ payToken: r.pay_token, paid: r.paid, recvToken: r.recv_token, received: r.received }).catch(() => undefined);
+        total += usd ?? 0n;
+      }
+      engine.seedFilledUsd6(total);
+      this.log(`pre-audit total fill cap: seeded $${Number(total) / 1e6} filled of $${Number(cfg.policy.totalFillCapUsd6) / 1e6}`);
+      await engine.saveIfDirty();
+    }
+    return engine;
   }
 
   private async onEvent(e: EngineEvent): Promise<void> {
@@ -592,7 +604,12 @@ export class FillerDO extends DurableObject<Env> {
       if (path === "/health") {
         const age = ws.lastTickAt === undefined ? null : Math.max(0, Math.round((deps.now() - ws.lastTickAt) / 1000));
         const limit = Math.max(120, 3 * ((this.wcfg?.tickMs ?? 5_000) / 1000));
-        return json({ ok: age !== null && age <= limit, lastTickAgeSeconds: age });
+        // The pre-audit total fill cap, public (grant thread: caps published and checkable).
+        const engine = this.enginePromise ? await this.enginePromise.catch(() => undefined) : undefined;
+        const cap = engine
+          ? { totalFilledUsd: Number(engine.filledTotalUsd6 ?? 0n) / 1e6, totalFillCapUsd: Number(engine.cfg.policy.totalFillCapUsd6) / 1e6, totalCapReached: engine.totalCapReached }
+          : {};
+        return json({ ok: age !== null && age <= limit, lastTickAgeSeconds: age, ...cap });
       }
       if (path === "/quote" && method === "POST") return await this.quote(request);
       if (path === "/status" && method === "GET") return json(await this.status());
