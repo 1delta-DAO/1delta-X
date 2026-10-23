@@ -91,14 +91,20 @@ export async function permitStage(c: Chain, cfg: Config, entry: BookEntry, nowS:
   ]);
   const [status, fillable, sigValid] = state;
   if (Number(status) !== FILLABLE || !sigValid) return { kind: "dead", reason: `order not fillable (lens status ${status}${sigValid ? "" : ", bad signature"})` };
-  // An allowance already funds it — the permit ran (front-run, or an earlier fill of
+  // An allowance already funds it ALL — the permit ran (front-run, or an earlier fill of
   // ours) or the maker approved: fill without the permit, it would only cost gas.
-  if (fillable > 0n) return { kind: "funded", fillable };
+  if (fillable > 0n && fillable >= remaining) return { kind: "funded", fillable };
+  // Partly funded (2026-10-23): a DUST allowance left by an earlier order (exact-approval
+  // and permit leftovers, e.g. 0.08 USD₮0) made the lens report a sliver fillable, and the
+  // order was treated as funded at that size: never worth a fill, so it never filled. The
+  // permit SETS the allowance to its value, so while it is live and funds more, carry it.
+  const live = cfg.permitFills && nonce === p.nonce && p.deadline > nowS + PERMIT_DEADLINE_MARGIN_S && balance > 0n;
+  const est = live ? permitFillable(order, p, remaining, balance) : 0n;
+  if (fillable > 0n) return est > fillable ? { kind: "permit", fillable: est, permit: p } : { kind: "funded", fillable };
   if (!cfg.permitFills) return { kind: "dead", reason: "unfunded; in-fill maker permits disabled (PERMIT_FILLS_ENABLED=0)" };
   if (nonce !== p.nonce) return { kind: "dead", reason: `unfunded; maker permit spent or superseded (token nonce ${nonce}, permit ${p.nonce})` };
   if (p.deadline <= nowS + PERMIT_DEADLINE_MARGIN_S) return { kind: "dead", reason: "unfunded; maker permit expires too soon to land" };
   if (balance === 0n) return { kind: "dead", reason: "unfunded; maker holds none of the permit token" };
-  const est = permitFillable(order, p, remaining, balance);
   if (est === 0n) return { kind: "dead", reason: "nothing left to fill" };
   return { kind: "permit", fillable: est, permit: p };
 }

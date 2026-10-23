@@ -100,6 +100,7 @@ function world(o: { received?: bigint; owed?: bigint } = {}) {
   const w = {
     nonce: 0n, // USD₮0 nonces(maker)
     funded: false, // an allowance exists: the lens reports the order fillable
+    dust: undefined as bigint | undefined, // a leftover allowance: the lens reports a sliver fillable
     makerBalance: IN,
     quoteOut: 10n ** 16n, // the pool's output for the whole input
     receipt: "none" as "none" | "success" | "reverted",
@@ -151,7 +152,7 @@ function world(o: { received?: bigint; owed?: bigint } = {}) {
         case "previewFill": return [0n, [received], [owed]];
         case "previewBump": return 0n;
         case "decimals": return 18;
-        case "getOrderRelevantState": return [1, w.funded ? IN : 0n, true, true];
+        case "getOrderRelevantState": return [1, w.funded ? IN : (w.dust ?? 0n), true, true];
         case "remaining": return IN;
         case "nonces": return w.nonce;
         case "balanceOf": return address.toLowerCase() === USDT0.toLowerCase() ? w.makerBalance : 0n;
@@ -344,7 +345,13 @@ describe("permitStage", () => {
     w.funded = true;
     expect(await permitStage(chain, cfg, entry(), nowS)).toEqual({ kind: "funded", fillable: IN });
     w.funded = false;
-    w.nonce = 5n;
+    // A DUST allowance left by an earlier order (the live 2026-10-23 limit order: 0.08 of 22.65
+    // USD₮0): the live permit funds far more, so it is carried, not "funded" at the sliver.
+    w.dust = IN / 300n;
+    expect(await permitStage(chain, cfg, entry(), nowS)).toEqual({ kind: "permit", fillable: IN, permit: PERMIT });
+    w.nonce = 5n; // the permit is spent: the sliver is all there is
+    expect(await permitStage(chain, cfg, entry(), nowS)).toEqual({ kind: "funded", fillable: IN / 300n });
+    w.dust = undefined;
     expect((await permitStage(chain, cfg, entry(), nowS)).kind).toBe("dead");
   });
 });
