@@ -16,7 +16,9 @@ export interface Sql {
  *   orders        live orders: the canonical JSON announce + last lens state + fill progress
  *   graves        evicted orders (filled / cancelled / expired / evicted / displaced), with a TTL
  *   soft_cancels  maker-bound soft-cancel tombstones, keyed (hash, maker) as in the Book
- *   fills         the fill index, keyed (txHash, logIndex)
+ *   fills         the fill index, keyed (txHash, logIndex); `order_json` is the filled
+ *                 order's JSON, copied at index time so the row outlives the order's
+ *                 tombstone (graves are pruned after TOMBSTONE_TTL_SECONDS; a fill is not)
  *   pending_fills fill txs a trusted filler reported as BROADCAST, not yet mined
  *                 (`POST /fills/report` status "pending"); short-lived markers
  *   meta          the log cursor and alarm bookkeeping
@@ -124,6 +126,30 @@ export const SCHEMA = [
 
 export function migrate(sql: Sql): void {
   for (const s of SCHEMA) sql.exec(s);
+  // `fills.order_json` (2026-11-02). `/fills` used to join the order from `orders` /
+  // `graves` at read time, so a fill lost its order (pair, size) once the order's
+  // tombstone aged out (14 days): the dashboard showed it as "? → ?". The column is
+  // filled at index time; an object created before it gets the column and a one-time
+  // copy from whatever orders and graves it still holds.
+  const cols = sql.exec<{ name: string }>(`PRAGMA table_info(fills)`).toArray();
+  if (!cols.some((c) => c.name === "order_json")) {
+    sql.exec(`ALTER TABLE fills ADD COLUMN order_json TEXT`);
+    const rows = sql
+      .exec<{ rowid: number; announce: string }>(
+        `SELECT f.rowid AS rowid, COALESCE(o.announce, g.announce) AS announce
+           FROM fills f
+           LEFT JOIN orders o ON o.hash = f.order_hash
+           LEFT JOIN graves g ON g.hash = f.order_hash
+          WHERE o.announce IS NOT NULL OR g.announce IS NOT NULL`,
+      )
+      .toArray();
+    for (const r of rows) sql.exec(`UPDATE fills SET order_json = ? WHERE rowid = ?`, orderJsonOf(r.announce), r.rowid);
+  }
+}
+
+/** The `order` member of a stored announce, as JSON text (the wire form `/fills` serves). */
+export function orderJsonOf(announce: string): string {
+  return JSON.stringify((JSON.parse(announce) as { order: unknown }).order);
 }
 
 export function getMeta(sql: Sql, key: string): string | undefined {

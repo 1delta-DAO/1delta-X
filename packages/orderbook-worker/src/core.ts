@@ -21,6 +21,7 @@ import {
   nativeBalanceMisuse,
   JsonBodyError,
   orderFromJson,
+  orderToJson,
   OrderSide,
   softCancelFromJson,
   softCancelTypedData,
@@ -35,7 +36,7 @@ import type { WorkerConfig } from "./config";
 import { handleRaffle } from "./raffle";
 import { ROUTE_COST, SqlRateLimiter } from "./ratelimit";
 import { isMethodNotFound, redactRpcUrl } from "./redact";
-import { count, getMeta, migrate, setMeta, type Sql, type SqlValue } from "./store";
+import { count, getMeta, migrate, orderJsonOf, setMeta, type Sql, type SqlValue } from "./store";
 
 /** The verifier surface the book needs — `Verifier` from `@1delta-x/orderbook/pure` in production. */
 export interface OrderVerifier {
@@ -72,6 +73,8 @@ const LOG_SPAN_COOLDOWN_SECONDS = 600;
 /** What `/health` and the alarm say when the RPC serves no `eth_getLogs` at all. */
 /** `POST /fills/report`: at most this many tx hashes per call. */
 export const MAX_REPORTS = 20;
+/** Orders per `POST /fills/orders` call. */
+export const MAX_FILL_ORDERS = 50;
 /** A "pending" fill marker is served (and kept) this long after its broadcast. */
 export const PENDING_FILL_TTL_SECONDS = 600;
 /** At most this many pending markers are kept (oldest dropped first). */
@@ -225,6 +228,11 @@ export class OrderBookCore {
         if (method !== "POST") return json({ error: "method not allowed" }, 405, { allow: "POST" });
         if (!trusted) return json({ error: "forbidden: /fills/report needs the binding key" }, 403);
         return await this.reportFills(request);
+      }
+      if (path === "/fills/orders") {
+        if (method !== "POST") return json({ error: "method not allowed" }, 405, { allow: "POST" });
+        if (!trusted && !admin) return json({ error: "forbidden: /fills/orders needs the binding key or the admin token" }, 403);
+        return await this.attachFillOrders(request);
       }
       if (path === "/fills") return method === "GET" ? (this.gate(ip, ROUTE_COST.query) ?? this.listFills(url)) : json({ error: "method not allowed" }, 405, { allow: "GET" });
       if (path === "/raffle" || path.startsWith("/raffle/")) {
@@ -748,6 +756,7 @@ export class OrderBookCore {
         at: number | null;
         cumulative: string | null;
         amount: string | null;
+        order_json: string | null;
         live_announce: string | null;
         grave_announce: string | null;
       }>(
@@ -766,7 +775,10 @@ export class OrderBookCore {
     const last = page[page.length - 1];
     return json({
       fills: page.map((f) => {
+        // The copy taken at index time first; the join covers a row indexed before
+        // the column existed whose order the book still holds.
         const announce = f.live_announce ?? f.grave_announce;
+        const order = f.order_json !== null ? (JSON.parse(f.order_json) as unknown) : announce ? (JSON.parse(announce) as { order: unknown }).order : undefined;
         return {
           orderHash: f.order_hash,
           maker: f.maker,
@@ -778,7 +790,7 @@ export class OrderBookCore {
           cumulative: f.cumulative,
           amount: f.amount,
           // The signed order when this node held it — lets a client place the fill in its market.
-          ...(announce ? { order: (JSON.parse(announce) as { order: unknown }).order } : {}),
+          ...(order !== undefined ? { order } : {}),
         };
       }),
       total,
@@ -1029,7 +1041,8 @@ export class OrderBookCore {
       // nonce) and the core only accepts a fill that closes it outright
       // (`FillOnceMustBeFull`): its one OrderFilled IS the whole order, so the size is
       // the fixed anchor — no `filled()` read, and nothing a lens re-check could add.
-      const held = this.knownOrder(hash);
+      const heldText = this.knownAnnounce(hash);
+      const held = heldText === null ? null : parseAnnounce(heldText).order;
       const once = held !== null && isFillOnce(held);
       const onceSize = once ? anchorOf(held) : null;
       const cum = once ? onceSize : await this.cumulativeAt(hash as Hex, log.blockNumber, cumCache);
@@ -1044,8 +1057,8 @@ export class OrderBookCore {
       }
       if (!times.has(log.blockNumber)) times.set(log.blockNumber, await this.deps.chain.blockTime(log.blockNumber));
       this.sql.exec(
-        `INSERT OR IGNORE INTO fills (tx_hash, log_index, order_hash, maker, solver, block_number, at, cumulative, amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO fills (tx_hash, log_index, order_hash, maker, solver, block_number, at, cumulative, amount, order_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         log.txHash.toLowerCase(),
         log.logIndex,
         hash,
@@ -1055,6 +1068,8 @@ export class OrderBookCore {
         times.get(log.blockNumber) ?? null,
         cum === null ? null : cum.toString(),
         amount === null ? null : amount.toString(),
+        // The order rides on the row: its tombstone is pruned, the fill is not.
+        heldText === null ? null : orderJsonOf(heldText),
       );
       // The broadcast marker of this tx (if a filler reported one) is now a real fill.
       this.sql.exec(`DELETE FROM pending_fills WHERE tx_hash = ?`, log.txHash.toLowerCase());
@@ -1067,12 +1082,12 @@ export class OrderBookCore {
     return logs.length;
   }
 
-  /** The order behind `hash`, live or tombstoned; `null` when this book never held it. */
-  private knownOrder(hash: string): Order | null {
+  /** The stored announce behind `hash`, live or tombstoned; `null` when this book never held it. */
+  private knownAnnounce(hash: string): string | null {
     const row =
       this.sql.exec<{ announce: string }>(`SELECT announce FROM orders WHERE hash = ?`, hash).toArray()[0] ??
       this.sql.exec<{ announce: string }>(`SELECT announce FROM graves WHERE hash = ?`, hash).toArray()[0];
-    return row ? parseAnnounce(row.announce).order : null;
+    return row?.announce ?? null;
   }
 
   /** Live orders of `maker` on `nonce` other than `except`: retired as on-chain cancelled. */
@@ -1320,6 +1335,35 @@ export class OrderBookCore {
     if (!this.cfg.configured) return json({ error: "orderbook not configured (settlement / lens not deployed yet)" }, 503);
     const results: Record<string, unknown>[] = [];
     for (const r of reports) results.push(await this.reportOne(r));
+    return json({ results });
+  }
+
+  /**
+   * `POST /fills/orders` (2026-11-02): put the order back on fill rows that lost it — rows
+   * indexed before `fills.order_json` existed whose tombstone was already pruned. Body: an
+   * order JSON or an array of them. An order is written only where it HASHES to the row's
+   * `orderHash` and the row has none, so a caller can restore the truth and nothing else.
+   */
+  private async attachFillOrders(request: Request): Promise<Response> {
+    const body = await this.readJsonBody(request);
+    if (body instanceof Response) return body;
+    const items = Array.isArray(body) ? body : [body];
+    if (items.length === 0) return json({ error: "no orders" }, 400);
+    if (items.length > MAX_FILL_ORDERS) return json({ error: `at most ${MAX_FILL_ORDERS} orders per call` }, 413);
+    const results: Record<string, unknown>[] = [];
+    for (const it of items) {
+      let order: Order;
+      try {
+        order = orderFromJson(it);
+      } catch (err) {
+        results.push({ result: "invalid", error: err instanceof JsonBodyError ? err.message : "not an order" });
+        continue;
+      }
+      const hash = hashOrderStruct(order).toLowerCase();
+      const rows = count(this.sql, `SELECT COUNT(*) AS n FROM fills WHERE order_hash = ? AND order_json IS NULL`, hash);
+      if (rows > 0) this.sql.exec(`UPDATE fills SET order_json = ? WHERE order_hash = ? AND order_json IS NULL`, JSON.stringify(orderToJson(order)), hash);
+      results.push({ orderHash: hash, result: rows > 0 ? "attached" : count(this.sql, `SELECT COUNT(*) AS n FROM fills WHERE order_hash = ?`, hash) > 0 ? "known" : "no-fill", rows });
+    }
     return json({ results });
   }
 
