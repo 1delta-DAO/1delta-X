@@ -18,7 +18,9 @@ export interface Sql {
  *   soft_cancels  maker-bound soft-cancel tombstones, keyed (hash, maker) as in the Book
  *   fills         the fill index, keyed (txHash, logIndex); `order_json` is the filled
  *                 order's JSON, copied at index time so the row outlives the order's
- *                 tombstone (graves are pruned after TOMBSTONE_TTL_SECONDS; a fill is not)
+ *                 tombstone (graves are pruned after TOMBSTONE_TTL_SECONDS; a fill is not);
+ *                 a row without one gets it decoded from its tx's calldata by the alarm
+ *                 (`order_tries` = attempts, so an undecodable tx is not re-read forever)
  *   pending_fills fill txs a trusted filler reported as BROADCAST, not yet mined
  *                 (`POST /fills/report` status "pending"); short-lived markers
  *   meta          the log cursor and alarm bookkeeping
@@ -145,6 +147,7 @@ export function migrate(sql: Sql): void {
       .toArray();
     for (const r of rows) sql.exec(`UPDATE fills SET order_json = ? WHERE rowid = ?`, orderJsonOf(r.announce), r.rowid);
   }
+  if (!cols.some((c) => c.name === "order_tries")) sql.exec(`ALTER TABLE fills ADD COLUMN order_tries INTEGER NOT NULL DEFAULT 0`);
 }
 
 /** The `order` member of a stored announce, as JSON text (the wire form `/fills` serves). */

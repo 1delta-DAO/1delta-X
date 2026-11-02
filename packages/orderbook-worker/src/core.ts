@@ -31,6 +31,7 @@ import {
 import { hashTypedData, isAddress, type Address, type Hex } from "viem";
 
 import { readCappedBytes } from "./body";
+import { orderFromCalldata } from "./calldata";
 import { decodeReceiptLogs, type ChainLog, type ChainReader, type WorkerChainEvent } from "./chain";
 import type { WorkerConfig } from "./config";
 import { handleRaffle } from "./raffle";
@@ -75,6 +76,9 @@ const LOG_SPAN_COOLDOWN_SECONDS = 600;
 export const MAX_REPORTS = 20;
 /** Orders per `POST /fills/orders` call. */
 export const MAX_FILL_ORDERS = 50;
+/** Fill orders decoded from calldata per alarm pass, and RPC attempts per order before giving up. */
+export const ORDER_RECOVERY_PER_ALARM = 10;
+export const ORDER_RECOVERY_TRIES = 3;
 /** A "pending" fill marker is served (and kept) this long after its broadcast. */
 export const PENDING_FILL_TTL_SECONDS = 600;
 /** At most this many pending markers are kept (oldest dropped first). */
@@ -808,6 +812,8 @@ export class OrderBookCore {
       fromBlock: oldest != null ? String(oldest) : (from ?? null),
       toBlock: cursor ? String(BigInt(cursor) - 1n) : null,
       records: count(this.sql, `SELECT COUNT(*) AS n FROM fills`),
+      // Rows still without their order (the alarm decodes them from calldata).
+      withoutOrder: count(this.sql, `SELECT COUNT(*) AS n FROM fills WHERE order_json IS NULL`),
       live: this.cfg.configured,
       dropped,
     };
@@ -908,6 +914,13 @@ export class OrderBookCore {
       }
       if (this.deps.nowMs() < deadline) {
         try {
+          await this.recoverFillOrders(deadline);
+        } catch (err) {
+          errors.push(`fill orders: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        }
+      }
+      if (this.deps.nowMs() < deadline) {
+        try {
           await this.recheck(now);
         } catch (err) {
           errors.push(`recheck: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
@@ -919,6 +932,47 @@ export class OrderBookCore {
     setMeta(this.sql, "lastAlarm", String(now));
     if (errors.length) setMeta(this.sql, "lastError", this.redact(`${now} ${errors.join("; ")}`).slice(0, 400));
     return behind ? 1_000 : this.cfg.alarmIntervalMs;
+  }
+
+  /**
+   * Fill rows without their order — a fill of an order this node never held, or one
+   * indexed before `fills.order_json` whose tombstone was pruned — get it from the
+   * fill tx's calldata ({@link orderFromCalldata}: only an order hashing to the row's
+   * `orderHash` is taken). Newest first, a few per pass. A tx that holds no such order
+   * is given up at once; a missing tx or an RPC error is retried on later passes, up to
+   * {@link ORDER_RECOVERY_TRIES}.
+   */
+  private async recoverFillOrders(deadline: number): Promise<void> {
+    const todo = this.sql
+      .exec<{ order_hash: string; tx_hash: string }>(
+        `SELECT order_hash, MAX(tx_hash) AS tx_hash FROM fills
+          WHERE order_json IS NULL AND order_tries < ?
+          GROUP BY order_hash ORDER BY MAX(block_number) DESC LIMIT ?`,
+        ORDER_RECOVERY_TRIES,
+        ORDER_RECOVERY_PER_ALARM,
+      )
+      .toArray();
+    for (const r of todo) {
+      if (this.deps.nowMs() >= deadline) return;
+      let input: Hex | null;
+      try {
+        input = await this.deps.chain.txInput(r.tx_hash as Hex);
+      } catch (err) {
+        this.sql.exec(`UPDATE fills SET order_tries = order_tries + 1 WHERE order_hash = ? AND order_json IS NULL`, r.order_hash);
+        throw err;
+      }
+      const order = input === null ? null : orderFromCalldata(input, r.order_hash);
+      if (order) {
+        this.sql.exec(`UPDATE fills SET order_json = ? WHERE order_hash = ? AND order_json IS NULL`, JSON.stringify(orderToJson(order)), r.order_hash);
+      } else {
+        // Not mined / unknown to this RPC: try again later. Decoded but no match: never will.
+        this.sql.exec(
+          `UPDATE fills SET order_tries = ? WHERE order_hash = ? AND order_json IS NULL`,
+          input === null ? count(this.sql, `SELECT MAX(order_tries) AS n FROM fills WHERE order_hash = ?`, r.order_hash) + 1 : ORDER_RECOVERY_TRIES,
+          r.order_hash,
+        );
+      }
+    }
   }
 
   private prune(now: number): void {

@@ -1,4 +1,4 @@
-import { numberToHex, zeroAddress, type Address, type Hex } from "viem";
+import { getAddress, numberToHex, zeroAddress, type Address, type Hex } from "viem";
 import {
   BLOCK_CLOCK_BIT,
   DELTA_VERIFY_OUTPUTS_BIT,
@@ -7,6 +7,7 @@ import {
   OrderSide,
   assertOrderNonce,
   packParams,
+  unpackParams,
   unpackTiming,
 } from "./types";
 import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types";
@@ -256,6 +257,68 @@ export function packOrder(order: Order): WireOrder {
     fillModule: order.fillModule,
     fillTotal: order.fillTotal,
     pricingModule: order.pricingModule,
+  };
+}
+
+/** Reads the packed blobs of {@link packOrder} back, front to back. */
+class BlobReader {
+  private i = 0;
+  constructor(private readonly hex: string) {}
+  private take(bytes: number): string {
+    const s = this.hex.slice(this.i, this.i + bytes * 2);
+    if (s.length !== bytes * 2) throw new Error("unpackOrder: packed blob too short");
+    this.i += bytes * 2;
+    return s;
+  }
+  int(bytes: number): bigint {
+    return BigInt(`0x${this.take(bytes)}`);
+  }
+  addr(): Address {
+    return getAddress(`0x${this.take(20)}`);
+  }
+  data(): Hex {
+    return `0x${this.take(Number(this.int(2)))}`;
+  }
+  static all<T>(blob: Hex, one: (r: BlobReader) => T): T[] {
+    const r = new BlobReader(blob.slice(2).toLowerCase());
+    const out = Array.from({ length: Number(r.int(1)) }, () => one(r));
+    if (r.i !== r.hex.length) throw new Error("unpackOrder: trailing bytes in packed blob");
+    return out;
+  }
+}
+
+const U48 = (1n << 48n) - 1n;
+
+/**
+ * Inverse of {@link packOrder}: the authoring {@link Order} behind a wire order, e.g.
+ * one decoded from a fill transaction's calldata. `side` and `expiry` come back out
+ * of `timing`; `baselinePriorityFeeWei` is set only when non-zero. Throws on a
+ * malformed blob. `hashOrderStruct(unpackOrder(w))` is the wire order's hash.
+ */
+export function unpackOrder(w: WireOrder): Order {
+  const p = unpackParams(w.params);
+  return {
+    maker: getAddress(w.maker),
+    side: Number((w.timing >> SIDE_BIT) & 1n) as OrderSide,
+    nonce: w.nonce,
+    expiry: (w.timing >> EXPIRY_OFFSET) & U48,
+    legsIn: BlobReader.all(w.legsIn, (r) => ({ token: r.addr(), start: r.int(32), end: r.int(32) })),
+    legsOut: BlobReader.all(w.legsOut, (r) => ({ token: r.addr(), start: r.int(32), end: r.int(32), recipient: r.addr() })),
+    timing: w.timing & ~(1n << SIDE_BIT) & ~(U48 << EXPIRY_OFFSET),
+    exclusiveFiller: getAddress(w.exclusiveFiller),
+    minFillAnchor: w.minFillAnchor,
+    exclusivityOverrideBps: p.overrideBps,
+    curve: BlobReader.all(w.curve, (r) => ({ timeDelta: Number(r.int(4)), bumpBps: Number(r.int(4)) })),
+    gasBumpBps: p.gasBumpBps,
+    gasPriceRef: p.gasPriceRef,
+    priorityScale: p.priorityScale,
+    ...(p.baselinePriorityFeeWei > 0n ? { baselinePriorityFeeWei: p.baselinePriorityFeeWei } : {}),
+    items: BlobReader.all(w.items, (r) => ({ op: Number(r.int(1)) as ItemOp, module: r.addr(), amount: r.int(32), recipient: r.addr(), data: r.data() })),
+    validators: BlobReader.all(w.validators, (r) => ({ target: r.addr(), data: r.data() })),
+    invariants: BlobReader.all(w.invariants, (r) => ({ target: r.addr(), data: r.data() })),
+    fillModule: getAddress(w.fillModule),
+    fillTotal: w.fillTotal,
+    pricingModule: getAddress(w.pricingModule),
   };
 }
 

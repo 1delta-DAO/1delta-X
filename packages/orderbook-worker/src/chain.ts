@@ -39,6 +39,8 @@ export interface ChainReader {
    * when the node knows no receipt (not mined yet, or an unknown hash).
    */
   receipt(txHash: Hex): Promise<ChainReceipt | null>;
+  /** `eth_getTransactionByHash`: the tx's calldata, or `null` when the node knows no such tx. */
+  txInput(txHash: Hex): Promise<Hex | null>;
 }
 
 /** One raw log as `eth_getTransactionReceipt` returns it (viem's shape). */
@@ -158,6 +160,14 @@ export function viemChainReader(client: PublicClient, settlement: Address, ocoMo
         throw err;
       }
       return { status: r.status, blockNumber: r.blockNumber, transactionHash: r.transactionHash, logs: r.logs as readonly RawLog[] };
+    },
+    async txInput(txHash) {
+      try {
+        return (await client.getTransaction({ hash: txHash })).input;
+      } catch (err) {
+        if ((err as { name?: string }).name === "TransactionNotFoundError") return null;
+        throw err;
+      }
     },
     async filledAt(orderHash, block) {
       return (await client.readContract({

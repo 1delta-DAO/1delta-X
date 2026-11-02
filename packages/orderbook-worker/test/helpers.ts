@@ -50,6 +50,9 @@ export const world = {
   filledCostS: 0,
   /** `eth_getTransactionReceipt` per lower-case tx hash; `"throw"` = an RPC error. */
   receipts: new Map<string, ChainReceipt | "throw">(),
+  /** Calldata per tx hash (`eth_getTransactionByHash`); `"throw"` simulates an RPC outage. */
+  txInputs: new Map<string, Hex | "throw">(),
+  txInputCalls: 0,
   receiptCalls: 0,
 };
 
@@ -66,6 +69,8 @@ export function resetWorld(): void {
   world.logsCalls = [];
   world.filledCostS = 0;
   world.receipts.clear();
+  world.txInputs.clear();
+  world.txInputCalls = 0;
   world.receiptCalls = 0;
 }
 
@@ -142,6 +147,12 @@ const chain: ChainReader = {
   async receipt(tx) {
     world.receiptCalls++;
     const r = world.receipts.get(tx.toLowerCase());
+    if (r === "throw") throw new Error("rpc down");
+    return r ?? null;
+  },
+  async txInput(tx) {
+    world.txInputCalls++;
+    const r = world.txInputs.get(tx.toLowerCase());
     if (r === "throw") throw new Error("rpc down");
     return r ?? null;
   },
