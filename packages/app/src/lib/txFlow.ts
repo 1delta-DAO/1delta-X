@@ -10,6 +10,8 @@
  */
 import type { Hex } from "viem";
 
+import { t } from "../i18n";
+
 export interface TxMeta {
   /** "Approve USDRIF to Permit3", "Wrap 0.01 RBTC". */
   label: string;
@@ -153,7 +155,7 @@ export async function runTx(dispatch: (e: TxEvent) => void, meta: TxMeta, io: Tx
     }
   }
   if (receipt.status !== "success") {
-    const error = new Error("transaction reverted on-chain");
+    const error = new Error(t("transaction reverted on-chain"));
     dispatch({ type: "error", error });
     throw error;
   }
@@ -184,16 +186,19 @@ export interface TxLine {
 
 export function txLine(s: TxState): TxLine {
   if (s.kind === "idle") return { step: "", text: "", tone: "idle", hash: null, retry: false };
-  const step = s.of > 1 ? `Step ${s.step} of ${s.of}` : "";
+  const step = s.of > 1 ? t("Step {step} of {of}", { step: s.step, of: s.of }) : "";
   switch (s.kind) {
     case "wallet":
-      return { step, text: `${s.label}: confirm in your wallet…`, tone: "busy", hash: null, retry: false };
+      return { step, text: t("{label}: confirm in your wallet…", { label: s.label }), tone: "busy", hash: null, retry: false };
     case "submitted":
-      return { step, text: `${s.label}: submitted`, tone: "busy", hash: s.hash, retry: false };
+      return { step, text: t("{label}: submitted", { label: s.label }), tone: "busy", hash: s.hash, retry: false };
     case "confirming":
       return {
         step,
-        text: `${s.label}: submitted · confirming…${s.sinceBlock !== null ? ` (sent after block ${s.sinceBlock.toString()})` : " (waiting for a block)"}`,
+        text:
+          s.sinceBlock !== null
+            ? t("{label}: submitted · confirming… (sent after block {block})", { label: s.label, block: s.sinceBlock.toString() })
+            : t("{label}: submitted · confirming… (waiting for a block)", { label: s.label }),
         tone: "busy",
         hash: s.hash,
         retry: false,
@@ -201,14 +206,17 @@ export function txLine(s: TxState): TxLine {
     case "confirmed":
       return {
         step,
-        text: `${s.label}: confirmed ✓${s.block !== null ? ` in block ${s.block.toString()}` : ""}`,
+        text:
+          s.block !== null
+            ? t("{label}: confirmed ✓ in block {block}", { label: s.label, block: s.block.toString() })
+            : t("{label}: confirmed ✓", { label: s.label }),
         tone: "confirmed",
         hash: s.hash,
         retry: false,
       };
     case "failed":
-      return { step, text: `${s.label} failed: ${s.reason}`, tone: "failed", hash: s.hash, retry: true };
+      return { step, text: t("{label} failed: {reason}", { label: s.label, reason: s.reason }), tone: "failed", hash: s.hash, retry: true };
     case "rejected":
-      return { step, text: `${s.label}: rejected in wallet`, tone: "rejected", hash: null, retry: true };
+      return { step, text: t("{label}: rejected in wallet", { label: s.label }), tone: "rejected", hash: null, retry: true };
   }
 }

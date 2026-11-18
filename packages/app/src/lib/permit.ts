@@ -10,6 +10,8 @@ import {
 } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
+import { t } from "../i18n";
+
 import type { Reader } from "./chain";
 
 /**
@@ -135,16 +137,16 @@ export async function signGaslessPermit(
   a: { chainId: number; token: Address; owner: Address; settlement: Address; order: Order },
 ): Promise<Erc2612Permit> {
   const domain = await detectPermitDomain(reader, a.chainId, a.token);
-  if (!domain) throw new Error("this token has no supported EIP-2612 permit");
+  if (!domain) throw new Error(t("this token has no supported EIP-2612 permit"));
   const [onChain, nonce] = await Promise.all([
     reader.readContract({ address: a.token, abi: ERC2612_ABI, functionName: "DOMAIN_SEPARATOR" }) as Promise<Hex>,
     reader.readContract({ address: a.token, abi: ERC2612_ABI, functionName: "nonces", args: [a.owner] }) as Promise<bigint>,
   ]);
   if (onChain.toLowerCase() !== erc2612DomainSeparator(domain).toLowerCase()) {
-    throw new Error("the token's permit domain is not the one this app was built for. Use approvals instead");
+    throw new Error(t("the token's permit domain is not the one this app was built for. Use approvals instead"));
   }
   const value = permitValue(a.order, a.token);
-  if (value === 0n) throw new Error("the order spends none of this token");
+  if (value === 0n) throw new Error(t("the order spends none of this token"));
   const deadline = a.order.expiry;
   const sig = await signer.signTypedData(
     erc2612TypedData(domain, { owner: a.owner, spender: a.settlement, value, nonce, deadline }) as never,

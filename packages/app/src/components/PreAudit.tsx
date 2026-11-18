@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { BOOK_IS_REMOTE } from "../backend/book";
 import { PROMOTION } from "../config/promotion";
+import { t, tr } from "../i18n";
 import { TermsLink } from "./TermsLink";
 
 /**
@@ -45,13 +46,15 @@ export function useAcknowledgement() {
 export function PreAuditStrip({ onDetails }: { onDetails: () => void }) {
   return (
     <div className="preaudit" role="note">
-      <span className="pill pill-orange">Pre-audit beta</span>
+      <span className="pill pill-orange">{t("Pre-audit beta")}</span>
       <span>
-        These contracts are <b>unaudited</b>. Orders are capped at <b>$1,000</b> per order and per wallet during the beta, and approvals
-        are capped at the size of each order. Trade only what you can afford to lose.
+        {tr(
+          "These contracts are <b>unaudited</b>. Orders are capped at <b>$1,000</b> per order and per wallet during the beta, and approvals are capped at the size of each order. Trade only what you can afford to lose.",
+          { b: (c) => <b>{c}</b> },
+        )}
       </span>
       <button type="button" className="linkbtn" onClick={onDetails}>
-        What this means
+        {t("What this means")}
       </button>
     </div>
   );
@@ -97,70 +100,77 @@ export function PreAuditGate({
     >
       <div className="sheet narrow" role="dialog" aria-modal="true" aria-labelledby="preaudit-title">
         <div className="sheethead">
-          <span className="lbl">{review ? "Risk disclosure" : "Before you trade"}</span>
+          <span className="lbl">{review ? t("Risk disclosure") : t("Before you trade")}</span>
           {review && (
-            <button type="button" className="iconbtn" onClick={onClose} aria-label="Close">
+            <button type="button" className="iconbtn" onClick={onClose} aria-label={t("Close")}>
               ✕
             </button>
           )}
         </div>
         <div className="sheetbody">
           <h2 id="preaudit-title" className="gatetitle">
-            This is an <span className="hl hl-orange">unaudited</span> pre-audit beta.
+            {tr("This is an <hl>unaudited</hl> pre-audit beta.", { hl: (c) => <span className="hl hl-orange">{c}</span> })}
           </h2>
           <ul className="gatelist">
             <li>
-              The settlement contracts have <b>not been audited</b>. They may contain bugs that cause you to lose
-              the funds you trade or approve.
+              {tr(
+                "The settlement contracts have <b>not been audited</b>. They may contain bugs that cause you to lose the funds you trade or approve.",
+                { b: (c) => <b>{c}</b> },
+              )}
             </li>
             <li>
-              Token approvals are capped at the exact amount of the order you are signing. They are{" "}
-              <b>not removed automatically</b>: an approval stays until a fill uses it or you revoke it (the app
-              offers a one-click revoke), including after a cancel, an expiry or a partial fill. This bounds the
-              risk; it does not remove it.
+              {tr(
+                "Token approvals are capped at the exact amount of the order you are signing. They are <b>not removed automatically</b>: an approval stays until a fill uses it or you revoke it (the app offers a one-click revoke), including after a cancel, an expiry or a partial fill. This bounds the risk; it does not remove it.",
+                { b: (c) => <b>{c}</b> },
+              )}
             </li>
             <li>
-              Orders are signed messages. A filler can settle any order you have signed that has not expired or
-              been cancelled <b>on-chain</b>. Hiding an order from the book (a free, off-chain cancel) does not
-              stop someone who already holds it.
+              {tr(
+                "Orders are signed messages. A filler can settle any order you have signed that has not expired or been cancelled <b>on-chain</b>. Hiding an order from the book (a free, off-chain cancel) does not stop someone who already holds it.",
+                { b: (c) => <b>{c}</b> },
+              )}
             </li>
             {/* With no draw running, describing one is not a disclosure —
                 it is an advertisement for something that does not exist. */}
             {PROMOTION.live && (
             <li>
-              Trading can qualify your address for a <b>random prize draw</b>. Qualifying does not earn a prize and
-              no amount of volume guarantees one. The{" "}
-              <TermsLink>Terms &amp; Conditions</TermsLink> exclude U.S. Persons and sanctioned jurisdictions, and USDRIF carries its own transfer restrictions.
+              {tr(
+                "Trading can qualify your address for a <b>random prize draw</b>. Qualifying does not earn a prize and no amount of volume guarantees one. The <terms>Terms & Conditions</terms> exclude U.S. Persons and sanctioned jurisdictions, and USDRIF carries its own transfer restrictions.",
+                { b: (c) => <b>{c}</b>, terms: (c) => <TermsLink>{c}</TermsLink> },
+              )}
             </li>
             )}
             {BOOK_IS_REMOTE ? (
               <li>
-                Your signed orders are <b>posted to a public orderbook</b>: any filler can settle them on-chain
-                until they expire or are cancelled on-chain. A fill is shown only once it is reported from the chain.
+                {tr(
+                  "Your signed orders are <b>posted to a public orderbook</b>: any filler can settle them on-chain until they expire or are cancelled on-chain. A fill is shown only once it is reported from the chain.",
+                  { b: (c) => <b>{c}</b> },
+                )}
               </li>
             ) : (
               <li>
-                Order distribution and fills in this beta are <b>simulated in your browser</b>: your signatures are
-                real, but nothing is broadcast and no fill shown here happened on-chain.
+                {tr(
+                  "Order distribution and fills in this beta are <b>simulated in your browser</b>: your signatures are real, but nothing is broadcast and no fill shown here happened on-chain.",
+                  { b: (c) => <b>{c}</b> },
+                )}
               </li>
             )}
-            <li>Nothing here is financial, investment, legal or tax advice.</li>
+            <li>{t("Nothing here is financial, investment, legal or tax advice.")}</li>
           </ul>
           {review ? (
             <button type="button" className="cta" onClick={onClose}>
-              Close
+              {t("Close")}
             </button>
           ) : (
             <>
               <label className="check">
                 <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
                 <span>
-                  I understand the contracts are unaudited, I accept the risk of total loss, and I agree to the
-                  Terms &amp; Conditions.
+                  {t("I understand the contracts are unaudited, I accept the risk of total loss, and I agree to the Terms & Conditions.")}
                 </span>
               </label>
               <button type="button" className="cta" disabled={!checked} onClick={onAccept}>
-                Continue
+                {t("Continue")}
               </button>
             </>
           )}

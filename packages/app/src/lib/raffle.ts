@@ -1,5 +1,7 @@
-import { answersHash, feedbackTypedData, type ParticipationAnswers } from "@1delta-x/sdk";
+import { answersHash, feedbackTypedData, PARTICIPATION_QUESTIONS, type ParticipationAnswers, type Question } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
+
+import { msg, t } from "../i18n";
 
 /**
  * The prize draw's client side. The draw itself is fixed copy (config/promotion.ts) and
@@ -52,6 +54,52 @@ export async function fetchRaffleSummary(base: string, init?: RequestInit): Prom
   return (await res.json()) as { feedbackForm: boolean; promotion?: string; feedback?: number };
 }
 
+/**
+ * The feedback form's copy, which lives in the SDK (the worker validates against the
+ * same questions). Shown through `t()`; the English option stays the answer's value,
+ * because it is what gets hashed, signed and posted.
+ */
+export const FEEDBACK_FORM_COPY: readonly string[] = [
+  msg("Overall, how would you rate the app?"),
+  msg("Poor"),
+  msg("Excellent"),
+  msg("How easy was placing your order?"),
+  msg("Very hard"),
+  msg("Very easy"),
+  msg("How safe did you feel while your order was pending?"),
+  msg("Very uneasy"),
+  msg("Completely safe"),
+  msg("Fill speed and price, compared with what you expected"),
+  msg("Much worse"),
+  msg("Much better"),
+  msg("What did you trade for?"),
+  msg("Exit USDRIF"),
+  msg("Get RBTC"),
+  msg("Buy or sell RIF"),
+  msg("Try the app"),
+  msg("Other"),
+  msg("What confused you or nearly stopped you?"),
+  msg("Which order types would you use next?"),
+  msg("Limit orders"),
+  msg("Scheduled / TWAP"),
+  msg("Take-profit / stop-loss"),
+  msg("Orders on lending positions"),
+  msg("None of these"),
+];
+
+/** `validateAnswers`' problem as the form shows it. The SDK phrases it in English; an unrecognised one is shown as it came. */
+export function problemText(problem: string, questions: readonly Question[] = PARTICIPATION_QUESTIONS): string {
+  for (const q of questions) {
+    const head = `"${q.label}"`;
+    if (!problem.startsWith(head)) continue;
+    const label = t(q.label);
+    const rest = problem.slice(head.length);
+    if (rest === " is required") return t('"{label}" is required', { label });
+    if (rest === ": remove leading or trailing spaces") return t('"{label}": remove leading or trailing spaces', { label });
+  }
+  return problem;
+}
+
 export interface TypedDataSigner {
   signTypedData(parameters: never): Promise<Hex>;
 }
@@ -75,6 +123,6 @@ export async function submitParticipation(args: {
     body: JSON.stringify({ participant: args.participant, promotion: args.promotion, issuedAt: issuedAt.toString(), answers: args.answers, signature }),
   });
   const body = (await res.json().catch(() => ({}))) as { error?: string; updated?: boolean; enteredAt?: number };
-  if (!res.ok) throw new Error(body.error ?? `the orderbook answered ${res.status}`);
+  if (!res.ok) throw new Error(body.error ?? t("the orderbook answered {status}", { status: res.status }));
   return { entered: true, updated: !!body.updated, enteredAt: body.enteredAt ?? Number(issuedAt) };
 }

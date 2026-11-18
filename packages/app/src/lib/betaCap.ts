@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import type { RestingOrder } from "./types";
 
 /**
@@ -62,9 +63,12 @@ export function capCheck(capUsd: number, ticketUsd: number | undefined, open = 0
 /** The tooltip that states every pre-audit limit. */
 export function capLimitsNote(capUsd: number, totalUsd: number | undefined): string {
   const fmt = (v: number) => `$${v.toLocaleString("en-US")}`;
-  return (
-    `Pre-audit limits: each order is capped at ${fmt(capUsd)}, and a wallet's open orders together may not exceed ${fmt(capUsd)} ` +
-    `(filled or expired orders no longer count).` +
-    (totalUsd !== undefined ? ` The beta also stops filling once ${fmt(totalUsd)} has been filled in total, until the audit is done.` : "")
-  );
+  return totalUsd !== undefined
+    ? t(
+        "Pre-audit limits: each order is capped at {cap}, and a wallet's open orders together may not exceed {cap} (filled or expired orders no longer count). The beta also stops filling once {total} has been filled in total, until the audit is done.",
+        { cap: fmt(capUsd), total: fmt(totalUsd) },
+      )
+    : t("Pre-audit limits: each order is capped at {cap}, and a wallet's open orders together may not exceed {cap} (filled or expired orders no longer count).", {
+        cap: fmt(capUsd),
+      });
 }

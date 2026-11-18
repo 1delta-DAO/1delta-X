@@ -1,3 +1,4 @@
+import { msg, t } from "../i18n";
 import type { Quote } from "./ladder";
 import { marketFloor, type FloorInputs, type MarketFloor } from "./marketFloor";
 import { inputWei } from "./order";
@@ -69,11 +70,11 @@ export const MIN_LIMIT_TTL_SECONDS = 3600;
 
 /** The limit-order expiry selector. The Permit3 grant follows the choice (`fundingTtlSeconds`). */
 export const EXPIRY_OPTIONS = [
-  { id: "1h", label: "1 hour", short: "1h", seconds: 3600 },
-  { id: "1d", label: "1 day", short: "1d", seconds: LIMIT_TTL_SECONDS },
-  { id: "7d", label: "7 days", short: "7d", seconds: 7 * 24 * 3600 },
-  { id: "30d", label: "30 days", short: "30d", seconds: 30 * 24 * 3600 },
-  { id: "90d", label: "90 days", short: "90d", seconds: MAX_LIMIT_TTL_SECONDS },
+  { id: "1h", label: msg("1 hour"), short: "1h", seconds: 3600 },
+  { id: "1d", label: msg("1 day"), short: "1d", seconds: LIMIT_TTL_SECONDS },
+  { id: "7d", label: msg("7 days"), short: "7d", seconds: 7 * 24 * 3600 },
+  { id: "30d", label: msg("30 days"), short: "30d", seconds: 30 * 24 * 3600 },
+  { id: "90d", label: msg("90 days"), short: "90d", seconds: MAX_LIMIT_TTL_SECONDS },
 ] as const;
 export type ExpiryId = (typeof EXPIRY_OPTIONS)[number]["id"];
 export const DEFAULT_EXPIRY: ExpiryId = "1d";
@@ -86,7 +87,7 @@ export function limitTtlSeconds(id: string | undefined): number {
 
 /** "1 day", "90 days" — for Details and the orders table. */
 export function expiryLabel(id: string | undefined): string {
-  return (EXPIRY_OPTIONS.find((x) => x.id === id) ?? EXPIRY_OPTIONS.find((x) => x.id === DEFAULT_EXPIRY)!).label;
+  return t((EXPIRY_OPTIONS.find((x) => x.id === id) ?? EXPIRY_OPTIONS.find((x) => x.id === DEFAULT_EXPIRY)!).label);
 }
 
 /**

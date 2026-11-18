@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { CHAINS, chainLabel } from "../config/chains";
 import { tradableChains } from "../config/markets";
+import { useDismiss } from "../hooks/useDismiss";
+import { t } from "../i18n";
 import { shortHex } from "../lib/format";
 import type { WalletState } from "../wallet/useWallet";
+import { LangSelect } from "./LangSelect";
 
 interface HeaderProps {
   chainId: number;
@@ -22,26 +25,6 @@ interface HeaderProps {
 
 export type AppView = "trade" | "dashboard";
 
-function useDismiss(open: boolean, close: () => void) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) close();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open, close]);
-  return ref;
-}
-
 function ChainSelect({ chainId, onChange }: { chainId: number; onChange: (id: number) => void }) {
   const [open, setOpen] = useState(false);
   const ref = useDismiss(open, () => setOpen(false));
@@ -49,7 +32,7 @@ function ChainSelect({ chainId, onChange }: { chainId: number; onChange: (id: nu
   // One chain (the Rootstock beta): a plain badge, no menu to open.
   if (options.length <= 1) {
     return (
-      <span className="netpill" title="The beta runs on Rootstock only">
+      <span className="netpill" title={t("The beta runs on Rootstock only")}>
         <i className="dot" />
         {chainLabel(chainId)}
       </span>
@@ -113,7 +96,7 @@ function Connect({
           aria-haspopup="true"
           aria-expanded={open}
           // Another network is fine until something is signed: the sign button then asks to switch (2026-10-21).
-          title={wrongChain ? `Your wallet is on another network. You will be asked to switch to ${chainLabel(chainId)} when you sign.` : undefined}
+          title={wrongChain ? t("Your wallet is on another network. You will be asked to switch to {chain} when you sign.", { chain: chainLabel(chainId) }) : undefined}
           onClick={() => setOpen((o) => !o)}
         >
           <i className="dot" data-live={wrongChain ? "stale" : "live"} />
@@ -131,7 +114,7 @@ function Connect({
                   void wallet.switchChain(chainId);
                 }}
               >
-                Switch to {chainLabel(chainId)}
+                {t("Switch to {chain}", { chain: chainLabel(chainId) })}
               </button>
             )}
             <button
@@ -142,7 +125,7 @@ function Connect({
                 wallet.disconnect();
               }}
             >
-              Disconnect
+              {t("Disconnect")}
             </button>
           </div>
         )}
@@ -160,14 +143,14 @@ function Connect({
         disabled={wallet.connecting}
         onClick={() => setOpen((o) => !o)}
       >
-        {wallet.connecting ? "Connecting…" : "Connect wallet"}
+        {wallet.connecting ? t("Connecting…") : t("Connect wallet")}
       </button>
       {open && (
         <div className="dropdown" role="menu">
           {wallet.providers.length === 0 ? (
             // EIP-6963 discovery only sees wallets that announce themselves;
             // saying so beats an empty menu that looks broken.
-            <p className="dropnote">No EIP-6963 wallet detected in this browser.</p>
+            <p className="dropnote">{t("No EIP-6963 wallet detected in this browser.")}</p>
           ) : (
             wallet.providers.map((p) => (
               <button
@@ -198,26 +181,27 @@ export function Header(props: HeaderProps) {
       <div className="brand">
         1delta X <em>Intents</em>
       </div>
-      <span className="blockpill m" title="Latest block the depth feed has seen">
+      <span className="blockpill m" title={t("Latest block the depth feed has seen")}>
         <i className="dot" data-live={live} />
-        {block === null ? "syncing" : block.toLocaleString("en-US")}
+        {block === null ? t("syncing") : block.toLocaleString("en-US")}
       </span>
-      <nav className="otabs navtabs" aria-label="Pages">
+      <nav className="otabs navtabs" aria-label={t("Pages")}>
         <button type="button" aria-selected={view === "trade"} onClick={() => onView("trade")}>
-          Trade
+          {t("Trade")}
         </button>
         <button type="button" aria-selected={view === "dashboard"} onClick={() => onView("dashboard")}>
-          Dashboard
+          {t("Dashboard")}
         </button>
       </nav>
       <div className="navspace" />
       <ChainSelect chainId={chainId} onChange={onChainChange} />
       <Connect wallet={wallet} chainId={chainId} requestOpen={requestConnect} />
+      <LangSelect />
       <button
         type="button"
         className="iconbtn"
         onClick={onToggleTheme}
-        aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+        aria-label={theme === "dark" ? t("Switch to light theme") : t("Switch to dark theme")}
       >
         {theme === "dark" ? "☀" : "☾"}
       </button>

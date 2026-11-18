@@ -955,11 +955,31 @@ src/
   wallet/               EIP-6963 discovery, connection, chain switch, allowances, balances
   hooks/                usePoolBook, useChainPools, useTokenIndex, useTicket, …
   config/promotion.ts   the prize draw, as the UI is allowed to describe it
+  i18n/                 languages (see below): t / tr / msg, the Spanish dictionary in es/
   components/           Header, MarketPicker, Stats, OrderForm, OrderBook, Orders,
                         PreAudit (banner + acknowledgement gate), Raffle,
                         Terms (the /terms.html page), TermsLink (just the href)
   styles.css            the whole design system, dark + light
 ```
+
+## Languages (2026-11-18)
+
+English and Spanish. The language is part of the URL, not a stored preference:
+`/` is English, `/es` is Spanish (`terms.html?lang=es` for the terms page, which
+is a file and has no route), so a link opens in the language it was copied in.
+The selector in the header rewrites the path in place (`history.pushState`): no
+reload, so a half-built ticket, the wallet connection and the feeds survive a
+switch. `/es/` is redirected to `/es` by `public/_worker.js`, because the build's
+asset URLs are relative and would resolve under `/es/`.
+
+Strings are gettext style (`src/i18n/index.ts`): the English sentence is the key,
+`t("Switch to {chain}", { chain })`, and Spanish lives in `src/i18n/es/*.ts`. A
+missing translation falls back to English. `test/i18n.test.ts` scans `src/` for
+`t(` / `tr(` / `msg(` literals and fails on an untranslated string, a stale entry
+or a translation whose placeholders differ, so new copy cannot ship in one
+language only. Not translated: `TC.md` (the English text is the one that applies;
+the Spanish terms page says so), number formatting, and text that was produced
+before a switch and is held in state (a receipt, a transaction label).
 
 ## Adding a market
 

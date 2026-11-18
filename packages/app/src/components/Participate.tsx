@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { PARTICIPATION_QUESTIONS, validateAnswers, type ParticipationAnswers, type Question } from "@1delta-x/sdk";
 import type { Address } from "viem";
 
-import { submitParticipation, type TypedDataSigner } from "../lib/raffle";
+import { t, tr } from "../i18n";
+import { problemText, submitParticipation, type TypedDataSigner } from "../lib/raffle";
 
 /**
  * The FEEDBACK sheet: the rating questions, signed (gasless) as one EIP-712 message so
@@ -69,7 +70,7 @@ export function ParticipateSheet({
       onEntered();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setError(/rejected|denied/i.test(msg) ? "You declined the signature. Nothing was sent." : msg.split("\n")[0]!);
+      setError(/rejected|denied/i.test(msg) ? t("You declined the signature. Nothing was sent.") : msg.split("\n")[0]!);
     } finally {
       setBusy(false);
     }
@@ -79,8 +80,8 @@ export function ParticipateSheet({
     <div className="scrim" onMouseDown={(e) => !busy && e.target === e.currentTarget && onClose()}>
       <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="participate-title">
         <div className="sheethead">
-          <span className="lbl">Feedback</span>
-          <button type="button" className="iconbtn" onClick={onClose} aria-label="Close" disabled={busy}>
+          <span className="lbl">{t("Feedback")}</span>
+          <button type="button" className="iconbtn" onClick={onClose} aria-label={t("Close")} disabled={busy}>
             ✕
           </button>
         </div>
@@ -88,43 +89,40 @@ export function ParticipateSheet({
           {done ? (
             <>
               <h2 id="participate-title" className="gatetitle">
-                Thank you. <span className="hl hl-violet">Noted.</span>
+                {tr("Thank you. <hl>Noted.</hl>", { hl: (c) => <span className="hl hl-violet">{c}</span> })}
               </h2>
               <p className="pqnote">
-                Your answers are on file for this wallet. You can update them from the notice at any time. The draw itself
-                needs nothing from you: every day you trade the qualifying amount is a ticket.
+                {t("Your answers are on file for this wallet. You can update them from the notice at any time. The draw itself needs nothing from you: every day you trade the qualifying amount is a ticket.")}
               </p>
               <button type="button" className="cta" onClick={onClose}>
-                Close
+                {t("Close")}
               </button>
             </>
           ) : (
             <>
               <h2 id="participate-title" className="gatetitle">
-                {updating ? "Update your answers" : "One minute of feedback"}
+                {updating ? t("Update your answers") : t("One minute of feedback")}
               </h2>
               <p className="pqnote">
-                Your answers shape what we fix before the audited launch. Signing is free: it is a message, not a
-                transaction. This is optional and changes nothing about the prize draw.
+                {t("Your answers shape what we fix before the audited launch. Signing is free: it is a message, not a transaction. This is optional and changes nothing about the prize draw.")}
               </p>
               {PARTICIPATION_QUESTIONS.map((q) => (
                 <QuestionField key={q.id} q={q} value={answers[q.id]} onChange={(v) => set(q.id, v)} />
               ))}
               <p className="pqfine">
-                Stored with your address: your answers, the signature and the time. Nothing personal. Answers are
-                never published.
+                {t("Stored with your address: your answers, the signature and the time. Nothing personal. Answers are never published.")}
               </p>
               {error && <p className="signerr">{error}</p>}
               {!signer && onSwitch ? (
                 <button type="button" className="cta" onClick={onSwitch}>
-                  Switch to Rootstock
+                  {t("Switch to Rootstock")}
                 </button>
               ) : (
                 <button type="button" className="cta" disabled={!signer || !!problem || busy} onClick={submit}>
-                  {busy ? "Waiting for your wallet…" : updating ? "Sign & update" : "Sign & send feedback"}
+                  {busy ? t("Waiting for your wallet…") : updating ? t("Sign & update") : t("Sign & send feedback")}
                 </button>
               )}
-              {problem && Object.keys(answers).length > 0 && <p className="pqfine">{problem}</p>}
+              {problem && Object.keys(answers).length > 0 && <p className="pqfine">{problemText(problem)}</p>}
             </>
           )}
         </div>
@@ -136,8 +134,8 @@ export function ParticipateSheet({
 function QuestionField({ q, value, onChange }: { q: Question; value: ParticipationAnswers[string] | undefined; onChange: (v: string | readonly string[] | number | undefined) => void }) {
   const label = (
     <legend className="pqlabel">
-      {q.label}
-      {!q.required && <span className="pqopt-tag"> · optional</span>}
+      {t(q.label)}
+      {!q.required && <span className="pqopt-tag"> · {t("optional")}</span>}
     </legend>
   );
   switch (q.kind) {
@@ -148,7 +146,7 @@ function QuestionField({ q, value, onChange }: { q: Question; value: Participati
           <div className="pqopts">
             {q.options.map((o) => (
               <button key={o} type="button" className={`pqopt${value === o ? " on" : ""}`} aria-pressed={value === o} onClick={() => onChange(value === o ? undefined : o)}>
-                {o}
+                {t(o)}
               </button>
             ))}
           </div>
@@ -164,7 +162,7 @@ function QuestionField({ q, value, onChange }: { q: Question; value: Participati
               const on = list.includes(o);
               return (
                 <button key={o} type="button" className={`pqopt${on ? " on" : ""}`} aria-pressed={on} onClick={() => onChange(on ? list.filter((x) => x !== o) : [...list, o])}>
-                  {o}
+                  {t(o)}
                 </button>
               );
             })}
@@ -177,13 +175,13 @@ function QuestionField({ q, value, onChange }: { q: Question; value: Participati
         <fieldset className="pq">
           {label}
           <div className="pqscale">
-            <span className="pqend">{q.low}</span>
+            <span className="pqend">{t(q.low)}</span>
             {[1, 2, 3, 4, 5].map((n) => (
               <button key={n} type="button" className={`pqopt m${value === n ? " on" : ""}`} aria-pressed={value === n} onClick={() => onChange(n)}>
                 {n}
               </button>
             ))}
-            <span className="pqend">{q.high}</span>
+            <span className="pqend">{t(q.high)}</span>
           </div>
         </fieldset>
       );

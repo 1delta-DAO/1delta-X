@@ -1,5 +1,6 @@
 import { Fragment, useMemo } from "react";
 
+import { t, tr } from "../i18n";
 import { fmt, fmtAmt, fmtPrice } from "../lib/format";
 import { BUCKETS_MAX, BUCKETS_TARGET, bucketWidthBps, bucketize, sourceTag, type BookRow } from "../lib/bookRows";
 import { refine, restingLabel, topOfBook, type RestingPreview } from "../lib/ladder";
@@ -71,14 +72,14 @@ function markersAt(rows: Row[], m: BookMarker | null, side: "bid" | "ask"): Map<
 function QuoteLine({ m, kind, tick }: { m: BookMarker; kind: "quote" | "min"; tick: number }) {
   if (kind === "min") {
     return (
-      <div className="qmark min" data-side={m.side} title="The order never fills below this price (your slippage protection)">
+      <div className="qmark min" data-side={m.side} title={t("The order never fills below this price (your slippage protection)")}>
         <span className="px">{fmt(m.minPrice, tick)}</span>
-        <span className="ql">minimum</span>
+        <span className="ql">{t("minimum")}</span>
       </div>
     );
   }
   return (
-    <div className="qmark" data-side={m.side} title="Where your market order prices right now">
+    <div className="qmark" data-side={m.side} title={t("Where your market order prices right now")}>
       <span className="px">{fmt(m.price, tick)}</span>
       <span className="ql">
         {m.label} · <b>{fmt(m.price, tick)}</b> · {m.via}
@@ -148,9 +149,9 @@ function LadderRow({
         <span className="px">{fmtPrice(p.price, tick)}</span>
         <span className="sz">{fmtAmt(p.size)}</span>
         <span className="cum">
-          {p.exhausted ? "past depth" : p.inside ? "new best" : p.beyond ? "beyond book" : "resting"}
+          {p.exhausted ? t("past depth") : p.inside ? t("new best") : p.beyond ? t("beyond book") : t("resting")}
         </span>
-        <span className="sr">YOU {p.side === "bid" ? "BUY" : "SELL"}</span>
+        <span className="sr">{p.side === "bid" ? t("YOU BUY") : t("YOU SELL")}</span>
       </div>
     );
   }
@@ -161,20 +162,26 @@ function LadderRow({
   // only honest if you can still trace a row back to where it came from.
   const origin =
     r.kind === "lmt"
-      ? SOURCE_NAME.LMT
+      ? t(SOURCE_NAME.LMT)
       : r.parts
-          .map((p) => `${SOURCE_NAME[p.source]}${p.pool ? ` ${(p.feeBps ?? 0) / 10_000}% ${p.pool.slice(0, 6)}…${p.pool.slice(-4)}` : ""}: ${fmtAmt(p.size)}`)
+          .map((p) => `${t(SOURCE_NAME[p.source])}${p.pool ? ` ${(p.feeBps ?? 0) / 10_000}% ${p.pool.slice(0, 6)}…${p.pool.slice(-4)}` : ""}: ${fmtAmt(p.size)}`)
           .join(" · ");
-  const range =
+  const title =
     r.kind === "bucket" && r.slices > 1
-      ? ` · avg of ${r.slices} slices ${fmtPrice(r.best, tick)}–${fmtPrice(r.worst, tick)}`
-      : "";
+      ? t("{origin} · avg of {n} slices {best}–{worst} · click to set limit {price} (fills through this row)", {
+          origin,
+          n: r.slices,
+          best: fmtPrice(r.best, tick),
+          worst: fmtPrice(r.worst, tick),
+          price: fmtPrice(r.pick, tick),
+        })
+      : t("{origin} · click to set limit {price}", { origin, price: fmtPrice(r.pick, tick) });
   return (
     <button
       type="button"
       className={`lvl${own > 0 ? " owned" : ""}`}
       data-side={rung}
-      title={`${origin}${range} · click to set limit ${fmtPrice(r.pick, tick)}${r.kind === "bucket" && r.slices > 1 ? " (fills through this row)" : ""}`}
+      title={title}
       onClick={() => onPick(r.pick, rung)}
     >
       <span className="dep" style={{ width }} />
@@ -182,7 +189,7 @@ function LadderRow({
       <span className="sz">{fmtAmt(r.size)}</span>
       <span className="cum">{fmtAmt(row.cum)}</span>
       <span className="sr" data-k={r.sources.length > 1 ? "MIX" : r.source}>
-        {own > 0 ? "LMT ·YOU" : sourceTag(r)}
+        {own > 0 ? t("LMT ·YOU") : sourceTag(r)}
       </span>
     </button>
   );
@@ -223,7 +230,7 @@ export function OrderBook(props: OrderBookProps) {
 
   const lmtDepth = bids.reduce((n, l) => n + (l.source === "LMT" ? l.size : 0), 0);
   const poolDepth = bids.reduce((n, l) => n + (l.source === "LMT" ? 0 : l.size), 0);
-  const ratio = poolDepth > 0 ? `${((lmtDepth + poolDepth) / poolDepth).toFixed(2)}× pool depth` : "—";
+  const ratio = poolDepth > 0 ? t("{ratio}× pool depth", { ratio: ((lmtDepth + poolDepth) / poolDepth).toFixed(2) }) : "—";
 
   const empty = !bids.length || !asks.length;
 
@@ -231,15 +238,19 @@ export function OrderBook(props: OrderBookProps) {
     <div className="box">
       <div className="boxhead">
         <div>
-          <span className="lbl">{via?.length ? "Routed book · no direct pool" : "Aggregated book"}</span>
+          <span className="lbl">{via?.length ? t("Routed book · no direct pool") : t("Aggregated book")}</span>
           <div className="m" style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-.02em" }}>
             {base} / {quote}
             {via?.length ? (
               <span
                 className="viatag"
-                title={`No ${base}/${quote} pool exists: this book is composed from the route ${[base, ...via, quote].join(" → ")} over the pools below, net of every hop's fee`}
+                title={t("No {base}/{quote} pool exists: this book is composed from the route {route} over the pools below, net of every hop's fee", {
+                  base,
+                  quote,
+                  route: [base, ...via, quote].join(" → "),
+                })}
               >
-                via {via.join(" → ")}
+                {t("via {route}", { route: via.join(" → ") })}
               </span>
             ) : null}
           </div>
@@ -250,29 +261,31 @@ export function OrderBook(props: OrderBookProps) {
       {empty ? (
         <div className={`bkstate${error ? " err" : ""}`}>
           {loading
-            ? `loading depth from ${status.length} ${status.length === 1 ? "pool" : "pools"}…`
+            ? status.length === 1
+              ? t("loading depth from {n} pool…", { n: status.length })
+              : t("loading depth from {n} pools…", { n: status.length })
             : error
               ? error
-              : "no depth for this pool"}
+              : t("no depth for this pool")}
           {!loading && (
             <button type="button" onClick={onRetry}>
-              Retry
+              {t("Retry")}
             </button>
           )}
         </div>
       ) : (
         <>
           <div className={`sh sh-ask${side === "buy" ? " on" : ""}`}>
-            <span className="t">Asks: offers to sell {base}</span>
+            <span className="t">{t("Asks: offers to sell {base}", { base })}</span>
             <span className="h">
-              click a row to <b>buy</b>
+              {tr("click a row to <b>buy</b>", { b: (c) => <b>{c}</b> })}
             </span>
           </div>
           <div className="bkcols">
-            <span>Price</span>
-            <span>Size</span>
-            <span>Cumulative</span>
-            <span>Source</span>
+            <span>{t("Price")}</span>
+            <span>{t("Size")}</span>
+            <span>{t("Cumulative")}</span>
+            <span>{t("Source")}</span>
           </div>
 
           <div>
@@ -296,25 +309,25 @@ export function OrderBook(props: OrderBookProps) {
           <div className="spread">
             <div>
               <div className="lbl" style={{ marginBottom: 4 }}>
-                Mid
+                {t("Mid")}
               </div>
               {/* One decimal past the grid: a mid that rounds onto a rung reads
                   as if the spread were zero. */}
               <div className="mid">{mid === null ? "—" : fmtPrice(mid, tick + 1)}</div>
             </div>
             <div className="meta">
-              spread {spreadBps === null ? "—" : `${spreadBps.toFixed(1)} bps`}
+              {t("spread {value}", { value: spreadBps === null ? "—" : `${spreadBps.toFixed(1)} bps` })}
               <br />
-              {fmtAmt(view.bidSide.total)} {base} bid · {fmtAmt(view.askSide.total)} ask
+              {t("{bid} {base} bid · {ask} ask", { bid: fmtAmt(view.bidSide.total), base, ask: fmtAmt(view.askSide.total) })}
               <br />
-              {block === null ? "—" : `block ${fmt(block, 0)}`}
+              {block === null ? "—" : t("block {n}", { n: fmt(block, 0) })}
             </div>
           </div>
 
           <div className={`sh sh-bid${side === "sell" ? " on" : ""}`}>
-            <span className="t">Bids: offers to buy {base}</span>
+            <span className="t">{t("Bids: offers to buy {base}", { base })}</span>
             <span className="h">
-              click a row to <b>sell</b>
+              {tr("click a row to <b>sell</b>", { b: (c) => <b>{c}</b> })}
             </span>
           </div>
 
@@ -337,39 +350,38 @@ export function OrderBook(props: OrderBookProps) {
               <span key={v.pool} className={v.error ? "venue-down" : undefined} title={v.pool}>
                 <em style={{ background: `var(${SOURCE_VAR[v.source]})` }} />
                 {v.hop ? `${v.hop} · ` : ""}
-                {SOURCE_NAME[v.source]} {(v.feeBps / 10_000).toFixed(2)}%{" "}
+                {t(SOURCE_NAME[v.source])} {(v.feeBps / 10_000).toFixed(2)}%{" "}
                 <b className="m">{v.pool.slice(0, 6)}…{v.pool.slice(-4)}</b>
                 {v.error
                   ? `: ${v.error}`
                   : phaseOf(v.pool) === "loading"
-                    ? ` · ${v.rungs} rungs · refreshing`
-                    : ` · ${v.rungs} rungs`}
+                    ? ` · ${t("{n} rungs · refreshing", { n: v.rungs })}`
+                    : ` · ${t("{n} rungs", { n: v.rungs })}`}
               </span>
             ))}
             {pending.map((s) => (
               <span key={s.pool} className="venue-wait" title={s.pool}>
                 <em />
-                loading <b className="m">{s.pool.slice(0, 6)}…{s.pool.slice(-4)}</b>
+                {tr("loading {pool}", { pool: <b className="m">{s.pool.slice(0, 6)}…{s.pool.slice(-4)}</b> })}
               </span>
             ))}
             <span>
-              <em style={{ background: "var(--lmt)" }} /> Signed limit orders
+              <em style={{ background: "var(--lmt)" }} /> {t("Signed limit orders")}
             </span>
             {view.bidSide.hidden + view.askSide.hidden > 0 && (
               <span style={{ color: "var(--faint)" }}>
-                {view.bidSide.hidden + view.askSide.hidden} deeper rows priced but not shown · rows group{" "}
-                {view.width} bps
+                {t("{n} deeper rows priced but not shown · rows group {width} bps", {
+                  n: view.bidSide.hidden + view.askSide.hidden,
+                  width: view.width,
+                })}
               </span>
             )}
           </div>
           <p className="bknote">
-            A limit order does not have to cross. Name a price the book has not reached and the part that does
-            not fill <b>rests where you put it</b>, often inside the spread, marked in the ladder above. Pool
-            depth is priced on each pool&rsquo;s curve and grouped into price bands of {view.width} bps from the
-            touch: a row&rsquo;s price is what consuming the whole band costs on average, its size and cumulative
-            are exact sums, and a band filled from several pools says so (UNI+SUSHI); hover a row for the
-            per-pool split. Clicking a band sets your limit at its far edge, so the order fills through it.{" "}
-            <b>LMT</b> rows are signed orders a filler can take at any time, each at its own price.
+            {tr(
+              "A limit order does not have to cross. Name a price the book has not reached and the part that does not fill <b>rests where you put it</b>, often inside the spread, marked in the ladder above. Pool depth is priced on each pool’s curve and grouped into price bands of {width} bps from the touch: a row’s price is what consuming the whole band costs on average, its size and cumulative are exact sums, and a band filled from several pools says so (UNI+SUSHI); hover a row for the per-pool split. Clicking a band sets your limit at its far edge, so the order fills through it. <b>LMT</b> rows are signed orders a filler can take at any time, each at its own price.",
+              { b: (c) => <b>{c}</b>, width: view.width },
+            )}
           </p>
         </>
       )}

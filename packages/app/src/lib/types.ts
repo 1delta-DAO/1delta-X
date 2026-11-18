@@ -1,3 +1,4 @@
+import { msg } from "../i18n";
 import type { TokenRef } from "./oku";
 import { rowStatus } from "./orderLifecycle";
 
@@ -18,8 +19,8 @@ export const SOURCE_NAME: Record<Source, string> = {
   UNI: "Uniswap v3",
   SUSHI: "SushiSwap v3",
   /** A synthetic market's composed rungs: the multi-hop route over its hops' pools (lib/synthetic). */
-  ROUTE: "Routed pools",
-  LMT: "Limit orders",
+  ROUTE: msg("Routed pools"),
+  LMT: msg("Limit orders"),
 };
 
 /** The AMM a source refers to, if any. `LMT` is signed orders, not a venue. */

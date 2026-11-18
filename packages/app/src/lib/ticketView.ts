@@ -8,6 +8,7 @@
  * exists (mock book, no filler on the chain, endpoint down) — mixing the two put
  * a quote above mid next to a ladder average 4 % below it (2026-10-11).
  */
+import { t } from "../i18n";
 import { WRAP_GAS_RESERVE_WEI } from "./funding";
 import type { Quote } from "./ladder";
 import { toWei } from "./order";
@@ -110,7 +111,7 @@ export function marketFigures(a: FigureArgs): MarketFigures | null {
 
 /** "sushi" → "Sushi", "uniswap-v3" → "Uniswap v3". */
 export function sourceName(source: string | null): string {
-  if (!source || source === "?") return "our filler";
+  if (!source || source === "?") return t("our filler");
   // A mixed pool route ("oku+sushi-v3"): every venue it swaps on, in hop order.
   if (source.includes("+")) return [...new Set(source.split("+").map((x) => sourceName(x)))].join(" + ");
   const s = source.toLowerCase();
@@ -118,7 +119,7 @@ export function sourceName(source: string | null): string {
   if (s.startsWith("uni")) return "Uniswap";
   // Oku runs a Uniswap v3 deployment (and is our tick indexer, not a quote source): the venue is Uniswap.
   if (s.startsWith("oku")) return "Uniswap";
-  if (s.startsWith("inventory")) return "inventory";
+  if (s.startsWith("inventory")) return t("inventory");
   // The RIF rail: RIF from the filler's inventory, priced at Money on Chain's redemption rate.
   if (s.startsWith("moc")) return "Money on Chain";
   return source.charAt(0).toUpperCase() + source.slice(1);
@@ -230,7 +231,7 @@ export function balanceState(a: {
   symbol: string;
   wrappable?: { value: number; symbol: string } | null;
 }): BalanceState {
-  if (!a.connected) return { kind: "disconnected", text: "Connect wallet" };
+  if (!a.connected) return { kind: "disconnected", text: t("Connect wallet") };
   // The wallet's network does not matter for a balance (read over the public RPC
   // off-chain); signing asks to switch (2026-10-21).
   if (a.value === undefined) return { kind: "loading", text: "…" };
@@ -242,7 +243,12 @@ export function balanceState(a: {
       value: a.value + w.value,
       wrap: {
         tag: `+${w.symbol}`,
-        note: `${fmtBalance(a.value)} ${a.symbol} + ${fmtBalance(w.value)} ${w.symbol}; the ${w.symbol} is wrapped to ${a.symbol} when you sign (gas reserve kept)`,
+        note: t("{tokenBalance} {symbol} + {nativeBalance} {native}; the {native} is wrapped to {symbol} when you sign (gas reserve kept)", {
+          tokenBalance: fmtBalance(a.value),
+          symbol: a.symbol,
+          nativeBalance: fmtBalance(w.value),
+          native: w.symbol,
+        }),
       },
     };
   }
@@ -259,12 +265,12 @@ export function signButton(a: {
   quoting: boolean;
   priced: boolean;
 }): { label: string; disabled: boolean } {
-  if (a.signing) return { label: "Waiting for signature…", disabled: true };
-  if (!(a.amount > 0)) return { label: "Enter an amount", disabled: true };
-  if (a.overBalance) return { label: `Insufficient ${a.payToken} balance`, disabled: true };
-  if (!a.ready) return { label: "Waiting for the book…", disabled: true };
-  if (!a.priced) return { label: a.quoting ? "Fetching quote…" : "No price for this size", disabled: true };
-  return { label: "Sign order", disabled: false };
+  if (a.signing) return { label: t("Waiting for signature…"), disabled: true };
+  if (!(a.amount > 0)) return { label: t("Enter an amount"), disabled: true };
+  if (a.overBalance) return { label: t("Insufficient {token} balance", { token: a.payToken }), disabled: true };
+  if (!a.ready) return { label: t("Waiting for the book…"), disabled: true };
+  if (!a.priced) return { label: a.quoting ? t("Fetching quote…") : t("No price for this size"), disabled: true };
+  return { label: t("Sign order"), disabled: false };
 }
 
 // ---------------------------------------------------------------- details disclosure
@@ -292,7 +298,9 @@ export function writeDetailsOpen(storage: Pick<Storage, "setItem"> | undefined, 
 export function exclusivityLabel(d: { direct: boolean; windowSeconds: number; overrideBps: number }): string | null {
   if (d.direct || d.windowSeconds <= 0) return null;
   const n = Math.max(1, Math.round(d.windowSeconds / 30));
-  return `our solver first for ~${n} block${n === 1 ? "" : "s"} (others pay you +${d.overrideBps} bps)`;
+  return n === 1
+    ? t("our solver first for ~{n} block (others pay you +{bps} bps)", { n, bps: d.overrideBps })
+    : t("our solver first for ~{n} blocks (others pay you +{bps} bps)", { n, bps: d.overrideBps });
 }
 
 /** A small fee: two significant figures below 1 ("0.71", "0.0000084"), else the usual amount format. */
@@ -324,8 +332,8 @@ export function routeVenueName(v: string): string {
  * "Filled by the 1delta solver: USD0 → RIF on Uniswap v3 (0.30 %) → RIFP on SushiSwap v3 (0.30 %)".
  */
 export function routeHover(source: string | null, path: { tokens: string[]; fees: number[]; venues: string[] } | undefined, symbolOf: (address: string) => string): string {
-  if (source?.toLowerCase().startsWith("moc")) return "Filled from the 1delta filler's RIF inventory, priced at the Money on Chain redemption rate (USD₮0 → USDRIF → RIF)";
-  if (!path) return `Filled by the 1delta solver via ${sourceName(source)}`;
-  const hops = path.fees.map((f, i) => `${symbolOf(path.tokens[i + 1]!)} on ${routeVenueName(path.venues[i] ?? "")} (${(f / 10_000).toFixed(2)} %)`);
-  return `Filled by the 1delta solver: ${symbolOf(path.tokens[0]!)} → ${hops.join(" → ")}`;
+  if (source?.toLowerCase().startsWith("moc")) return t("Filled from the 1delta filler's RIF inventory, priced at the Money on Chain redemption rate (USD₮0 → USDRIF → RIF)");
+  if (!path) return t("Filled by the 1delta solver via {source}", { source: sourceName(source) });
+  const hops = path.fees.map((f, i) => t("{token} on {venue} ({fee} %)", { token: symbolOf(path.tokens[i + 1]!), venue: routeVenueName(path.venues[i] ?? ""), fee: (f / 10_000).toFixed(2) }));
+  return t("Filled by the 1delta solver: {route}", { route: `${symbolOf(path.tokens[0]!)} → ${hops.join(" → ")}` });
 }

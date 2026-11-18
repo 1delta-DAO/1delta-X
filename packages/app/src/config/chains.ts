@@ -1,6 +1,8 @@
 import { rootstock } from "viem/chains";
 import type { Chain } from "viem";
 
+import { t } from "../i18n";
+
 /**
  * Chains the app trades on.
  *
@@ -62,5 +64,5 @@ export function chainById(chainId: number): ChainConfig | undefined {
 }
 
 export function chainLabel(chainId: number): string {
-  return chainById(chainId)?.label ?? `Chain ${chainId}`;
+  return chainById(chainId)?.label ?? t("Chain {id}", { id: chainId });
 }

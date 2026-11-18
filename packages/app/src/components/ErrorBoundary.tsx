@@ -1,5 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
+import { t } from "../i18n";
+
 /**
  * The last line of defence against a render-time throw.
  *
@@ -23,10 +25,10 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
     if (!this.state.error) return this.props.children;
     return (
       <main style={{ padding: 24 }}>
-        <h2>Something went wrong.</h2>
+        <h2>{t("Something went wrong.")}</h2>
         <p className="dim">{this.state.error.message}</p>
         <button type="button" className="cta" onClick={() => this.setState({ error: null })}>
-          Try again
+          {t("Try again")}
         </button>
       </main>
     );

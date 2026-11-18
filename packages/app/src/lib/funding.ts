@@ -1,6 +1,8 @@
 import { encodeApproveToken, encodeRevokeToken } from "@1delta-x/sdk";
 import { encodeFunctionData, erc20Abi, formatUnits, type Address, type Hex } from "viem";
 
+import { t } from "../i18n";
+
 /**
  * How a maker's input actually reaches a fill — and what this app must set up
  * before an order it signs can settle.
@@ -140,12 +142,12 @@ export function planFunding(
   if (wrap && wrap.tokenBalance < required) {
     const shortfall = required - wrap.tokenBalance;
     const reserve = wrap.reserve ?? WRAP_GAS_RESERVE_WEI;
-    const sym = wrap.nativeSymbol ?? "native coin";
+    const sym = wrap.nativeSymbol ?? t("native coin");
     if (wrap.nativeBalance - shortfall < reserve) {
       blocked =
         wrap.nativeBalance < shortfall
-          ? `Not enough ${sym}: wrapping ${fmtWei(shortfall)} needs more than the ${fmtWei(wrap.nativeBalance)} you hold`
-          : `Wrapping ${fmtWei(shortfall)} ${sym} would leave less than ${fmtWei(reserve)} ${sym} for gas. Lower the amount`;
+          ? t("Not enough {native}: wrapping {amount} needs more than the {balance} you hold", { native: sym, amount: fmtWei(shortfall), balance: fmtWei(wrap.nativeBalance) })
+          : t("Wrapping {amount} {native} would leave less than {reserve} {native} for gas. Lower the amount", { amount: fmtWei(shortfall), native: sym, reserve: fmtWei(reserve) });
     }
     steps.push({ kind: "wrap", amount: shortfall });
   }
@@ -188,24 +190,24 @@ export function fundingStepLabel(
   step: FundingStep | undefined,
   a: { amount: string; token: string; nativeSymbol?: string },
 ): string {
-  if (!step) return `Approve ${a.token}`;
+  if (!step) return t("Approve {token}", { token: a.token });
   switch (step.kind) {
     case "wrap":
-      return `Wrap ${fmtWei(step.amount)} ${a.nativeSymbol ?? "native"} → ${a.token}`;
+      return t("Wrap {amount} {native} → {token}", { amount: fmtWei(step.amount), native: a.nativeSymbol ?? t("native"), token: a.token });
     case "direct-approve":
-      return `Approve exactly ${a.amount} ${a.token}`;
+      return t("Approve exactly {amount} {token}", { amount: a.amount, token: a.token });
     case "erc20-approve":
-      return `Approve exactly ${a.amount} ${a.token} to Permit3`;
+      return t("Approve exactly {amount} {token} to Permit3", { amount: a.amount, token: a.token });
     case "permit3-grant":
-      return `Grant Settlement exactly ${a.amount} ${a.token} via Permit3`;
+      return t("Grant Settlement exactly {amount} {token} via Permit3", { amount: a.amount, token: a.token });
   }
 }
 
 /** The full button text: the next step, and where it sits when there are several ("(1 of 3)"). */
 export function fundingButtonLabel(plan: Pick<FundingPlan, "steps" | "trims">, a: { amount: string; token: string; nativeSymbol?: string }): string {
   const head = fundingStepLabel(plan.steps[0], a);
-  const reduce = plan.trims && plan.steps[0]?.kind !== "wrap" ? "Reduce: " : "";
-  return `${reduce}${head}${plan.steps.length > 1 ? ` (1 of ${plan.steps.length})` : ""}`;
+  const label = plan.trims && plan.steps[0]?.kind !== "wrap" ? t("Reduce: {step}", { step: head }) : head;
+  return plan.steps.length > 1 ? t("{label} (1 of {total})", { label, total: plan.steps.length }) : label;
 }
 
 /**
@@ -218,9 +220,10 @@ export function fundingButtonParts(
   a: { amount: string; token: string; nativeSymbol?: string },
 ): { text: string; step: string | null } {
   const first = plan.steps[0];
-  const head = first?.kind === "wrap" ? `Wrap ${fmtWei(first.amount)} ${a.nativeSymbol ?? "native"}` : fundingStepLabel(first, a);
-  const reduce = plan.trims && first?.kind !== "wrap" ? "Reduce: " : "";
-  return { text: `${reduce}${head}`, step: plan.steps.length > 1 ? `1/${plan.steps.length}` : null };
+  const head =
+    first?.kind === "wrap" ? t("Wrap {amount} {native}", { amount: fmtWei(first.amount), native: a.nativeSymbol ?? t("native") }) : fundingStepLabel(first, a);
+  const text = plan.trims && first?.kind !== "wrap" ? t("Reduce: {step}", { step: head }) : head;
+  return { text, step: plan.steps.length > 1 ? `1/${plan.steps.length}` : null };
 }
 
 /** Whether anything is left standing that a revoke would clear. */
@@ -241,9 +244,9 @@ export function planGasless(
   if (!a.permitSupported) return { available: false, reason: null };
   if (a.covered) return { available: false, reason: null }; // nothing to fund
   if (!state) return { available: false, reason: null };
-  if (state.strict) return { available: false, reason: "Permit3 strict mode is on for this token: gasless funding uses a direct approval, which strict mode refuses" };
-  if (a.needsWrap) return { available: false, reason: "needs a wrap first" };
-  if (a.multiOrder) return { available: false, reason: "a TWAP signs one slice at a time; fund it with approvals" };
+  if (state.strict) return { available: false, reason: t("Permit3 strict mode is on for this token: gasless funding uses a direct approval, which strict mode refuses") };
+  if (a.needsWrap) return { available: false, reason: t("needs a wrap first") };
+  if (a.multiOrder) return { available: false, reason: t("a TWAP signs one slice at a time; fund it with approvals") };
   return { available: true, reason: null };
 }
 
@@ -283,18 +286,18 @@ const approveData = (spender: Address, amount: bigint): Hex =>
 
 /**
  * The calldata for a plan. The book grant names SETTLEMENT as the spender — the
- * contract that calls `transferFrom`. A wrap deposits into `t.token` itself: the
+ * contract that calls `transferFrom`. A wrap deposits into `targets.token` itself: the
  * plan only holds one when that token is the wrapped native coin.
  */
-export function fundingCalls(steps: readonly FundingStep[], t: FundingTargets): Call[] {
+export function fundingCalls(steps: readonly FundingStep[], targets: FundingTargets): Call[] {
   return steps.map((s) =>
     s.kind === "wrap"
-      ? { ...wrapCall(t.token, s.amount), label: `Wrap ${fmtWei(s.amount)}` }
+      ? { ...wrapCall(targets.token, s.amount), label: t("Wrap {amount}", { amount: fmtWei(s.amount) }) }
       : s.kind === "direct-approve"
-        ? { to: t.token, data: approveData(t.settlement, s.amount), label: "Approve to Settlement" }
+        ? { to: targets.token, data: approveData(targets.settlement, s.amount), label: t("Approve to Settlement") }
         : s.kind === "erc20-approve"
-        ? { to: t.token, data: approveData(t.permit3, s.amount), label: "Approve to Permit3" }
-        : { to: t.permit3, data: encodeApproveToken(t.settlement, t.token, s.amount, s.expiration), label: "Grant Settlement via Permit3" },
+        ? { to: targets.token, data: approveData(targets.permit3, s.amount), label: t("Approve to Permit3") }
+        : { to: targets.permit3, data: encodeApproveToken(targets.settlement, targets.token, s.amount, s.expiration), label: t("Grant Settlement via Permit3") },
   );
 }
 
@@ -302,10 +305,10 @@ export function fundingCalls(steps: readonly FundingStep[], t: FundingTargets): 
  * Clear every funding surface: the ERC-20 approval to Permit3, the book grant to
  * Settlement, and a direct approval to Settlement (what a relayed gasless permit leaves).
  */
-export function revokeCalls(state: FundingState, t: FundingTargets): Call[] {
+export function revokeCalls(state: FundingState, targets: FundingTargets): Call[] {
   const calls: Call[] = [];
-  if (state.grantAmount > 0n) calls.push({ to: t.permit3, data: encodeRevokeToken(t.settlement, t.token), label: "Revoke the Permit3 grant" });
-  if (state.erc20Allowance > 0n) calls.push({ to: t.token, data: approveData(t.permit3, 0n), label: "Revoke the approval" });
-  if ((state.directAllowance ?? 0n) > 0n) calls.push({ to: t.token, data: approveData(t.settlement, 0n), label: "Revoke the direct approval to Settlement" });
+  if (state.grantAmount > 0n) calls.push({ to: targets.permit3, data: encodeRevokeToken(targets.settlement, targets.token), label: t("Revoke the Permit3 grant") });
+  if (state.erc20Allowance > 0n) calls.push({ to: targets.token, data: approveData(targets.permit3, 0n), label: t("Revoke the approval") });
+  if ((state.directAllowance ?? 0n) > 0n) calls.push({ to: targets.token, data: approveData(targets.settlement, 0n), label: t("Revoke the direct approval to Settlement") });
   return calls;
 }

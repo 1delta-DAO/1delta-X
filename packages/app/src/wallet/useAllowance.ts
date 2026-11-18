@@ -2,8 +2,9 @@ import { useCallback, useEffect, useReducer, useState } from "react";
 import { createPublicClient, createWalletClient, custom, erc20Abi, type Address } from "viem";
 
 import { chainById } from "../config/chains";
+import { t } from "../i18n";
 import { readClientFor } from "./readClient";
-import { readFundingState, userTxGas, verifyDeployment, type Reader } from "../lib/chain";
+import { DeploymentMismatchError, readFundingState, userTxGas, verifyDeployment, type Reader } from "../lib/chain";
 import { fundingCalls, planFunding, revokeCalls, type Call, type FundingState, type WrapSource } from "../lib/funding";
 import { IDLE, inFlight, isRejection, runTx, txReducer, type TxState } from "../lib/txFlow";
 import type { EIP1193Provider } from "./eip6963";
@@ -89,7 +90,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
       .catch((e) => {
         if (!alive) return;
         setFunding(undefined);
-        if (message(e).startsWith("deployment mismatch")) setMismatch(message(e));
+        if (e instanceof DeploymentMismatchError) setMismatch(message(e));
       });
     return () => {
       alive = false;
@@ -157,7 +158,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
           const txReq = { to: call.to, data: call.data, chain: config.chain, account: owner, ...(call.value ? { value: call.value } : {}), ...(await userTxGas(publicClient, config.chain.id)) };
           step += 1;
           if (step > total) total = step;
-          const meta = { label: call.label ?? "Transaction", step, of: total };
+          const meta = { label: call.label ?? t("Transaction"), step, of: total };
           try {
             await run(dispatchTx, meta, { ...io, send: () => wallet.sendTransaction(txReq) });
           } catch (e) {
@@ -167,7 +168,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
             // prompt the user rejected is not retried either).
             if (call.to !== token || call.value || state.erc20Allowance === 0n || isRejection(e)) throw e;
             total += 1;
-            await run(dispatchTx, { label: "Reset the approval to 0", step, of: total }, {
+            await run(dispatchTx, { label: t("Reset the approval to 0"), step, of: total }, {
               ...io,
               send: async () =>
                 wallet.writeContract({
@@ -231,7 +232,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
           // are planned against what the wrap actually left.
           const after = await reread();
           plan = planFunding(after, amount, ttlSeconds, Math.floor(Date.now() / 1000), await wrapSource());
-          if (plan.steps.some((s) => s.kind === "wrap")) throw new Error(`${nativeSymbol} wrapped, but the balance is still short. Try again`);
+          if (plan.steps.some((s) => s.kind === "wrap")) throw new Error(t("{symbol} wrapped, but the balance is still short. Try again", { symbol: nativeSymbol ?? "" }));
         }
         return fundingCalls(plan.steps, targets);
       }),

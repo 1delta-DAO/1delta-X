@@ -18,6 +18,7 @@ import {
 } from "@1delta-x/sdk";
 import { encodeAbiParameters, parseUnits, zeroAddress, type Address, type Hex } from "viem";
 
+import { t } from "../i18n";
 import type { Side } from "./types";
 
 export interface TokenSpec {
@@ -194,7 +195,7 @@ export interface InputClamp {
 export function clampInput(amountIn: number | string, decimals: number, maxIn?: bigint): InputClamp {
   const raw = toWei(amountIn, decimals);
   const capped = inputWei(amountIn, decimals, maxIn);
-  if (raw > 0n && capped === 0n) throw new Error("insufficient balance: nothing left to sign for this order");
+  if (raw > 0n && capped === 0n) throw new Error(t("insufficient balance: nothing left to sign for this order"));
   return { raw, capped, clamped: capped < raw };
 }
 

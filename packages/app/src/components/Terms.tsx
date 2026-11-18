@@ -6,7 +6,9 @@ import { useMemo } from "react";
 import source from "../../../../TC.md?raw";
 
 import { useTheme } from "../hooks/useTheme";
+import { t, tr, useLang } from "../i18n";
 import { renderMarkdown } from "../lib/markdown";
+import { LangSelect } from "./LangSelect";
 
 /**
  * The whole document, as its own page at its own URL rather than a dialog: the
@@ -17,35 +19,46 @@ import { renderMarkdown } from "../lib/markdown";
  */
 export function TermsPage() {
   const [theme, toggleTheme] = useTheme();
+  const lang = useLang();
+  // Back to the app in the language the reader is in (`./` or `./es`).
+  const home = lang === "en" ? "./" : `./${lang}`;
   const body = useMemo(() => renderMarkdown(source), []);
 
   return (
     <>
       <div className="nav">
-        <a className="brand" href="./">
+        <a className="brand" href={home}>
           1delta X <em>Intents</em>
         </a>
         <div className="navspace" />
-        <a className="netpill" href="./">
-          ← Back to trading
+        <a className="netpill" href={home}>
+          {t("← Back to trading")}
         </a>
+        <LangSelect query />
         <button
           type="button"
           className="iconbtn"
           onClick={toggleTheme}
-          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          aria-label={theme === "dark" ? t("Switch to light theme") : t("Switch to dark theme")}
         >
           {theme === "dark" ? "☀" : "☾"}
         </button>
       </div>
 
       <main className="reading">
-        <article className="md">{body}</article>
+        {lang !== "en" && (
+          <p className="capnote dim" role="note">
+            {t("These terms exist in English only. The English text below is the one that applies.")}
+          </p>
+        )}
+        <article className="md" lang="en">
+          {body}
+        </article>
       </main>
 
       <footer>
         <p>
-          Questions about the draw go to <a href="mailto:team@1delta.io">team@1delta.io</a>.
+          {tr("Questions about the draw go to <mail>team@1delta.io</mail>.", { mail: (c) => <a href="mailto:team@1delta.io">{c}</a> })}
         </p>
       </footer>
     </>

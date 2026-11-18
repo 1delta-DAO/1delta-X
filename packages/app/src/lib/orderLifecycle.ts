@@ -15,13 +15,14 @@
  *     cancelled on-chain — and always leaves a row in Recent fills saying which
  *     ({@link outcomeOf}); with a transaction link when one is known.
  */
+import { msg, t } from "../i18n";
 import type { Fill, RestingOrder } from "./types";
 
 /** Fraction of `size` treated as "all of it" (float dust from wei → human). */
 const FULL = 1 - 1e-6;
 
-export function orderTypeLabel(o: Pick<RestingOrder, "type">): "Market" | "Limit" | "TWAP" {
-  return o.type === "market" ? "Market" : o.type === "twap" ? "TWAP" : "Limit";
+export function orderTypeLabel(o: Pick<RestingOrder, "type">): string {
+  return o.type === "market" ? t("Market") : o.type === "twap" ? "TWAP" : t("Limit");
 }
 
 /** Whether `filled` covers `size` (to float dust). */
@@ -54,17 +55,19 @@ export function rowStatus(o: RestingOrder, now: number = Date.now()): RowStatus 
   return o.filled > 0 ? "partial" : "open";
 }
 
+const ROW_STATUS_LABEL: Record<RowStatus, string> = {
+  open: msg("open"),
+  partial: msg("partial"),
+  filling: msg("filling"),
+  "fill-pending": msg("fill submitted"),
+  filled: msg("filled"),
+  expired: msg("expired"),
+  "soft-cancelled": msg("hidden · still fillable"),
+  "off-book": msg("off book · still fillable"),
+};
+
 export function rowStatusLabel(s: RowStatus): string {
-  switch (s) {
-    case "soft-cancelled":
-      return "hidden · still fillable";
-    case "off-book":
-      return "off book · still fillable";
-    case "fill-pending":
-      return "fill submitted";
-    default:
-      return s;
-  }
+  return t(ROW_STATUS_LABEL[s]);
 }
 
 /** How a finished order ended. */
@@ -109,8 +112,15 @@ export function chainFillOutcome(a: {
   return { filledWei: a.filled > a.anchor ? a.anchor : a.filled, cancelled: false };
 }
 
+const OUTCOME_LABEL: Record<Outcome, string> = {
+  filled: msg("filled"),
+  "partially-filled": msg("partially filled"),
+  expired: msg("expired"),
+  cancelled: msg("cancelled"),
+};
+
 export function outcomeLabel(o: Outcome): string {
-  return o === "partially-filled" ? "partially filled" : o;
+  return t(OUTCOME_LABEL[o]);
 }
 
 /**
@@ -159,9 +169,10 @@ export function outcomeEntry(
 export function fillStatusLabel(f: Pick<Fill, "status" | "filledPct" | "size">): string {
   const s = f.status ?? "filled";
   if ((s === "expired" || s === "cancelled") && f.filledPct !== undefined && f.filledPct > 0) {
-    return `${s} · ${f.filledPct.toFixed(0)}% filled`;
+    const pct = f.filledPct.toFixed(0);
+    return s === "expired" ? t("expired · {pct}% filled", { pct }) : t("cancelled · {pct}% filled", { pct });
   }
-  return s === "partial" ? "partial fill" : outcomeLabel(s);
+  return s === "partial" ? t("partial fill") : outcomeLabel(s);
 }
 
 // ---------------------------------------------------------------- the order card
@@ -220,27 +231,27 @@ export interface PhaseLine {
 export function phaseLine(p: OrderPhase): PhaseLine {
   switch (p.kind) {
     case "signing":
-      return { text: "Signing… confirm in your wallet", tone: "busy" };
+      return { text: t("Signing… confirm in your wallet"), tone: "busy" };
     case "posting":
-      return { text: "Posting to the orderbook…", tone: "busy" };
+      return { text: t("Posting to the orderbook…"), tone: "busy" };
     case "posted":
       return p.simulated
-        ? { text: "Signed · in the simulated book (nothing broadcast)", tone: "dim" }
-        : { text: "Posted to the orderbook · waiting for a filler", tone: "busy" };
+        ? { text: t("Signed · in the simulated book (nothing broadcast)"), tone: "dim" }
+        : { text: t("Posted to the orderbook · waiting for a filler"), tone: "busy" };
     case "fill-pending":
-      return { text: "Fill submitted", tone: "busy", tx: p.tx };
+      return { text: t("Fill submitted"), tone: "busy", tx: p.tx };
     case "partial":
-      return { text: `Partially filled · ${p.pct.toFixed(0)}%`, tone: "ok", tx: p.tx || undefined };
+      return { text: t("Partially filled · {pct}%", { pct: p.pct.toFixed(0) }), tone: "ok", tx: p.tx || undefined };
     case "filled":
-      return { text: "Filled ✓", tone: "done", tx: p.tx || undefined };
+      return { text: t("Filled ✓"), tone: "done", tx: p.tx || undefined };
     case "expired":
-      return { text: p.pct > 0 ? `Expired · ${p.pct.toFixed(0)}% filled` : "Expired · not filled", tone: "dim" };
+      return { text: p.pct > 0 ? t("Expired · {pct}% filled", { pct: p.pct.toFixed(0) }) : t("Expired · not filled"), tone: "dim" };
     case "cancelled":
-      return { text: p.pct > 0 ? `Cancelled · ${p.pct.toFixed(0)}% filled` : "Cancelled", tone: "dim" };
+      return { text: p.pct > 0 ? t("Cancelled · {pct}% filled", { pct: p.pct.toFixed(0) }) : t("Cancelled"), tone: "dim" };
     case "off-book":
-      return { text: "Off the book · still fillable until expiry", tone: "warn" };
+      return { text: t("Off the book · still fillable until expiry"), tone: "warn" };
     case "unknown":
-      return { text: "Signed", tone: "dim" };
+      return { text: t("Signed"), tone: "dim" };
   }
 }
 

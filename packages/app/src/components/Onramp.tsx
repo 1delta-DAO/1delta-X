@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { t, tr } from "../i18n";
+
 /**
  * THE ON-RAMP (2026-10-20): links out, nothing built in. USD₮0 is bridged on USDT0's
  * own app (usdt0.to, LayerZero, ~23 min to Rootstock), and RBTC for gas comes from
@@ -12,7 +14,7 @@ import type { ReactNode } from "react";
 export const USDT0_TRANSFER_URL = "https://usdt0.to/transfer";
 export const GAS_ZIP_URL = "https://www.gas.zip/";
 
-export function UsdtLink({ children = "Bring USD₮0 on usdt0.to" }: { children?: ReactNode }) {
+export function UsdtLink({ children = t("Bring USD₮0 on usdt0.to") }: { children?: ReactNode }) {
   return (
     <a className="linkbtn" href={USDT0_TRANSFER_URL} target="_blank" rel="noreferrer">
       {children}
@@ -20,7 +22,7 @@ export function UsdtLink({ children = "Bring USD₮0 on usdt0.to" }: { children?
   );
 }
 
-export function GasZipLink({ children = "get RBTC for gas on Gas.zip" }: { children?: ReactNode }) {
+export function GasZipLink({ children = t("get RBTC for gas on Gas.zip") }: { children?: ReactNode }) {
   return (
     <a className="linkbtn" href={GAS_ZIP_URL} target="_blank" rel="noreferrer">
       {children}
@@ -32,8 +34,10 @@ export function GasZipLink({ children = "get RBTC for gas on Gas.zip" }: { child
 export function OnrampLink() {
   return (
     <p className="onramp">
-      No funds on Rootstock? <UsdtLink>Bridge USD₮0 from Arbitrum, Ethereum, Polygon and more on usdt0.to</UsdtLink> (it
-      trades with no RBTC needed) or <GasZipLink />.
+      {tr(
+        "No funds on Rootstock? <usdt>Bridge USD₮0 from Arbitrum, Ethereum, Polygon and more on usdt0.to</usdt> (it trades with no RBTC needed) or <gas>get RBTC for gas on Gas.zip</gas>.",
+        { usdt: (c) => <UsdtLink>{c}</UsdtLink>, gas: (c) => <GasZipLink>{c}</GasZipLink> },
+      )}
     </p>
   );
 }

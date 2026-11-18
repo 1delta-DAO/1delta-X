@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { shortHex } from "../lib/format";
 import type { PhaseLine } from "../lib/orderLifecycle";
 import { explorerTx, txLine, type TxState } from "../lib/txFlow";
@@ -27,7 +28,7 @@ export function TxStatus({ state, chainId, onRetry }: { state: TxState; chainId:
       {l.hash && <TxLink chainId={chainId} hash={l.hash} />}
       {l.retry && onRetry && (
         <button type="button" onClick={onRetry}>
-          retry
+          {t("retry")}
         </button>
       )}
     </div>

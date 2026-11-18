@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { numberToHex } from "viem";
 
 import { chainById } from "../config/chains";
+import { t } from "../i18n";
 import { getProviders, providerByRdns, subscribeProviders, type EIP1193Provider } from "./eip6963";
 
 const LAST_WALLET = "1delta-x.wallet";
@@ -91,7 +92,7 @@ export function useWallet(): WalletState {
     async (target: string) => {
       const detail = providerByRdns(target);
       if (!detail) {
-        setError("wallet not available");
+        setError(t("wallet not available"));
         return;
       }
       setConnecting(true);

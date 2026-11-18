@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+
 export function fmt(n: number, dp: number): string {
   if (!isFinite(n)) return "—";
   return n.toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
@@ -23,17 +25,17 @@ export function shortHex(h: string, lead = 6, tail = 4): string {
 
 export function ago(ts: number, now = Date.now()): string {
   const s = Math.max(0, Math.round((now - ts) / 1000));
-  if (s < 10) return "just now";
-  if (s < 60) return `${s}s ago`;
+  if (s < 10) return t("just now");
+  if (s < 60) return t("{s}s ago", { s });
   const m = Math.round(s / 60);
-  if (m < 60) return `${m} min ago`;
+  if (m < 60) return t("{m} min ago", { m });
   const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m ago`;
+  return t("{h}h {m}m ago", { h, m: m % 60 });
 }
 
 export function until(ts: number, now = Date.now()): string {
   const s = Math.max(0, Math.round((ts - now) / 1000));
-  if (s <= 0) return "expired";
+  if (s <= 0) return t("expired");
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   return h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(s % 60).padStart(2, "0")}s`;

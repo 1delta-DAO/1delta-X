@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { SOURCES, type Level, type PoolBook, type RestingOrder, type Side, type Source } from "./types";
 
 /** A zeroed tally per source — one place that knows the full source set. */
@@ -320,10 +321,10 @@ export function restingLabel(r: RestingPreview): string {
   // A resting buy is an offer to buy, so it joins the bids; a resting sell joins
   // the asks. Saying so avoids the natural misreading that "I am buying" puts
   // the order on the side you bought from.
-  if (r.exhausted) return "Past the depth the ladder shows";
-  if (r.inside) return `Rests as the new best ${r.side}`;
-  if (r.beyond) return `Rests beyond the ${r.side}s`;
-  return `Rests among the ${r.side}s`;
+  if (r.exhausted) return t("Past the depth the ladder shows");
+  if (r.inside) return r.side === "bid" ? t("Rests as the new best bid") : t("Rests as the new best ask");
+  if (r.beyond) return r.side === "bid" ? t("Rests beyond the bids") : t("Rests beyond the asks");
+  return r.side === "bid" ? t("Rests among the bids") : t("Rests among the asks");
 }
 
 /** Cumulative BASE depth per side, and the split by source, for the stat row. */

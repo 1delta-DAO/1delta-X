@@ -1,6 +1,7 @@
 import { erc2612PermitToJson, hashOrderStruct, isFillOnce, orderFromJson, OrderSide, type Order } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
+import { t } from "../i18n";
 import type { ChainFillState } from "../lib/chain";
 import { chainFillOutcome, isFull, outcomeEntry, retireReason, type Outcome } from "../lib/orderLifecycle";
 import type { Fill, RestingOrder } from "../lib/types";
@@ -149,6 +150,11 @@ export function encodeCancelBody(signed: SignedCancel): string {
   });
 }
 
+const offBookUnknown = () =>
+  t("the orderbook no longer knows this order (server restarted?). It is still fillable on-chain until expiry");
+const offBookEvicted = () =>
+  t("no longer distributed by the orderbook (expired, unfunded or invalidated). Cancel on-chain to be sure it cannot fill");
+
 function joinUrl(base: string, path: string): string {
   return `${base.replace(/\/+$/, "")}${path}`;
 }
@@ -162,9 +168,9 @@ async function readError(res: Response): Promise<string> {
     } catch {
       /* not JSON */
     }
-    return text.slice(0, 200) || res.statusText || "no reason given";
+    return text.slice(0, 200) || res.statusText || t("no reason given");
   } catch {
-    return res.statusText || "no reason given";
+    return res.statusText || t("no reason given");
   }
 }
 
@@ -172,17 +178,28 @@ async function readError(res: Response): Promise<string> {
 async function httpError(res: Response, what: "order" | "cancel"): Promise<OrderbookHttpError> {
   const reason = await readError(res);
   const s = res.status;
-  const msg =
+  const order = what === "order";
+  const text =
     s === 503
-      ? `The orderbook is temporarily unavailable (${reason}). The ${what} was NOT posted. Try again.`
+      ? order
+        ? t("The orderbook is temporarily unavailable ({reason}). The order was NOT posted. Try again.", { reason })
+        : t("The orderbook is temporarily unavailable ({reason}). The cancel was NOT posted. Try again.", { reason })
       : s === 429
-        ? `The orderbook is rate-limiting this address (${reason}). The ${what} was NOT posted. Wait and try again.`
+        ? order
+          ? t("The orderbook is rate-limiting this address ({reason}). The order was NOT posted. Wait and try again.", { reason })
+          : t("The orderbook is rate-limiting this address ({reason}). The cancel was NOT posted. Wait and try again.", { reason })
         : s === 422
-          ? `The orderbook rejected the ${what}: ${reason}`
+          ? order
+            ? t("The orderbook rejected the order: {reason}", { reason })
+            : t("The orderbook rejected the cancel: {reason}", { reason })
           : s === 403
-            ? `The orderbook refused the ${what}: ${reason}`
-            : `The orderbook answered ${s} (${reason}). The ${what} was NOT posted.`;
-  return new OrderbookHttpError(s, reason, msg);
+            ? order
+              ? t("The orderbook refused the order: {reason}", { reason })
+              : t("The orderbook refused the cancel: {reason}", { reason })
+            : order
+              ? t("The orderbook answered {status} ({reason}). The order was NOT posted.", { status: s, reason })
+              : t("The orderbook answered {status} ({reason}). The cancel was NOT posted.", { status: s, reason });
+  return new OrderbookHttpError(s, reason, text);
 }
 
 async function send(doFetch: FetchLike, url: string, body: string): Promise<Response> {
@@ -193,7 +210,7 @@ async function send(doFetch: FetchLike, url: string, body: string): Promise<Resp
       body,
     });
   } catch (e) {
-    throw new Error(`Could not reach the orderbook at ${url}: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(t("Could not reach the orderbook at {url}: {error}", { url, error: e instanceof Error ? e.message : String(e) }));
   }
 }
 
@@ -210,7 +227,7 @@ export async function postOrder(
   // The server re-hashes the order itself. A different hash means it admitted a
   // different order than the one signed here — never track that as ours.
   if (typeof j.orderHash !== "string" || j.orderHash.toLowerCase() !== signed.hash.toLowerCase()) {
-    throw new Error(`The orderbook acknowledged a different order hash (${String(j.orderHash)}); not tracking it`);
+    throw new Error(t("The orderbook acknowledged a different order hash ({hash}); not tracking it", { hash: String(j.orderHash) }));
   }
   return { orderHash: signed.hash, duplicate: j.duplicate === true };
 }
@@ -423,7 +440,7 @@ export class RemoteOrderbook implements OrderbookApi {
   async place(req: PlaceOrderRequest): Promise<RestingOrder> {
     if (!req.signed) throw new Error("the book only holds signed orders");
     if (!req.signed.deployed) {
-      throw new Error("No Settlement is deployed on this chain. The order was signed but cannot be posted to the orderbook");
+      throw new Error(t("No Settlement is deployed on this chain. The order was signed but cannot be posted to the orderbook"));
     }
     // Throws on anything but 202 — so a rejected order never becomes a row.
     await postOrder(this.doFetch, this.baseUrl, req.signed);
@@ -493,7 +510,7 @@ export class RemoteOrderbook implements OrderbookApi {
   async addSlice(orderHash: string, signed: SignedOrder): Promise<void> {
     const o = this.rows.find((x) => x.id === orderHash);
     if (!o?.slices || o.cancelled || o.slices.signed >= o.slices.total) return;
-    if (!signed.deployed) throw new Error("No Settlement is deployed on this chain, so the slice cannot be posted");
+    if (!signed.deployed) throw new Error(t("No Settlement is deployed on this chain, so the slice cannot be posted"));
     await postOrder(this.doFetch, this.baseUrl, signed);
     o.signedOrders = [...(o.signedOrders ?? []), signed];
     o.slices.signed += 1;
@@ -745,7 +762,7 @@ export class RemoteOrderbook implements OrderbookApi {
       // Unknown here: the (in-memory) server restarted or evicted it long ago.
       t.statusDone = true;
       if (row && !row.cancelled && !row.offBook) {
-        row.offBook = "the orderbook no longer knows this order (server restarted?). It is still fillable on-chain until expiry";
+        row.offBook = offBookUnknown();
         return true;
       }
       return false;
@@ -793,7 +810,7 @@ export class RemoteOrderbook implements OrderbookApi {
         // does not say which, and the signature may still be fillable if the maker
         // re-funds — so the row says what is known.
         row.offBook =
-          "no longer distributed by the orderbook (expired, unfunded or invalidated). Cancel on-chain to be sure it cannot fill";
+          offBookEvicted();
         changed = true;
       }
     }

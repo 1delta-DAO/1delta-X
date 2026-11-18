@@ -13,6 +13,8 @@
  *   VITE_PROMOTION='{"live":false}'
  *   VITE_PROMOTION='{"pool":"200 USDRIF","cadence":"20 daily draws"}'
  */
+import { msg } from "../i18n";
+
 export interface Promotion {
   /** Whether a draw is running. False removes every mention of it from the UI. */
   live: boolean;
@@ -39,8 +41,8 @@ const DEFAULT: Promotion = {
   // amounts to 1delta, and the draw is evaluated by hand, so edge cases can be judged
   // generously. Never state a figure here the operator would have to defend to the cent.
   qualifier: "US$20",
-  pool: "around 100 USDRIF",
-  cadence: "roughly ten draws of about 10 USDRIF",
+  pool: msg("around 100 USDRIF"),
+  cadence: msg("roughly ten draws of about 10 USDRIF"),
   support: "",
 };
 

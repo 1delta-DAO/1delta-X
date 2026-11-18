@@ -28,6 +28,7 @@ import { quoteUrl, useMarketQuote } from "./hooks/useMarketQuote";
 import { useFills, useRestingOrders } from "./hooks/useOrderbook";
 import { usePoolBook } from "./hooks/usePoolBook";
 import { useTheme } from "./hooks/useTheme";
+import { t, tr, useLang } from "./i18n";
 import { useTicket, type TicketDeps } from "./hooks/useTicket";
 import { useTokenIndex } from "./hooks/useTokenIndex";
 import { fmtAmt, fmtPrice } from "./lib/format";
@@ -75,6 +76,8 @@ function errorText(e: unknown): string {
 
 export default function App() {
   const [theme, toggleTheme] = useTheme();
+  // Subscribes the whole page to the language in the URL (i18n): a switch re-renders it in place.
+  useLang();
   const wallet = useWallet();
 
   // The ticket sizes its automatic limit price against the merged ladder and its
@@ -479,8 +482,8 @@ export default function App() {
         side: ticket.side === "sell" ? "bid" : "ask",
         price: figures.price,
         minPrice: figures.minPrice,
-        label: figures.basis === "quote" ? "Your quote" : "Book estimate",
-        via: figures.basis === "quote" ? `via ${sourceName(figures.source)}` : "no filler quote",
+        label: figures.basis === "quote" ? t("Your quote") : t("Book estimate"),
+        via: figures.basis === "quote" ? t("via {source}", { source: sourceName(figures.source) }) : t("no filler quote"),
         amount: `≈ ${fmtAmt(figures.receive)} ${ticket.recvToken}`,
       }
     : null;
@@ -635,7 +638,7 @@ export default function App() {
         nativeOut?: NativeOutShape | undefined;
       },
     ): Promise<SignedOrder> => {
-      if (!signer || !wallet.address) throw new Error("wallet not connected");
+      if (!signer || !wallet.address) throw new Error(t("wallet not connected"));
       const market = marketById(spec.marketId);
       const paySymbol = spec.side === "sell" ? market.base : market.quote;
       const recvSymbol = spec.side === "sell" ? market.quote : market.base;
@@ -728,7 +731,7 @@ export default function App() {
         quoted = !!plan.quoted;
         pull = quoted && quoteReq.delivery === "auto" && fresh?.delivery === "pull";
       }
-      const undeployed = deployment === null ? " · domain not deployed" : "";
+      const undeployed = deployment === null ? t(" · domain not deployed") : "";
       const spec: SliceSpec = {
         amountIn: plan.amountIn,
         targetOut: plan.targetOut,
@@ -757,9 +760,21 @@ export default function App() {
         });
         setReceipt({
           hash: order.id,
-          headline: `${fmtAmt(amount)} ${payToken} in ${ticket.slices} slices, ${ticket.everyMin} min apart`,
-          detail: `slice 1 signed at ${fmtPrice(plan.price, tick)} ${ticket.market.quote}/${ticket.market.base}; sign each later slice from Open orders when it comes due`,
-          note: `slice 1 of ${ticket.slices} signed · ${BOOK_IS_REMOTE ? "posted to the orderbook" : "simulated book"}${undeployed}`,
+          headline: t("{amount} {token} in {slices} slices, {every} min apart", {
+            amount: fmtAmt(amount),
+            token: payToken,
+            slices: ticket.slices,
+            every: ticket.everyMin,
+          }),
+          detail: t("slice 1 signed at {price} {pair}; sign each later slice from Open orders when it comes due", {
+            price: fmtPrice(plan.price, tick),
+            pair: `${ticket.market.quote}/${ticket.market.base}`,
+          }),
+          note: `${
+            BOOK_IS_REMOTE
+              ? t("slice 1 of {slices} signed · posted to the orderbook", { slices: ticket.slices })
+              : t("slice 1 of {slices} signed · simulated book", { slices: ticket.slices })
+          }${undeployed}`,
         });
         ticket.clearAmount();
         allowanceState.refresh();
@@ -832,21 +847,28 @@ export default function App() {
           ? { market: { createdAt: postedAt, expiresAt: postedAt + plan.ttlSeconds * 1000, decaySeconds: plan.decaySeconds } }
           : {}),
         headline: quoted
-          ? `${fmtAmt(plan.amountIn)} ${payToken} → ≈ ${fmtAmt(plan.targetOut)} ${recvToken} (at least ${fmtAmt(plan.minOut)})`
-          : `${fmtAmt(plan.amountIn)} ${payToken} → at least ${fmtAmt(plan.minOut)} ${recvToken}`,
+          ? t("{pay} → ≈ {target} {token} (at least {min})", {
+              pay: `${fmtAmt(plan.amountIn)} ${payToken}`,
+              target: fmtAmt(plan.targetOut),
+              token: recvToken,
+              min: fmtAmt(plan.minOut),
+            })
+          : t("{pay} → at least {min} {token}", { pay: `${fmtAmt(plan.amountIn)} ${payToken}`, min: fmtAmt(plan.minOut), token: recvToken }),
         detail: q.resting
-          ? `${restingLabel(q.resting).toLowerCase()} at ${fmtPrice(q.resting.price, tick)}`
+          ? t("{what} at {price}", { what: restingLabel(q.resting).toLowerCase(), price: fmtPrice(q.resting.price, tick) })
           : undefined,
         note: `${
           BOOK_IS_REMOTE
             ? quoted
-              ? "signed at the filler's quote · posted to the orderbook. It fills at the quote within a block or two, down to your minimum if the price moves; not filled after ~2 blocks? cancel and re-quote"
+              ? t("signed at the filler's quote · posted to the orderbook. It fills at the quote within a block or two, down to your minimum if the price moves; not filled after ~2 blocks? cancel and re-quote")
               : plan.kind === "limit"
-                ? `signed · posted to the orderbook at your limit; fills whenever the market, net of the filler's network fee, reaches it (lives ${expiryLabel(ticket.expiry)})`
-                : "signed · posted to the orderbook · awaiting a filler; fills appear when they settle on-chain"
+                ? t("signed · posted to the orderbook at your limit; fills whenever the market, net of the filler's network fee, reaches it (lives {expiry})", {
+                    expiry: expiryLabel(ticket.expiry),
+                  })
+                : t("signed · posted to the orderbook · awaiting a filler; fills appear when they settle on-chain")
             : plan.kind === "limit"
-              ? "signed · resting in the simulated book"
-              : "signed · settlement simulated, nothing was broadcast"
+              ? t("signed · resting in the simulated book")
+              : t("signed · settlement simulated, nothing was broadcast")
         }${undeployed}`,
       });
       ticket.clearAmount();
@@ -879,7 +901,7 @@ export default function App() {
       const domain = o.signed?.deployment ?? deployment;
       if (wallet.address && !onChain) return void wallet.switchChain(chainId);
       if (!signer || !wallet.address || !domain) {
-        setOrderError(`Connect a wallet on ${chainLabel(marketById(o.marketId).chainId)} to sign a cancel`);
+        setOrderError(t("Connect a wallet on {chain} to sign a cancel", { chain: chainLabel(marketById(o.marketId).chainId) }));
         return;
       }
       try {
@@ -910,8 +932,11 @@ export default function App() {
     if (!wallet.provider || !wallet.address || !onChain || !address || !config || !wrappedWei || wrappedWei <= 0n) return;
     const amount = fmtWei(wrappedWei);
     const ok = window.confirm(
-      `Unwrap ${amount} ${wrappedSymbol} to ${nativeSymbol}?\n\n` +
-        `One transaction (WRBTC.withdraw). Orders that sell ${wrappedSymbol} cannot fill without it.`,
+      t("Unwrap {amount} {wrapped} to {native}?\n\nOne transaction (WRBTC.withdraw). Orders that sell {wrapped} cannot fill without it.", {
+        amount,
+        wrapped: wrappedSymbol ?? "",
+        native: nativeSymbol,
+      }),
     );
     if (!ok) return;
     const account = wallet.address;
@@ -921,7 +946,7 @@ export default function App() {
       const client = createWalletClient({ account, chain: config.chain, transport: custom(provider) });
       const reader = createPublicClient({ chain: config.chain, transport: custom(provider) });
       // wallet → submitted → confirming → confirmed / failed, shown under the wallet strip.
-      await runTx(dispatchUnwrap, { label: `Unwrap ${amount} ${wrappedSymbol}`, step: 1, of: 1 }, {
+      await runTx(dispatchUnwrap, { label: t("Unwrap {amount} {wrapped}", { amount, wrapped: wrappedSymbol ?? "" }), step: 1, of: 1 }, {
         send: async () => client.sendTransaction({ to: call.to, data: call.data, chain: config.chain, account, ...(await userTxGas(reader, config.chain.id)) }),
         wait: (hash) => reader.waitForTransactionReceipt({ hash }),
         blockNumber: () => reader.getBlockNumber(),
@@ -952,7 +977,7 @@ export default function App() {
         return void wallet.switchChain(chainId);
       }
       if (!wallet.provider || !wallet.address || !onChain || !settlement || !signedOrders[0]?.deployed) {
-        setOrderError("On-chain cancel needs a deployed Settlement and a wallet on its chain");
+        setOrderError(t("On-chain cancel needs a deployed Settlement and a wallet on its chain"));
         return;
       }
       const config = chainById(signedOrders[0].deployment.chainId);
@@ -961,7 +986,7 @@ export default function App() {
       try {
         const client = createWalletClient({ account, chain: config.chain, transport: custom(wallet.provider) });
         const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) });
-        await runTx(dispatchCancel, { label: `Cancel on-chain ${o.id.slice(0, 10)}…`, step: 1, of: 1 }, {
+        await runTx(dispatchCancel, { label: t("Cancel on-chain {id}…", { id: o.id.slice(0, 10) }), step: 1, of: 1 }, {
           send: async () => {
             const tx = await client.sendTransaction({
               to: settlement as Address,
@@ -1038,9 +1063,9 @@ export default function App() {
   // Signing is gated on the wallet being connected and on the right chain — the
   // order is chain-bound, so a signature from the wrong one is not a near miss.
   const gate: Gate | null = !wallet.address
-    ? { label: "Connect wallet", action: () => setConnectRequest((n) => n + 1) }
+    ? { label: t("Connect wallet"), action: () => setConnectRequest((n) => n + 1) }
     : !onChain
-      ? { label: `Switch to ${chainLabel(chainId)}`, action: () => void wallet.switchChain(chainId) }
+      ? { label: t("Switch to {chain}", { chain: chainLabel(chainId) }), action: () => void wallet.switchChain(chainId) }
       : null;
 
   // `partial` is its own state: the book on screen is real, but one venue has
@@ -1176,23 +1201,29 @@ export default function App() {
       )}
 
       <footer>
-        <p>1delta X · reference interface for UniversalSettlement</p>
+        <p>{t("1delta X · reference interface for UniversalSettlement")}</p>
         <p>
-          Pool rungs are built from live Uniswap v3 tick liquidity via the{" "}
-          <a href="https://oku.trade/api" target="_blank" rel="noreferrer">
-            Oku API
-          </a>
-          ; token metadata and icons come from{" "}
-          <a href="https://github.com/1delta-DAO/token-lists" target="_blank" rel="noreferrer">
-            1delta-DAO/token-lists
-          </a>
-          .{" "}
+          {tr(
+            "Pool rungs are built from live Uniswap v3 tick liquidity via the <oku>Oku API</oku>; token metadata and icons come from <lists>1delta-DAO/token-lists</lists>.",
+            {
+              oku: (c) => (
+                <a href="https://oku.trade/api" target="_blank" rel="noreferrer">
+                  {c}
+                </a>
+              ),
+              lists: (c) => (
+                <a href="https://github.com/1delta-DAO/token-lists" target="_blank" rel="noreferrer">
+                  {c}
+                </a>
+              ),
+            },
+          )}{" "}
           {BOOK_IS_REMOTE
-            ? "Signed orders and soft cancels are posted to a live orderbook server; any filler can fill them on-chain, and a fill is shown only once the server reports it from the chain."
-            : "Order distribution runs against an in-browser mock of the orderbook backend: signatures are real, but resting, fills and soft cancels are simulated locally, nothing is broadcast, and no fill shown here happened on-chain."}
+            ? t("Signed orders and soft cancels are posted to a live orderbook server; any filler can fill them on-chain, and a fill is shown only once the server reports it from the chain.")
+            : t("Order distribution runs against an in-browser mock of the orderbook backend: signatures are real, but resting, fills and soft cancels are simulated locally, nothing is broadcast, and no fill shown here happened on-chain.")}
         </p>
         <p>
-          <TermsLink>Prize draw Terms &amp; Conditions</TermsLink>
+          <TermsLink>{t("Prize draw Terms & Conditions")}</TermsLink>
         </p>
       </footer>
 

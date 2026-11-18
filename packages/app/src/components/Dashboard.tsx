@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { NATIVE_SYMBOL, WRAPPED_NATIVE } from "../config/markets";
 import { useAllFills } from "../hooks/useAllFills";
 import { useTxHops } from "../hooks/useTxHops";
+import { t, useLang } from "../i18n";
 import {
   dashStats,
   fillerName,
@@ -78,18 +79,30 @@ function DailyChart({
     <div className="chart">
       <div className="charthead">
         <span className="lbl">
-          Daily volume · last {daily.length} days (UTC)
+          {t("Daily volume · last {n} days (UTC)", { n: daily.length })}
         </span>
         <span className="m tip">
           {h
-            ? `${day(h.day)} · volume ${usd(h.volume)} · turnover ${usd(h.turnover)} · ${h.fills} fill${h.fills === 1 ? "" : "s"}`
-            : `peak ${usd(max)}`}
+            ? h.fills === 1
+              ? t("{day} · volume {volume} · turnover {turnover} · {n} fill", {
+                  day: day(h.day),
+                  volume: usd(h.volume),
+                  turnover: usd(h.turnover),
+                  n: h.fills,
+                })
+              : t("{day} · volume {volume} · turnover {turnover} · {n} fills", {
+                  day: day(h.day),
+                  volume: usd(h.volume),
+                  turnover: usd(h.turnover),
+                  n: h.fills,
+                })
+            : t("peak {max}", { max: usd(max) })}
         </span>
       </div>
       <div
         className="bars"
         role="img"
-        aria-label="Daily fill volume in USD"
+        aria-label={t("Daily fill volume in USD")}
         onMouseLeave={() => setHover(null)}
       >
         {daily.map((d, i) => (
@@ -122,10 +135,12 @@ function DailyChart({
 
 function BreakdownTable({
   title,
+  column,
   rows,
   total,
 }: {
   title: string;
+  column: string;
   rows: Breakdown[];
   total: number;
 }) {
@@ -138,18 +153,18 @@ function BreakdownTable({
         <table className="o">
           <thead>
             <tr>
-              <th>{title.replace(/^By /, "")}</th>
-              <th>Fills</th>
-              <th>Volume</th>
-              <th>Turnover</th>
-              <th>Share</th>
+              <th>{column}</th>
+              <th>{t("Fills")}</th>
+              <th>{t("Volume")}</th>
+              <th>{t("Turnover")}</th>
+              <th>{t("Share")}</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
                 <td className="empty" colSpan={5}>
-                  No fills yet.
+                  {t("No fills yet.")}
                 </td>
               </tr>
             ) : (
@@ -190,25 +205,25 @@ function RecentTable({
   return (
     <div className="box">
       <div className="boxhead">
-        <span className="lbl">Latest fills · all makers</span>
+        <span className="lbl">{t("Latest fills · all makers")}</span>
       </div>
       <div className="sx">
         <table className="o">
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Pair</th>
-              <th>Size</th>
-              <th>Volume</th>
-              <th>Filled by</th>
-              <th>Tx</th>
+              <th>{t("Time")}</th>
+              <th>{t("Pair")}</th>
+              <th>{t("Size")}</th>
+              <th>{t("Volume")}</th>
+              <th>{t("Filled by")}</th>
+              <th>{t("Tx")}</th>
             </tr>
           </thead>
           <tbody>
             {fills.length === 0 ? (
               <tr>
                 <td className="empty" colSpan={6}>
-                  No fills yet.
+                  {t("No fills yet.")}
                 </td>
               </tr>
             ) : (
@@ -252,6 +267,7 @@ function RecentTable({
  * anchor leg at today's USD price), per day, per pair and per filler.
  */
 export function Dashboard({ chainId, usdOf }: DashboardProps) {
+  const lang = useLang();
   const { fills: wire, loading, error, complete } = useAllFills(true);
   // The native coin prices as its wrapped token.
   const price = useMemo(
@@ -272,8 +288,8 @@ export function Dashboard({ chainId, usdOf }: DashboardProps) {
       // No swap, or none we can price: its fills are its turnover.
       const usds = h
         .map((hop) =>
-          hopUsd(hop, pools.get(hop.pool), (t, w) =>
-            tokenUsd(chainId, t, w, price),
+          hopUsd(hop, pools.get(hop.pool), (tok, w) =>
+            tokenUsd(chainId, tok, w, price),
           ),
         )
         .filter((v): v is number => v !== undefined);
@@ -287,7 +303,7 @@ export function Dashboard({ chainId, usdOf }: DashboardProps) {
   }, [hops, pools, chainId, price]);
   const stats = useMemo(
     () => dashStats(chainId, fills, Date.now(), DAYS, txTurnover),
-    [chainId, fills, txTurnover],
+    [chainId, fills, txTurnover, lang],
   );
   const unsized = stats.fills - stats.sized;
 
@@ -296,63 +312,69 @@ export function Dashboard({ chainId, usdOf }: DashboardProps) {
       <div className="box">
         <div className="boxhead">
           <span className="lbl">
-            Dashboard · every fill on the 1delta X orderbook
+            {t("Dashboard · every fill on the 1delta X orderbook")}
           </span>
           <span className="lbl">
             {loading
-              ? "loading…"
+              ? t("loading…")
               : error
                 ? error
-                : `updated every minute${complete ? "" : " · oldest fills not loaded"}`}
+                : complete
+                  ? t("updated every minute")
+                  : t("updated every minute · oldest fills not loaded")}
           </span>
         </div>
         <div className="kpis">
           <Kpi
-            label="Volume"
+            label={t("Volume")}
             value={usd(stats.volume)}
-            sub={`netted · ${stats.fills} fills`}
+            sub={t("netted · {n} fills", { n: stats.fills })}
           />
           <Kpi
-            label="Turnover"
+            label={t("Turnover")}
             value={usd(stats.turnover)}
             sub={
               pending > 0
-                ? `reading ${pending} transaction${pending === 1 ? "" : "s"}…`
-                : "every conversion, incl. route hops"
+                ? pending === 1
+                  ? t("reading {n} transaction…", { n: pending })
+                  : t("reading {n} transactions…", { n: pending })
+                : t("every conversion, incl. route hops")
             }
           />
           <Kpi
-            label="Last 24 h"
+            label={t("Last 24 h")}
             value={usd(stats.volume24h)}
-            sub={`volume · ${stats.fills24h} fills`}
+            sub={t("volume · {n} fills", { n: stats.fills24h })}
           />
           <Kpi
-            label="Makers"
+            label={t("Makers")}
             value={String(stats.makers)}
-            sub="distinct wallets"
+            sub={t("distinct wallets")}
           />
         </div>
         <DailyChart daily={stats.daily} />
         <p className="dnote">
-          Each fill is sized on the exactly-filled leg of its order (what a
-          seller paid, what a buyer received) at today&apos;s USD price. Volume
-          is the USD that really changed hands: opposite fills settled in the
-          same transaction net (two matched orders count once). Turnover is
-          every conversion that ran: each pool hop of a routed fill (a two-hop
-          route counts about twice), and the fill itself when it needed no swap
-          (filled from inventory).
+          {t(
+            "Each fill is sized on the exactly-filled leg of its order (what a seller paid, what a buyer received) at today's USD price. Volume is the USD that really changed hands: opposite fills settled in the same transaction net (two matched orders count once). Turnover is every conversion that ran: each pool hop of a routed fill (a two-hop route counts about twice), and the fill itself when it needed no swap (filled from inventory).",
+          )}
           {unsized > 0 &&
-            ` ${unsized} older fill${unsized === 1 ? "" : "s"} could not be sized (the orderbook no longer holds the order).`}
+            ` ${
+              unsized === 1
+                ? t("{n} older fill could not be sized (the orderbook no longer holds the order).", { n: unsized })
+                : t("{n} older fills could not be sized (the orderbook no longer holds the order).", { n: unsized })
+            }`}
         </p>
       </div>
       <div className="dgrid">
         <BreakdownTable
-          title="By pair"
+          title={t("By pair")}
+          column={t("pair")}
           rows={stats.pairs}
           total={stats.volume}
         />
         <BreakdownTable
-          title="By filler"
+          title={t("By filler")}
+          column={t("filler")}
           rows={stats.fillers}
           total={stats.volume}
         />

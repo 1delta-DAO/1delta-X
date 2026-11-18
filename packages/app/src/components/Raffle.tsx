@@ -4,6 +4,7 @@ import type { Address } from "viem";
 import { ORDERBOOK_URL } from "../backend/book";
 import { chainLabel } from "../config/chains";
 import { PROMOTION, promotionRunsOn } from "../config/promotion";
+import { t, tr } from "../i18n";
 import { fetchRaffleStatus, fetchRaffleSummary, participateView, type RaffleStatus, type TypedDataSigner } from "../lib/raffle";
 import { GasZipLink, OnrampLink, UsdtLink } from "./Onramp";
 import { ParticipateSheet } from "./Participate";
@@ -76,58 +77,67 @@ export function RaffleNotice({
 
   return (
     <aside className="raffle">
-      <span className="pill pill-violet">Prize draw</span>
+      <span className="pill pill-violet">{t("Prize draw")}</span>
       <div className="rfbody">
         <p className="rflead">
-          Trading on {chainLabel(PROMOTION.chainId)} puts your address in a <b>daily prize draw</b>, no sign-up needed.
-          Roughly <b>{PROMOTION.qualifier}</b> of trading in a day counts; a draw is held on days with more than three
-          participating addresses, and <b>{PROMOTION.pool}</b> is paid out over {PROMOTION.cadence}. After your first swap
-          you can also <b>rate the app</b>: a minute of feedback, optional.
+          {tr(
+            "Trading on {chain} puts your address in a <b>daily prize draw</b>, no sign-up needed. Roughly {qualifier} of trading in a day counts; a draw is held on days with more than three participating addresses, and {pool} is paid out over {cadence}. After your first swap you can also <b>rate the app</b>: a minute of feedback, optional.",
+            {
+              b: (c) => <b>{c}</b>,
+              chain: chainLabel(PROMOTION.chainId),
+              qualifier: <b>{PROMOTION.qualifier}</b>,
+              pool: <b>{t(PROMOTION.pool)}</b>,
+              cadence: t(PROMOTION.cadence),
+            },
+          )}
         </p>
         <div className="rfactions">
           {view.kind === "connect" && (
             <button type="button" className="cta line rfbtn" onClick={onConnect}>
-              Connect wallet
+              {t("Connect wallet")}
             </button>
           )}
           {view.kind === "locked" && (
             <span className="rfstate">
-              Trade once and you are in; the feedback form unlocks after that first swap.{" "}
-              No funds on Rootstock? <UsdtLink>Bridge USD₮0 on usdt0.to</UsdtLink> (no RBTC needed) or <GasZipLink />.
+              {tr(
+                "Trade once and you are in; the feedback form unlocks after that first swap. No funds on Rootstock? <usdt>Bridge USD₮0 on usdt0.to</usdt> (no RBTC needed) or <gas>get RBTC for gas on Gas.zip</gas>.",
+                { usdt: (c) => <UsdtLink>{c}</UsdtLink>, gas: (c) => <GasZipLink>{c}</GasZipLink> },
+              )}
             </span>
           )}
           {view.kind === "open" && (
             <button type="button" className="cta line rfbtn" onClick={() => setOpen(true)}>
-              Rate the app
+              {t("Rate the app")}
             </button>
           )}
           {view.kind === "entered" && (
             <span className="rfstate">
-              <span className="good">✓ Thanks for the feedback.</span>{" "}
+              <span className="good">✓ {t("Thanks for the feedback.")}</span>{" "}
               <button type="button" className="linkbtn" onClick={() => setOpen(true)}>
-                Update it
+                {t("Update it")}
               </button>
             </span>
           )}
           {view.kind !== "locked" && (
             <span className="rfsupport">
-              No funds on Rootstock? <UsdtLink>Bridge USD₮0</UsdtLink> · <GasZipLink>RBTC via Gas.zip</GasZipLink>
+              {tr("No funds on Rootstock? <usdt>Bridge USD₮0</usdt> · <gas>RBTC via Gas.zip</gas>", {
+                usdt: (c) => <UsdtLink>{c}</UsdtLink>,
+                gas: (c) => <GasZipLink>{c}</GasZipLink>,
+              })}
             </span>
           )}
-          {entrants !== null && entrants > 0 && <span className="rfstate m">{entrants} rated the app</span>}
+          {entrants !== null && entrants > 0 && <span className="rfstate m">{t("{count} rated the app", { count: entrants })}</span>}
           {PROMOTION.support && (
             <a className="linkbtn rfsupport" href={PROMOTION.support} target="_blank" rel="noreferrer">
-              Stuck? Report a problem
+              {t("Stuck? Report a problem")}
             </a>
           )}
         </div>
         <p className="rffine">
-          Winners are picked <b>at random</b> from the day&rsquo;s qualifying addresses and announced by wallet address on
-          the official channels. Trading qualifies you for a draw, it does not earn a prize, and no amount of volume
-          guarantees one. Figures are approximate and the criteria,
-          schedule and pool can change. Not open to U.S. Persons or persons in sanctioned jurisdictions, and USDRIF
-          carries its own transfer restrictions. Winning addresses may be published.{" "}
-          <TermsLink>Full Terms</TermsLink>
+          {tr(
+            "Winners are picked <b>at random</b> from the day’s qualifying addresses and announced by wallet address on the official channels. Trading qualifies you for a draw, it does not earn a prize, and no amount of volume guarantees one. Figures are approximate and the criteria, schedule and pool can change. Not open to U.S. Persons or persons in sanctioned jurisdictions, and USDRIF carries its own transfer restrictions. Winning addresses may be published. <terms>Full Terms</terms>",
+            { b: (c) => <b>{c}</b>, terms: (c) => <TermsLink>{c}</TermsLink> },
+          )}
         </p>
       </div>
       {open && address && status?.promotion && ORDERBOOK_URL && (

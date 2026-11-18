@@ -12,6 +12,7 @@
  * the price is still decaying toward the maker's minimum, which only makes it more
  * attractive to fill, so "late" is information, not failure.
  */
+import { t } from "../i18n";
 import type { OrderPhase } from "./orderLifecycle";
 
 /** Mean Rootstock block interval, ms (blocks 9,316,3xx–9,318,3xx). */
@@ -67,11 +68,11 @@ export function marketTrack(a: TrackArgs): MarketTrack {
   const waiting = 1 - Math.exp((-elapsed / typical) * Math.LN2 * 2.32);
   const p = a.phase;
 
-  if (p.kind === "filled") return { stage: "filled", progress: 1, etaSeconds: null, late: false, auctionPct, headline: "Filled", sub: "settled on-chain" };
-  if (p.kind === "partial") return { stage: "filled", progress: 1, etaSeconds: null, late: false, auctionPct, headline: `Partially filled · ${p.pct.toFixed(0)}%`, sub: "settled on-chain" };
+  if (p.kind === "filled") return { stage: "filled", progress: 1, etaSeconds: null, late: false, auctionPct, headline: t("Filled"), sub: t("settled on-chain") };
+  if (p.kind === "partial") return { stage: "filled", progress: 1, etaSeconds: null, late: false, auctionPct, headline: t("Partially filled · {pct}%", { pct: p.pct.toFixed(0) }), sub: t("settled on-chain") };
   if (p.kind === "expired" || p.kind === "cancelled" || p.kind === "off-book" || p.kind === "unknown") {
-    const headline = p.kind === "expired" ? "Expired · not filled" : p.kind === "cancelled" ? "Cancelled" : p.kind === "off-book" ? "Off the book" : "Order status unknown";
-    return { stage: "ended", progress: 0, etaSeconds: null, late: false, auctionPct, headline, sub: p.kind === "expired" ? "nothing left your wallet" : "" };
+    const headline = p.kind === "expired" ? t("Expired · not filled") : p.kind === "cancelled" ? t("Cancelled") : p.kind === "off-book" ? t("Off the book") : t("Order status unknown");
+    return { stage: "ended", progress: 0, etaSeconds: null, late: false, auctionPct, headline, sub: p.kind === "expired" ? t("nothing left your wallet") : "" };
   }
   if (p.kind === "fill-pending") {
     const since = a.now - (a.sentAt ?? a.now);
@@ -82,12 +83,12 @@ export function marketTrack(a: TrackArgs): MarketTrack {
       etaSeconds: eta,
       late: since > blockMs * 2,
       auctionPct,
-      headline: "Fill sent · confirming",
-      sub: eta > 0 ? `next block ${fmtEta(eta)}` : "waiting for the next block",
+      headline: t("Fill sent · confirming"),
+      sub: eta > 0 ? t("next block {eta}", { eta: fmtEta(eta) }) : t("waiting for the next block"),
     };
   }
   if (p.kind === "signing" || p.kind === "posting") {
-    return { stage: "posted", progress: 0.04, etaSeconds: secs(typical), late: false, auctionPct: 0, headline: p.kind === "signing" ? "Confirm in your wallet" : "Posting to the orderbook", sub: `then usually filled in ${fmtEta(typical / 1000)}` };
+    return { stage: "posted", progress: 0.04, etaSeconds: secs(typical), late: false, auctionPct: 0, headline: p.kind === "signing" ? t("Confirm in your wallet") : t("Posting to the orderbook"), sub: t("then usually filled in {eta}", { eta: fmtEta(typical / 1000) }) };
   }
   // posted: the filler is matching it
   const left = typical - elapsed;
@@ -99,11 +100,11 @@ export function marketTrack(a: TrackArgs): MarketTrack {
     etaSeconds: secs(left),
     late: isLate,
     auctionPct,
-    headline: isLate ? "Slower than usual" : "Matching with a filler",
+    headline: isLate ? t("Slower than usual") : t("Matching with a filler"),
     sub: isLate
-      ? `the price keeps moving toward your minimum · expires in ${fmtEta(expiresIn)}`
+      ? t("the price keeps moving toward your minimum · expires in {eta}", { eta: fmtEta(expiresIn) })
       : left > 0
-        ? `usually ${fmtEta(typical / 1000)} · 1–2 Rootstock blocks`
-        : "any block now",
+        ? t("usually {eta} · 1–2 Rootstock blocks", { eta: fmtEta(typical / 1000) })
+        : t("any block now"),
   };
 }

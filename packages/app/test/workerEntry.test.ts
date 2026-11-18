@@ -23,4 +23,30 @@ describe("Pages worker entry module", () => {
     expect(Object.keys(mod)).toEqual(["default"]);
     expect(typeof (mod.default as { fetch?: unknown }).fetch).toBe("function");
   });
+
+  it("redirects a language route with a trailing slash, which would break the relative asset URLs", async () => {
+    // @ts-expect-error — plain JS worker module
+    const worker = (await import("../public/_worker.js")).default as { fetch: (r: Request, env: unknown) => Promise<Response> };
+    const asked: string[] = [];
+    const env = {
+      ASSETS: {
+        fetch: async (r: Request) => {
+          asked.push(new URL(r.url).pathname);
+          return new Response("<html>", { status: new URL(r.url).pathname === "/index.html" ? 200 : 404 });
+        },
+      },
+    };
+    const page = { headers: { accept: "text/html" } };
+
+    const slash = await worker.fetch(new Request("https://app.example/es/?x=1", page), env);
+    expect(slash.status).toBe(308);
+    expect(slash.headers.get("location")).toBe("/es?x=1");
+    expect(asked).toEqual([]);
+
+    // `/es` itself is the app: the SPA fallback serves index.html, with the security headers.
+    const es = await worker.fetch(new Request("https://app.example/es", page), env);
+    expect(es.status).toBe(200);
+    expect(asked).toEqual(["/es", "/index.html"]);
+    expect(es.headers.get("x-frame-options")).toBe("DENY");
+  });
 });

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ORDERBOOK_URL } from "../backend/book";
+import { t } from "../i18n";
 import type { FillWire } from "../lib/dashboard";
 
 /** Pages read on the first load (500 fills each); later refreshes read only the newest page. */
@@ -23,8 +24,8 @@ async function page(
   if (!res.ok)
     throw new Error(
       res.status === 429
-        ? "the orderbook is rate-limiting us; retrying shortly"
-        : `orderbook answered ${res.status}`,
+        ? t("the orderbook is rate-limiting us; retrying shortly")
+        : t("orderbook answered {status}", { status: res.status }),
     );
   const body = (await res.json()) as {
     fills?: FillWire[];
@@ -64,7 +65,7 @@ export function useAllFills(active: boolean): {
         setState({
           fills: [],
           loading: false,
-          error: "no orderbook server in this build",
+          error: t("no orderbook server in this build"),
           complete: true,
         });
       return;
@@ -98,7 +99,7 @@ export function useAllFills(active: boolean): {
       }
     };
     void full();
-    const t = setInterval(async () => {
+    const timer = setInterval(async () => {
       try {
         const p = await page();
         for (const f of p.fills) byKey.set(keyOf(f), f);
@@ -109,7 +110,7 @@ export function useAllFills(active: boolean): {
     }, REFRESH_MS);
     return () => {
       alive = false;
-      clearInterval(t);
+      clearInterval(timer);
     };
   }, [active]);
   return state;

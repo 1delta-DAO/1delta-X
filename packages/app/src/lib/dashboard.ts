@@ -7,6 +7,7 @@ import {
 } from "@1delta-x/sdk";
 
 import { NATIVE_SYMBOL, TOKENS } from "../config/markets";
+import { msg, t } from "../i18n";
 
 /**
  * THE DASHBOARD (2026-10-20): every fill the orderbook has indexed (`GET /fills`, no
@@ -51,8 +52,8 @@ export function symbolOf(chainId: number, address: string): string {
   const a = address.toLowerCase();
   const nb = nativeBalanceOf(chainId);
   if (nb && nb.toLowerCase() === a) return NATIVE_SYMBOL[chainId] ?? "native";
-  for (const [sym, t] of Object.entries(TOKENS[chainId] ?? {}))
-    if (t.address === a) return sym;
+  for (const [sym, tok] of Object.entries(TOKENS[chainId] ?? {}))
+    if (tok.address === a) return sym;
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
@@ -141,7 +142,7 @@ export function toDashFill(
 /** Who filled it, by the `OrderFilled` taker: the beta's known fillers by name, else the address. */
 const FILLERS: Record<number, Record<string, string>> = {
   30: {
-    "0xcafe35944e3195d59b4a354ea23d60a0445c083a": "1delta inventory",
+    "0xcafe35944e3195d59b4a354ea23d60a0445c083a": msg("1delta inventory"),
     "0x5987a4afe1b680dac657506b69c56b06ffe86cd1": "1delta solver v3",
     "0x48dbdc43507767bd51ec0af2cb9bfa5e35b332f1": "1delta solver v2",
   },
@@ -149,9 +150,9 @@ const FILLERS: Record<number, Record<string, string>> = {
 
 export function fillerName(chainId: number, solver: string): string {
   const s = solver.toLowerCase();
-  return (
-    FILLERS[chainId]?.[s] ?? (s ? `${s.slice(0, 6)}…${s.slice(-4)}` : "unknown")
-  );
+  const known = FILLERS[chainId]?.[s];
+  if (known) return t(known);
+  return s ? `${s.slice(0, 6)}…${s.slice(-4)}` : t("unknown");
 }
 
 export interface Breakdown {
@@ -294,27 +295,27 @@ export function dashStats(
   };
   const share = turnoverShares(fills, txTurnover);
   for (const f of fills) {
-    const t = share.get(f.id) ?? f.usd ?? 0;
+    const to = share.get(f.id) ?? f.usd ?? 0;
     const v = netted.get(f.id) ?? 0;
     if (f.usd !== undefined) st.sized++;
     st.volume += v;
-    st.turnover += t;
+    st.turnover += to;
     if (f.maker) makers.add(f.maker);
     if (f.at !== null) {
       if (now - f.at < DAY) {
         st.fills24h++;
         st.volume24h += v;
-        st.turnover24h += t;
+        st.turnover24h += to;
       }
       const i = Math.floor((f.at - first) / DAY);
       if (i >= 0 && i < days) {
         daily[i]!.fills++;
         daily[i]!.volume += v;
-        daily[i]!.turnover += t;
+        daily[i]!.turnover += to;
       }
     }
-    tally(pairs, `${f.pay} → ${f.recv}`, v, t);
-    tally(fillers, fillerName(chainId, f.solver), v, t);
+    tally(pairs, `${f.pay} → ${f.recv}`, v, to);
+    tally(fillers, fillerName(chainId, f.solver), v, to);
   }
   const byVolume = (a: Breakdown, b: Breakdown) =>
     b.volume - a.volume || b.turnover - a.turnover || b.fills - a.fills;

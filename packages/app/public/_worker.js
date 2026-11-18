@@ -305,11 +305,24 @@ async function proxyQuote(request, env, url) {
 /** Only Oku's own JSON-RPC shape, so this cannot be used as an open relay. */
 const ALLOWED_PATH = /^[a-z0-9-]+\/cush\/[a-zA-Z0-9_]+$/;
 
+/**
+ * A language route with a trailing slash (`/es/`). The route itself (`/es`) is no
+ * file, so it reaches the SPA fallback like any deep link and the app reads the
+ * language from the path (src/i18n). But the build's asset URLs are RELATIVE
+ * (`base: "./"`): under `/es/` they would resolve to `/es/assets/…`, which does not
+ * exist, and the page would come up blank. Redirect to the slashless form.
+ */
+const LANG_TRAILING_SLASH = /^\/es\/+$/;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname.startsWith(BOOK_PREFIX) || url.pathname === "/api/book") return proxyBook(request, env, url);
     if (url.pathname === QUOTE_PATH || url.pathname.startsWith(`${QUOTE_PATH}/`)) return proxyQuote(request, env, url);
+    if (LANG_TRAILING_SLASH.test(url.pathname)) {
+      url.pathname = url.pathname.replace(/\/+$/, "");
+      return withSecurityHeaders(new Response(null, { status: 308, headers: { location: `${url.pathname}${url.search}` } }));
+    }
     if (!url.pathname.startsWith(PROXY_PREFIX)) return withSecurityHeaders(await serveAsset(request, env));
 
     const path = url.pathname.slice(PROXY_PREFIX.length);

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { BOOK_IS_REMOTE } from "../backend/book";
 import { marketById, rowSymbols } from "../config/markets";
+import { msg, t } from "../i18n";
 import { ago, fmtAmt, fmtPrice, shortHex, until } from "../lib/format";
 import { belongsTo, fillStatusLabel, orderTypeLabel, rowStatus, rowStatusLabel } from "../lib/orderLifecycle";
 import type { TxState } from "../lib/txFlow";
@@ -38,8 +39,9 @@ interface OrdersProps {
 }
 
 /** Explains, per row, what a cancel has and has not done. */
-export const SOFT_CANCEL_NOTE =
-  "hidden from the book; still fillable on-chain until expiry by anyone holding the signed order. Cancel on-chain to stop that";
+export const SOFT_CANCEL_NOTE = msg(
+  "hidden from the book; still fillable on-chain until expiry by anyone holding the signed order. Cancel on-chain to stop that",
+);
 
 /** The wallet column, shown only while "All wallets" is picked. */
 function Wallet({ maker, account }: { maker: string | undefined; account: string | undefined }) {
@@ -48,7 +50,7 @@ function Wallet({ maker, account }: { maker: string | undefined; account: string
   return (
     <span className={you ? "" : "faint"} title={maker}>
       {shortHex(maker)}
-      {you ? " · you" : ""}
+      {you ? ` · ${t("you")}` : ""}
     </span>
   );
 }
@@ -56,7 +58,7 @@ function Wallet({ maker, account }: { maker: string | undefined; account: string
 function Pair({ marketId, tokens, native }: { marketId: string; tokens: TokenIndex; native?: boolean }) {
   const s = rowSymbols(marketId, native);
   return (
-    <span className="in" title={native ? `received as the native coin (${s.base === marketById(marketId).base ? s.quote : s.base})` : undefined}>
+    <span className="in" title={native ? t("received as the native coin ({symbol})", { symbol: s.base === marketById(marketId).base ? s.quote : s.base }) : undefined}>
       <PairIcon base={tokens.view(s.base)} quote={tokens.view(s.quote)} small />
       {s.base} / {s.quote}
     </span>
@@ -69,8 +71,8 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
   // Due TWAP slices appear on a clock, not on a book event.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 15_000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
   }, []);
 
   // Only orders this account signed belong under "your activity"; the rest of
@@ -87,33 +89,33 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
       <div className="boxhead">
         <div className="otabs">
           <button type="button" aria-selected={tab === "open"} onClick={() => setTab("open")}>
-            Open orders <span className="c">{mine.length}</span>
+            {t("Open orders")} <span className="c">{mine.length}</span>
           </button>
           <button type="button" aria-selected={tab === "fills"} onClick={() => setTab("fills")}>
-            Recent fills <span className="c">{myFills.length}</span>
+            {t("Recent fills")} <span className="c">{myFills.length}</span>
           </button>
           {account && (
-            <div className="oscope" role="group" aria-label="Whose orders and fills to show">
-              <button type="button" aria-pressed={scope === "wallet"} onClick={() => setScope("wallet")} title={`Only ${account}`}>
-                This wallet
+            <div className="oscope" role="group" aria-label={t("Whose orders and fills to show")}>
+              <button type="button" aria-pressed={scope === "wallet"} onClick={() => setScope("wallet")} title={t("Only {account}", { account })}>
+                {t("This wallet")}
               </button>
               <button
                 type="button"
                 aria-pressed={scope === "all"}
                 onClick={() => setScope("all")}
-                title="Every wallet this browser tab has signed with or restored"
+                title={t("Every wallet this browser tab has signed with or restored")}
               >
-                All wallets
+                {t("All wallets")}
               </button>
             </div>
           )}
         </div>
         <span className="lbl">
           {tab === "open"
-            ? "signed orders · a free cancel only hides one; cancel on-chain to make it unfillable"
+            ? t("signed orders · a free cancel only hides one; cancel on-chain to make it unfillable")
             : BOOK_IS_REMOTE
-              ? "fills reported by the orderbook from the chain"
-              : "simulated fills: the in-browser book broadcasts nothing"}
+              ? t("fills reported by the orderbook from the chain")
+              : t("simulated fills: the in-browser book broadcasts nothing")}
         </span>
       </div>
 
@@ -129,22 +131,22 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
             {mine.length === 0 ? (
               <tbody>
                 <tr>
-                  <td className="empty">No open orders. Sign a limit or TWAP order to see it here.</td>
+                  <td className="empty">{t("No open orders. Sign a limit or TWAP order to see it here.")}</td>
                 </tr>
               </tbody>
             ) : (
               <>
                 <thead>
                   <tr>
-                    {showWallet && <th>Wallet</th>}
-                    <th>Market</th>
-                    <th>Type</th>
-                    <th>Side</th>
-                    <th>Size</th>
-                    <th>Limit</th>
-                    <th>Filled</th>
-                    <th>Status</th>
-                    <th>Expires</th>
+                    {showWallet && <th>{t("Wallet")}</th>}
+                    <th>{t("Market")}</th>
+                    <th>{t("Type")}</th>
+                    <th>{t("Side")}</th>
+                    <th>{t("Size")}</th>
+                    <th>{t("Limit")}</th>
+                    <th>{t("Filled")}</th>
+                    <th>{t("Status")}</th>
+                    <th>{t("Expires")}</th>
                     <th />
                   </tr>
                 </thead>
@@ -174,7 +176,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                         </td>
                         <td>
                           <span className="chip" data-s={o.side}>
-                            {o.side}
+                            {o.side === "buy" ? t("buy") : t("sell")}
                           </span>
                         </td>
                         <td>
@@ -206,11 +208,11 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                             data-v={status}
                             title={
                               status === "soft-cancelled"
-                                ? SOFT_CANCEL_NOTE
+                                ? t(SOFT_CANCEL_NOTE)
                                 : status === "off-book"
                                   ? o.offBook
                                   : status === "fill-pending"
-                                    ? "A filler sent the fill transaction; waiting for it to be mined"
+                                    ? t("A filler sent the fill transaction; waiting for it to be mined")
                                     : undefined
                             }
                           >
@@ -225,21 +227,22 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                         </td>
                         <td>{until(o.expiresAt)}</td>
                         <td className="acts">
-                          {!own && <span className="faint">connect this wallet to manage</span>}
+                          {!own && <span className="faint">{t("connect this wallet to manage")}</span>}
                           {own && needsSliceSignature(o, now) && o.slices && (
                             <button type="button" className="x" onClick={() => onSignSlice(o)}>
-                              Sign slice {o.slices.signed + 1}/{o.slices.total}
-                              {dueSlices(o, now) > o.slices.signed + 1 ? ` (${dueSlices(o, now) - o.slices.signed} due)` : ""}
+                              {dueSlices(o, now) > o.slices.signed + 1
+                                ? t("Sign slice {n}/{total} ({due} due)", { n: o.slices.signed + 1, total: o.slices.total, due: dueSlices(o, now) - o.slices.signed })
+                                : t("Sign slice {n}/{total}", { n: o.slices.signed + 1, total: o.slices.total })}
                             </button>
                           )}
                           {own && !o.cancelled && !o.offBook && status !== "filled" && (
                             <button
                               type="button"
                               className="x"
-                              title="Signed off-chain retraction: the book stops showing it, but it stays fillable on-chain until expiry"
+                              title={t("Signed off-chain retraction: the book stops showing it, but it stays fillable on-chain until expiry")}
                               onClick={() => onCancel(o)}
                             >
-                              Hide
+                              {t("Hide")}
                             </button>
                           )}
                           {own && o.signed?.deployed && status !== "filled" && (
@@ -247,10 +250,10 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                               type="button"
                               className="x"
                               disabled={cancelTx ? cancelTx.kind === "wallet" || cancelTx.kind === "submitted" || cancelTx.kind === "confirming" : false}
-                              title="Settlement.cancelOrders: one transaction; afterwards no filler can settle it"
+                              title={t("Settlement.cancelOrders: one transaction; afterwards no filler can settle it")}
                               onClick={() => onHardCancel(o)}
                             >
-                              Cancel on-chain
+                              {t("Cancel on-chain")}
                             </button>
                           )}
                         </td>
@@ -268,8 +271,8 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                 <tr>
                   <td className="empty">
                     {BOOK_IS_REMOTE
-                      ? "No fills yet. A fill appears here once the orderbook reports it from the chain."
-                      : "No fills yet. Fills here are simulated by the in-browser book."}
+                      ? t("No fills yet. A fill appears here once the orderbook reports it from the chain.")
+                      : t("No fills yet. Fills here are simulated by the in-browser book.")}
                   </td>
                 </tr>
               </tbody>
@@ -277,16 +280,16 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
               <>
                 <thead>
                   <tr>
-                    {showWallet && <th>Wallet</th>}
-                    <th>When</th>
-                    <th>Market</th>
-                    <th>Type</th>
-                    <th>Side</th>
-                    <th>Size</th>
-                    <th>Price</th>
-                    <th>Status</th>
-                    <th>Filler</th>
-                    <th>Transaction</th>
+                    {showWallet && <th>{t("Wallet")}</th>}
+                    <th>{t("When")}</th>
+                    <th>{t("Market")}</th>
+                    <th>{t("Type")}</th>
+                    <th>{t("Side")}</th>
+                    <th>{t("Size")}</th>
+                    <th>{t("Price")}</th>
+                    <th>{t("Status")}</th>
+                    <th>{t("Filler")}</th>
+                    <th>{t("Transaction")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -302,11 +305,11 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                         <Pair marketId={f.marketId} tokens={tokens} native={f.native} />
                       </td>
                       <td>
-                        <span className="ty" title={`filled from ${SOURCE_NAME[f.source]}`}>{f.orderType ? orderTypeLabel({ type: f.orderType }) : f.simulated ? "—" : "Limit"}</span>
+                        <span className="ty" title={t("filled from {source}", { source: t(SOURCE_NAME[f.source]) })}>{f.orderType ? orderTypeLabel({ type: f.orderType }) : f.simulated ? "—" : t("Limit")}</span>
                       </td>
                       <td>
                         <span className="chip" data-s={f.side}>
-                          {f.side}
+                          {f.side === "buy" ? t("buy") : t("sell")}
                         </span>
                       </td>
                       <td>
@@ -327,8 +330,8 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                       <td className="dim">{f.size > 0 ? f.filler : "—"}</td>
                       <td>
                         {f.simulated ? (
-                          <span className="faint" title="Produced by the in-browser mock; no transaction exists">
-                            simulated
+                          <span className="faint" title={t("Produced by the in-browser mock; no transaction exists")}>
+                            {t("simulated")}
                           </span>
                         ) : f.tx ? (
                           <span className="txl">
@@ -337,13 +340,13 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                         ) : f.size > 0 ? (
                           <span
                             className="faint"
-                            title={`Filled on-chain; the orderbook has not reported the transaction yet. Order ${f.orderHash ?? f.id}`}
+                            title={t("Filled on-chain; the orderbook has not reported the transaction yet. Order {hash}", { hash: f.orderHash ?? f.id })}
                           >
-                            order {shortHex(f.orderHash ?? f.id, 8, 6)} · filled
+                            {t("order {hash} · filled", { hash: shortHex(f.orderHash ?? f.id, 8, 6) })}
                           </span>
                         ) : (
                           <span className="faint" title={f.orderHash}>
-                            order {shortHex(f.orderHash ?? f.id, 8, 6)}
+                            {t("order {hash}", { hash: shortHex(f.orderHash ?? f.id, 8, 6) })}
                           </span>
                         )}
                       </td>

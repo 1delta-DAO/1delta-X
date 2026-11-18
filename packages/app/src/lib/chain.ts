@@ -1,6 +1,7 @@
 import { isFillOnce, PERMIT3_ABI, type Order } from "@1delta-x/sdk";
 import { erc20Abi, isAddressEqual, parseAbi, type Address } from "viem";
 
+import { t } from "../i18n";
 import type { FundingState } from "./funding";
 
 /**
@@ -74,6 +75,9 @@ export async function readFillState(
   return { filled, nonceConsumed };
 }
 
+/** Thrown by {@link verifyDeployment}: the UI disables approvals on it. */
+export class DeploymentMismatchError extends Error {}
+
 /**
  * Throw unless the configured Settlement really is wired to the configured
  * Permit3.
@@ -93,7 +97,9 @@ export async function verifyDeployment(
     functionName: "PERMIT3",
   })) as Address;
   if (!isAddressEqual(wired, d.permit3)) {
-    throw new Error(`deployment mismatch: Settlement uses Permit3 ${wired}, config names ${d.permit3}`);
+    throw new DeploymentMismatchError(
+      t("deployment mismatch: Settlement uses Permit3 {wired}, config names {permit3}", { wired, permit3: d.permit3 }),
+    );
   }
 }
 

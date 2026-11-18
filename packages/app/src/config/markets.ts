@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import type { Dex } from "../lib/types";
 import { CHAINS, DEFAULT_CHAIN_ID } from "./chains";
 
@@ -79,7 +80,7 @@ const DEX_LABEL: Record<Dex, string> = { "uniswap-v3": "Uni v3", "sushiswap-v3":
 /** "Uni v3 0.05% · Sushi v3 0.30%" — what the picker shows under the pair. */
 export function venueLabel(market: Market): string {
   const pools = (ps: PoolRef[]) => ps.map((p) => `${DEX_LABEL[p.dex]} ${(p.feeBps / 10_000).toFixed(2)}%`);
-  if (market.via?.length) return `via ${hubsOf(market).join(" → ")} · ${market.via.map((h) => pools(h.pools).join(" + ")).join(" → ")}`;
+  if (market.via?.length) return t("via {hubs} · {pools}", { hubs: hubsOf(market).join(" → "), pools: market.via.map((h) => pools(h.pools).join(" + ")).join(" → ") });
   return pools(market.pools).join(" · ");
 }
 
