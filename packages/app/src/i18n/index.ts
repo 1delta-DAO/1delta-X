@@ -14,9 +14,8 @@ import { ES } from "./es";
  * scans the sources for these calls and fails on an untranslated string, a
  * stale dictionary entry, or a translation whose placeholders differ.
  *
- * The language is part of the URL: the last path segment (`/es`), or `?lang=es`
- * on the static terms page. Nothing is stored, so a link always opens in the
- * language it was copied in.
+ * The language is part of the URL, as a query parameter (`?lang=es`) on every
+ * page. Nothing is stored, so a link always opens in the language it was copied in.
  */
 export type Lang = "en" | "es";
 
@@ -31,29 +30,22 @@ function isLang(s: string | null | undefined): s is Lang {
   return LANGS.some((l) => l.id === s);
 }
 
-/** The language a location names: `?lang=` first, else the path's last segment; English otherwise. */
-export function langOfLocation(pathname: string, search = ""): Lang {
+/** The language a URL's query names (`?lang=es`); English otherwise. */
+export function langOfSearch(search: string): Lang {
   const param = new URLSearchParams(search).get("lang");
-  if (isLang(param)) return param;
-  const last = pathname.split("/").filter(Boolean).pop();
-  return isLang(last) && last !== "en" ? last : "en";
+  return isLang(param) ? param : "en";
 }
 
-/**
- * `pathname` with its language segment set to `lang` (none for English). The app
- * may be served from a sub-path (`base: "./"`), so the segment is replaced at the
- * END of the path, never assumed to be the first one. No trailing slash after the
- * segment: relative asset URLs must keep resolving against the app's own folder.
- */
-export function pathForLang(pathname: string, lang: Lang): string {
-  const segments = pathname.split("/").filter(Boolean);
-  const last = segments[segments.length - 1];
-  if (isLang(last) && last !== "en") segments.pop();
-  const base = segments.length ? `/${segments.join("/")}/` : "/";
-  return lang === "en" ? base : `${base}${lang}`;
+/** `search` with its `lang` parameter set to `lang` (removed for English), every other parameter kept. */
+export function searchForLang(search: string, lang: Lang): string {
+  const params = new URLSearchParams(search);
+  if (lang === "en") params.delete("lang");
+  else params.set("lang", lang);
+  const out = params.toString();
+  return out ? `?${out}` : "";
 }
 
-let current: Lang = typeof location === "undefined" ? "en" : langOfLocation(location.pathname, location.search);
+let current: Lang = typeof location === "undefined" ? "en" : langOfSearch(location.search);
 const listeners = new Set<() => void>();
 
 function apply(lang: Lang) {
@@ -66,31 +58,17 @@ function apply(lang: Lang) {
 if (typeof document !== "undefined") document.documentElement.lang = current;
 // Back / forward across a language switch.
 if (typeof window !== "undefined") {
-  window.addEventListener("popstate", () => apply(langOfLocation(location.pathname, location.search)));
+  window.addEventListener("popstate", () => apply(langOfSearch(location.search)));
 }
 
 export function getLang(): Lang {
   return current;
 }
 
-/**
- * Switch language in place (no reload: the ticket, the wallet and the feeds stay as
- * they are). `query` is for a page that is a file (terms.html): it has no `/es` path
- * of its own, so it carries `?lang=es` instead.
- */
-export function setLang(lang: Lang, query = false) {
+/** Switch language in place (no reload: the ticket, the wallet and the feeds stay as they are). */
+export function setLang(lang: Lang) {
   if (typeof history !== "undefined" && typeof location !== "undefined") {
-    const params = new URLSearchParams(location.search);
-    let path = location.pathname;
-    if (query) {
-      if (lang === "en") params.delete("lang");
-      else params.set("lang", lang);
-    } else {
-      params.delete("lang");
-      path = pathForLang(path, lang);
-    }
-    const search = params.toString();
-    history.pushState(null, "", `${path}${search ? `?${search}` : ""}${location.hash}`);
+    history.pushState(null, "", `${location.pathname}${searchForLang(location.search, lang)}${location.hash}`);
   }
   apply(lang);
 }

@@ -4,11 +4,10 @@ import { useDismiss } from "../hooks/useDismiss";
 import { LANGS, setLang, t, useLang } from "../i18n";
 
 /**
- * The language, which lives in the URL (`/es`): picking one rewrites the path in
- * place, so the choice can be linked and a reload keeps it. `query`: the page is
- * a file (terms.html) and names its language as `?lang=es` instead.
+ * The language, which lives in the URL (`?lang=es`): picking one rewrites the query
+ * in place, so the choice can be linked and a reload keeps it.
  */
-export function LangSelect({ query = false }: { query?: boolean }) {
+export function LangSelect() {
   const [open, setOpen] = useState(false);
   const ref = useDismiss(open, () => setOpen(false));
   const lang = useLang();
@@ -37,7 +36,7 @@ export function LangSelect({ query = false }: { query?: boolean }) {
               aria-selected={l.id === lang}
               onClick={() => {
                 setOpen(false);
-                setLang(l.id, query);
+                setLang(l.id);
               }}
             >
               {l.name}

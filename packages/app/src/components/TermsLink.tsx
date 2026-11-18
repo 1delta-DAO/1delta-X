@@ -14,7 +14,7 @@ import { getLang } from "../i18n";
 
 export const TERMS_HREF = "terms.html";
 
-/** The terms page reads its language from the query: it is a file, so it has no `/es` path of its own. */
+/** The terms page in `lang`: the same `?lang=` parameter the app itself uses. */
 export function termsHref(lang: string): string {
   return lang === "en" ? TERMS_HREF : `${TERMS_HREF}?lang=${lang}`;
 }

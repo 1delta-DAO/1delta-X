@@ -306,22 +306,21 @@ async function proxyQuote(request, env, url) {
 const ALLOWED_PATH = /^[a-z0-9-]+\/cush\/[a-zA-Z0-9_]+$/;
 
 /**
- * A language route with a trailing slash (`/es/`). The route itself (`/es`) is no
- * file, so it reaches the SPA fallback like any deep link and the app reads the
- * language from the path (src/i18n). But the build's asset URLs are RELATIVE
- * (`base: "./"`): under `/es/` they would resolve to `/es/assets/…`, which does not
- * exist, and the page would come up blank. Redirect to the slashless form.
+ * The language used to be a path (`/es`, live 2026-11-18); it is now `?lang=es`
+ * (src/i18n). Links to the old form keep working: redirect them, query kept.
+ * Temporary (302), so no browser pins a route that may be reused.
  */
-const LANG_TRAILING_SLASH = /^\/es\/+$/;
+const LEGACY_LANG_PATH = /^\/(es)\/*$/;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname.startsWith(BOOK_PREFIX) || url.pathname === "/api/book") return proxyBook(request, env, url);
     if (url.pathname === QUOTE_PATH || url.pathname.startsWith(`${QUOTE_PATH}/`)) return proxyQuote(request, env, url);
-    if (LANG_TRAILING_SLASH.test(url.pathname)) {
-      url.pathname = url.pathname.replace(/\/+$/, "");
-      return withSecurityHeaders(new Response(null, { status: 308, headers: { location: `${url.pathname}${url.search}` } }));
+    const legacyLang = LEGACY_LANG_PATH.exec(url.pathname);
+    if (legacyLang) {
+      url.searchParams.set("lang", legacyLang[1]);
+      return withSecurityHeaders(new Response(null, { status: 302, headers: { location: `/${url.search}` } }));
     }
     if (!url.pathname.startsWith(PROXY_PREFIX)) return withSecurityHeaders(await serveAsset(request, env));
 

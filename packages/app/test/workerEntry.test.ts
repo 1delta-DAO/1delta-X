@@ -24,7 +24,7 @@ describe("Pages worker entry module", () => {
     expect(typeof (mod.default as { fetch?: unknown }).fetch).toBe("function");
   });
 
-  it("redirects a language route with a trailing slash, which would break the relative asset URLs", async () => {
+  it("redirects the old language path (/es) to the query form (?lang=es), keeping the query", async () => {
     // @ts-expect-error — plain JS worker module
     const worker = (await import("../public/_worker.js")).default as { fetch: (r: Request, env: unknown) => Promise<Response> };
     const asked: string[] = [];
@@ -32,21 +32,27 @@ describe("Pages worker entry module", () => {
       ASSETS: {
         fetch: async (r: Request) => {
           asked.push(new URL(r.url).pathname);
-          return new Response("<html>", { status: new URL(r.url).pathname === "/index.html" ? 200 : 404 });
+          return new Response("<html>", { status: 200 });
         },
       },
     };
     const page = { headers: { accept: "text/html" } };
 
-    const slash = await worker.fetch(new Request("https://app.example/es/?x=1", page), env);
-    expect(slash.status).toBe(308);
-    expect(slash.headers.get("location")).toBe("/es?x=1");
+    for (const [from, to] of [
+      ["/es", "/?lang=es"],
+      ["/es/", "/?lang=es"],
+      ["/es?x=1", "/?x=1&lang=es"],
+    ] as const) {
+      const res = await worker.fetch(new Request(`https://app.example${from}`, page), env);
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe(to);
+    }
     expect(asked).toEqual([]);
 
-    // `/es` itself is the app: the SPA fallback serves index.html, with the security headers.
-    const es = await worker.fetch(new Request("https://app.example/es", page), env);
+    // The query form is the app itself, served with the security headers.
+    const es = await worker.fetch(new Request("https://app.example/?lang=es", page), env);
     expect(es.status).toBe(200);
-    expect(asked).toEqual(["/es", "/index.html"]);
+    expect(asked).toEqual(["/"]);
     expect(es.headers.get("x-frame-options")).toBe("DENY");
   });
 });

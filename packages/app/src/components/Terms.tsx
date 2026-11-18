@@ -20,8 +20,8 @@ import { LangSelect } from "./LangSelect";
 export function TermsPage() {
   const [theme, toggleTheme] = useTheme();
   const lang = useLang();
-  // Back to the app in the language the reader is in (`./` or `./es`).
-  const home = lang === "en" ? "./" : `./${lang}`;
+  // Back to the app in the language the reader is in.
+  const home = lang === "en" ? "./" : `./?lang=${lang}`;
   const body = useMemo(() => renderMarkdown(source), []);
 
   return (
@@ -34,7 +34,7 @@ export function TermsPage() {
         <a className="netpill" href={home}>
           {t("← Back to trading")}
         </a>
-        <LangSelect query />
+        <LangSelect />
         <button
           type="button"
           className="iconbtn"

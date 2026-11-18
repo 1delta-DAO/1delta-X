@@ -965,12 +965,11 @@ src/
 ## Languages (2026-11-18)
 
 English and Spanish. The language is part of the URL, not a stored preference:
-`/` is English, `/es` is Spanish (`terms.html?lang=es` for the terms page, which
-is a file and has no route), so a link opens in the language it was copied in.
-The selector in the header rewrites the path in place (`history.pushState`): no
-reload, so a half-built ticket, the wallet connection and the feeds survive a
-switch. `/es/` is redirected to `/es` by `public/_worker.js`, because the build's
-asset URLs are relative and would resolve under `/es/`.
+`/` is English, `/?lang=es` is Spanish (`terms.html?lang=es` likewise), so a link
+opens in the language it was copied in. The selector in the header rewrites the
+query in place (`history.pushState`): no reload, so a half-built ticket, the
+wallet connection and the feeds survive a switch. The first release used a path
+(`/es`); `public/_worker.js` redirects it to `/?lang=es`.
 
 Strings are gettext style (`src/i18n/index.ts`): the English sentence is the key,
 `t("Switch to {chain}", { chain })`, and Spanish lives in `src/i18n/es/*.ts`. A

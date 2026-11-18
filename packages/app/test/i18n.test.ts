@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { langOfLocation, pathForLang, setLangForTest, t, tr } from "../src/i18n";
+import { langOfSearch, searchForLang, setLangForTest, t, tr } from "../src/i18n";
 import { ES, ES_FRAGMENTS } from "../src/i18n/es";
 
 const SRC = join(__dirname, "..", "src");
@@ -75,22 +75,18 @@ describe("Spanish dictionary", () => {
 describe("language routing", () => {
   afterEach(() => setLangForTest("en"));
 
-  it("reads the language from the last path segment, or ?lang=", () => {
-    expect(langOfLocation("/")).toBe("en");
-    expect(langOfLocation("/es")).toBe("es");
-    expect(langOfLocation("/es/")).toBe("es");
-    expect(langOfLocation("/sub/path/es")).toBe("es");
-    expect(langOfLocation("/terms.html", "?lang=es")).toBe("es");
-    expect(langOfLocation("/terms.html", "?lang=xx")).toBe("en");
-    expect(langOfLocation("/estonia")).toBe("en");
+  it("reads the language from ?lang=", () => {
+    expect(langOfSearch("")).toBe("en");
+    expect(langOfSearch("?lang=es")).toBe("es");
+    expect(langOfSearch("?x=1&lang=es")).toBe("es");
+    expect(langOfSearch("?lang=xx")).toBe("en");
   });
 
-  it("swaps the language segment at the end of the path", () => {
-    expect(pathForLang("/", "es")).toBe("/es");
-    expect(pathForLang("/es", "en")).toBe("/");
-    expect(pathForLang("/es/", "es")).toBe("/es");
-    expect(pathForLang("/sub/", "es")).toBe("/sub/es");
-    expect(pathForLang("/sub/es", "en")).toBe("/sub/");
+  it("sets the lang parameter and keeps the others", () => {
+    expect(searchForLang("", "es")).toBe("?lang=es");
+    expect(searchForLang("?lang=es", "en")).toBe("");
+    expect(searchForLang("?x=1", "es")).toBe("?x=1&lang=es");
+    expect(searchForLang("?x=1&lang=es", "en")).toBe("?x=1");
   });
 
   it("falls back to English, and fills placeholders in both languages", () => {
