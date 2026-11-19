@@ -6,7 +6,7 @@ import {
   type Order,
 } from "@1delta-x/sdk";
 
-import { NATIVE_SYMBOL, TOKENS } from "../config/markets";
+import { NATIVE_SYMBOL, TOKENS, WRAPPED_NATIVE } from "../config/markets";
 import { msg, t } from "../i18n";
 
 /**
@@ -63,6 +63,15 @@ function decimalsOf(chainId: number, address: string): number | undefined {
   if (nb && nb.toLowerCase() === a) return 18;
   return Object.values(TOKENS[chainId] ?? {}).find((t) => t.address === a)
     ?.decimals;
+}
+
+/**
+ * The symbol a fill is GROUPED under: the native coin (RBTC, received through the
+ * NativeBalance view) is the wrapped token's market, so it counts with WRBTC in the
+ * per-pair rows and in the netting. Fills keep showing the symbol they received.
+ */
+export function groupSymbol(chainId: number, symbol: string): string {
+  return symbol === NATIVE_SYMBOL[chainId] ? (WRAPPED_NATIVE[chainId] ?? symbol) : symbol;
 }
 
 /** USD of `wei` of `token` (pinned decimals, priced by symbol), or `undefined` for a token we cannot price. */
@@ -172,19 +181,22 @@ export interface Breakdown {
  * only the larger side counts (opposite flows offset each other; fills in the same
  * direction add up). Outside a matched transaction every fill is volume and turnover
  * alike. Returns each fill's share of the volume, by `id` (the larger side keeps its
- * USD, the smaller side 0).
+ * USD, the smaller side 0). `group` maps a symbol to the one it nets as ({@link groupSymbol}:
+ * an RBTC leg nets against a WRBTC one).
  */
-export function nettedUsd(fills: readonly DashFill[]): Map<string, number> {
+export function nettedUsd(fills: readonly DashFill[], group: (symbol: string) => string = (s) => s): Map<string, number> {
   const groups = new Map<
     string,
     { a: DashFill[]; b: DashFill[]; ua: number; ub: number }
   >();
   for (const f of fills) {
     if (f.usd === undefined) continue;
-    const [x, y] = f.pay < f.recv ? [f.pay, f.recv] : [f.recv, f.pay];
+    const pay = group(f.pay);
+    const recv = group(f.recv);
+    const [x, y] = pay < recv ? [pay, recv] : [recv, pay];
     const key = `${f.tx || f.id}|${x}|${y}`;
     const g = groups.get(key) ?? { a: [], b: [], ua: 0, ub: 0 };
-    if (f.pay === x) {
+    if (pay === x) {
       g.a.push(f);
       g.ua += f.usd;
     } else {
@@ -281,7 +293,8 @@ export function dashStats(
     turnover: 0,
     fills: 0,
   }));
-  const netted = nettedUsd(fills);
+  const group = (s: string) => groupSymbol(chainId, s);
+  const netted = nettedUsd(fills, group);
   const pairs = new Map<string, Breakdown>();
   const fillers = new Map<string, Breakdown>();
   const makers = new Set<string>();
@@ -314,7 +327,7 @@ export function dashStats(
         daily[i]!.turnover += to;
       }
     }
-    tally(pairs, `${f.pay} → ${f.recv}`, v, to);
+    tally(pairs, `${group(f.pay)} → ${group(f.recv)}`, v, to);
     tally(fillers, fillerName(chainId, f.solver), v, to);
   }
   const byVolume = (a: Breakdown, b: Breakdown) =>

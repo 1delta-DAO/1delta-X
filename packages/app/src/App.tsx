@@ -113,6 +113,18 @@ export default function App() {
     return out;
   }, [chainId, tokens, rawBalances]);
 
+  /**
+   * The pay menu's balances: WRBTC as what a ticket selling it can spend (WRBTC plus the
+   * RBTC above the gas reserve, auto-wrapped), the figure the pay line shows. A wallet
+   * holding only RBTC sees it there too.
+   */
+  const payMenuBalances = useMemo(() => {
+    const wrapped = wrappedNativeSymbol(chainId);
+    const held = wrapped ? balances[wrapped] : undefined;
+    if (!wrapped || held === undefined) return balances;
+    return { ...balances, [wrapped]: held + Number(formatUnits(wrappableWei(rawBalances.native), 18)) };
+  }, [balances, chainId, rawBalances.native]);
+
   /** The exact on-chain balance, in wei, of a pinned token — what "max" and every input cap use. */
   const balanceWei = useCallback(
     (symbol: string): bigint | undefined => {
@@ -1122,6 +1134,7 @@ export default function App() {
             quote={q}
             tokens={tokens}
             balances={balances}
+            payBalances={payMenuBalances}
             tick={tick}
             mid={pool.book?.mid ?? null}
             ready={ready}

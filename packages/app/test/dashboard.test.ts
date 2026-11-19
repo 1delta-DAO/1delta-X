@@ -83,6 +83,22 @@ describe("dashboard fills", () => {
     expect(fillerName(30, "0x00000000000000000000000000000000000000bb")).toBe("0x0000…00bb");
   });
 
+  it("groups RBTC (received through the NativeBalance view) with WRBTC: one pair row, and the legs net", () => {
+    const tx = `0x${"cd".repeat(32)}`;
+    const fill = (id: string, pay: string, recv: string, usd: number, at = T0) =>
+      ({ id, tx, at: at * 1000, maker: MAKER, solver: INVENTORY, pay, recv, usd });
+    const toRbtc = fill("a", "USD₮0", "RBTC", 30);
+    const toWrbtc = fill("b", "USD₮0", "WRBTC", 20, T0 + 1);
+    const pairs = dashStats(30, [{ ...toRbtc, tx: "0x01" }, { ...toWrbtc, tx: "0x02" }], (T0 + 60) * 1000, 7).pairs;
+    expect(pairs).toEqual([{ key: "USD₮0 → WRBTC", fills: 2, volume: 50, turnover: 50 }]);
+    // Selling WRBTC and receiving RBTC in one transaction: opposite legs of one market, netted.
+    const sellWrbtc = fill("c", "WRBTC", "USD₮0", 25);
+    const s = dashStats(30, [toRbtc, sellWrbtc], (T0 + 60) * 1000, 7);
+    expect([s.volume, s.turnover]).toEqual([30, 55]);
+    // The fill itself still says what it received.
+    expect(toRbtc.recv).toBe("RBTC");
+  });
+
   it("VOLUME nets opposite fills in one transaction (turnover counts both); same-direction fills add up", () => {
     const tx = { txHash: `0x${"ab".repeat(32)}` };
     const sell = toDashFill(30, wire(order("sell", 6n), 60n * 10n ** 18n, T0, { ...tx, logIndex: 1 }), usd); // USDRIF → USD₮0, $60

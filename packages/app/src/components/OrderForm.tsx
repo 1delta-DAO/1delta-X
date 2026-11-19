@@ -105,6 +105,8 @@ interface OrderFormProps {
   quote: Quote | null;
   tokens: TokenIndex;
   balances: Record<string, number | undefined>;
+  /** The pay menu's balances: {@link balances}, with the wrapped native coin counting the native coin it auto-wraps. */
+  payBalances?: Record<string, number | undefined>;
   tick: number;
   /** Pool mid, for the "versus mid" line. Null until the book loads. */
   mid: number | null;
@@ -312,6 +314,7 @@ export function OrderForm(props: OrderFormProps) {
     quote,
     tokens,
     balances,
+    payBalances,
     tick,
     mid,
     ready,
@@ -601,7 +604,7 @@ export function OrderForm(props: OrderFormProps) {
               value={payToken}
               options={symbolsOn(ticket.chainId)}
               tokens={tokens}
-              balances={balances}
+              balances={payBalances ?? balances}
               onChange={ticket.setPay}
               label={t("Token you pay with")}
             />
