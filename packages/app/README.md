@@ -674,14 +674,14 @@ WRBTC (`0x542f…7e677d`) is a verified WETH9 port on Rootstock Blockscout
 fallback), `withdraw(uint)`, `Deposit`/`Withdrawal` events; selectors
 `0xd0e30db0`/`0x2e1a7d4d` and both event topics are in the deployed bytecode.
 
-*Gas reserve.* A wrap must leave `WRAP_GAS_RESERVE_WEI` = **0.00005 RBTC**
+*Gas reserve.* A wrap must leave `WRAP_GAS_RESERVE_WEI` = **0.00001 RBTC**
 (`lib/funding.ts`). Measured with `cast estimate` on Rootstock: `deposit` 43,010
-gas, `approve` 44,016, `Permit3.approveToken` 45,723 — ~133k gas for the whole
-sequence, ~0.0000035 RBTC at the node's ~26 Mwei (`minimumGasPrice` 23.7 Mwei);
-~0.0000065 RBTC with a later hard cancel and a two-transaction revoke. The
-reserve buys ~1.9M gas at 26 Mwei, about 7× that budget, so wallet-padded gas
-limits and a several-fold price spike still fit; at ≈ $100k/BTC it is ~$5 left
-unwrapped. A plan whose wrap would cut into it is refused with a message
+gas, `approve` 44,016 — ~87k gas for wrap + direct approve, ~0.0000023 RBTC at the
+node's ~26 Mwei (`minimumGasPrice` 23.7 Mwei); ~0.0000052 RBTC with a later hard
+cancel and a revoke. The reserve buys ~385k gas at 26 Mwei: 4× the wrap + approve,
+~2× with the cancel and revoke. It was 0.00005 RBTC until 2026-11-19, which held
+back more than half of a small wallet's RBTC (0.000112 RBTC could sell only
+0.000062). A plan whose wrap would cut into it is refused with a message
 (`FundingPlan.blocked`), and the button stays disabled.
 
 *Balance, Max, insufficient.* For a WRBTC-pay ticket the spendable balance is

@@ -81,18 +81,20 @@ export interface FundingPlan {
 }
 
 /**
- * Native coin a wrap must leave behind for gas, wei: 0.00005 RBTC.
+ * Native coin a wrap must leave behind for gas, wei: 0.00001 RBTC.
  *
  * Measured on Rootstock (2026-10-11, `cast estimate` against public-node.rsk.co):
- * WRBTC `deposit()` 43,010 gas, ERC-20 `approve` 44,016, Permit3 `approveToken`
- * 45,723 — ~133k for the whole wrap → approve → grant sequence. At the node's
- * gas price (~26 Mwei; `minimumGasPrice` 23.7 Mwei) that is ~0.0000035 RBTC, or
- * ~0.0000065 RBTC once a later hard cancel (~50k) and a two-tx revoke (~60k) are
- * added. 0.00005 RBTC buys ~1.9M gas at 26 Mwei: ~7× that whole budget, so it
- * survives a wallet padding its gas limits and a several-fold gas-price spike,
- * while costing a user about $5 of RBTC at most (≈ $100k/BTC) left unwrapped.
+ * WRBTC `deposit()` 43,010 gas, ERC-20 `approve` 44,016 — the wrap → direct approve
+ * sequence is ~87k gas, ~0.0000023 RBTC at the node's ~26 Mwei (`minimumGasPrice`
+ * 23.7 Mwei); ~0.0000052 RBTC once a later hard cancel (~50k) and a revoke (~60k)
+ * are added. 0.00001 RBTC buys ~385k gas at 26 Mwei: 4× the wrap + approve, ~2× with
+ * the cancel and revoke, so a padded gas limit or a doubled gas price still fits.
+ *
+ * It was 0.00005 RBTC until 2026-11-19: ~$3 held back, which left a wallet holding
+ * 0.00011 RBTC able to sell only 0.00006 of it — more than half of a small balance
+ * reserved for ~$0.15 of gas.
  */
-export const WRAP_GAS_RESERVE_WEI = 50_000_000_000_000n;
+export const WRAP_GAS_RESERVE_WEI = 10_000_000_000_000n;
 
 /**
  * The wallet's side of an auto-wrap: present only when the order SELLS the

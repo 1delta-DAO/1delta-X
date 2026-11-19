@@ -33,8 +33,15 @@ describe("auto-wrap config", () => {
     expect(getAddress(pinnedToken(30, "WRBTC")!.address)).toBe(WRBTC);
   });
 
-  it("the reserve is 0.00005 RBTC", () => {
-    expect(WRAP_GAS_RESERVE_WEI).toBe(5n * 10n ** 13n);
+  it("the reserve is 0.00001 RBTC", () => {
+    expect(WRAP_GAS_RESERVE_WEI).toBe(10n ** 13n);
+  });
+
+  it("a small RBTC balance stays mostly spendable (2026-11-19: 0.000112 RBTC could sell only 0.000062)", () => {
+    const native = 112_387_626_143_395n;
+    expect(wrapSpendableWei(0n, native)).toBe(102_387_626_143_395n);
+    // ...and its wrap leaves enough for the approve that follows (44k gas at 3× the ~26 Mwei floor).
+    expect(native - wrapSpendableWei(0n, native)!).toBeGreaterThan(44_016n * 78_000_000n);
   });
 });
 
@@ -79,7 +86,7 @@ describe("planFunding with a wrap source", () => {
       nativeBalance: required + WRAP_GAS_RESERVE_WEI - 1n,
       nativeSymbol: "RBTC",
     });
-    expect(short.blocked).toMatch(/leave less than 0\.00005 RBTC for gas/);
+    expect(short.blocked).toMatch(/leave less than 0\.00001 RBTC for gas/);
     expect(short.covered).toBe(false);
   });
 
@@ -158,7 +165,7 @@ describe("step labels", () => {
     expect(fmtWei(milli(10))).toBe("0.01");
     expect(fmtWei(1n)).toBe("0.00000001");
     expect(fmtWei(0n)).toBe("0");
-    expect(fmtWei(WRAP_GAS_RESERVE_WEI)).toBe("0.00005");
+    expect(fmtWei(WRAP_GAS_RESERVE_WEI)).toBe("0.00001");
   });
 });
 
@@ -181,7 +188,7 @@ describe("spendable / Max / insufficient with RBTC", () => {
     const plan = planFunding(UNFUNDED, spend, 300, NOW, { tokenBalance: 0n, nativeBalance: milli(50) });
     expect(plan.blocked).toBeNull();
     // …and one wei more would not
-    expect(exceedsBalance("0.04995000000000001", 18, spend)).toBe(true);
+    expect(exceedsBalance("0.04999000000000001", 18, spend)).toBe(true);
   });
 
   it("without RBTC, WRBTC alone is what counts (plain insufficient)", () => {
