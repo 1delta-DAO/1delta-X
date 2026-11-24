@@ -11,7 +11,7 @@ runs every order through up to two strategies, **inventory first, route second**
 | | **inventory** | **route** (DEX aggregator path) |
 |---|---|---|
 | What fills | the hot wallet itself: `Settlement.fillUpTo` | `AggregatorFillSolver.executeFill`, sent by the same EOA as operator |
-| Capital | wallet inventory (USDT0 / USDRIF) | none — the solver swaps the maker's input on the configured Uniswap-v3-style pools ITSELF (a *pool plan*: Oku = venue 0, SushiSwap v3 = venue 1), or — pull orders only — along a Sushi / Nordstern API route in its `RouteSandbox` (a *sandbox plan*) |
+| Capital | wallet inventory (USDT0 / USDRIF) | none — the solver swaps the maker's input on the configured Uniswap-v3-style pools ITSELF (a *pool plan*: Oku = venue 0, SushiSwap v3 = venue 1), or — pull orders only — along a Sushi / Nordstern / SwaptoX API route in its `RouteSandbox` (a *sandbox plan*) |
 | Markets | `rsk-30-usdrif-usd0` only | every configured pool: the Oku `rsk-30-wrbtc-usd0`, `rsk-30-weth-wrbtc`, `rsk-30-usdrif-usd0` pools and SushiSwap v3's WRBTC/USDT0 0.3 % pool (+ optional multi-hop paths) |
 | Gasless makers (ERC-2612 permit, *Gasless makers* below) | only once something else funded the order | **yes**: the maker's permit rides in the same `executeFill` |
 | Delta-verify orders (timing bit 104) | **no** (an EOA cannot run the fill callback) | **yes**, when `exclusiveFiller` = our solver: the route pays the maker directly |
@@ -456,6 +456,40 @@ Sushi: 489,602 — different pairs; the re-price step prices whatever is measure
 `NORDSTERN_MAX_PER_SWEEP` calls per sweep; a miss (cap, HTTP, 422 "no swap route found",
 timeout, shape) just drops the candidate — transient, no backoff strike.
 
+**The SwaptoX source (pull orders only, 2026-11-24, [`src/swaptox.ts`](src/swaptox.ts)).**
+On by default once the `SWAPTOX_API_KEY` secret is set (chain 30; the key is the switch, so
+the Worker needs no extra var). `GET {SWAPTOX_API_URL}/rootstock/routes?tokenIn&tokenOut&amountIn`
+with header `X-API-Key`. The API returns no transaction, only `swapData` (one argument of
+the router call), so the filler ENCODES `SwaptoXRouter.swap((tokenIn, tokenOut, amountIn,
+amountMinOut, recipient = the solver, swapData, permitData = 0x), deadline = now + 600 s,
+referral = SWAPTOX_REFERRAL)` itself, with `amountMinOut` = owed + gas + min profit (the
+router's floor is ours) and `amountIn` patched at byte 164: the executor swaps
+percentages of its own balance, so the patched input is what it routes. The router
+(`0xdc39E2fda1A4FF4C97C503A86371bAfC4BCc7F1A`, verified, immutable; fee 0 bp, locked until
+~2028-01, ≤ 20 bp after) must be the route's `swapAddress`; `swapData` must be version
+`SWAPTOX_VERSION` (1), and every step a v3 `callSwap` whose recipient is the executor
+(`address(0)`, an intermediate hop) or the router's recipient (`address(1)`, the solver),
+spending a token the route already holds — no step may pay an explicit address. The
+router's admin can repoint `swapAddress(version)`, so the filler re-reads it (≤ once a
+minute) and refuses every SwaptoX route unless it is `SWAPTOX_EXECUTOR`
+(`0x628F59C0f6Dfc4Ba3091C6CA1d83C6bF33a552d1`). A route with `amountOut` 0 (Sovryn / v2
+legs, which the API cannot price) is refused. **Pricing**: `amountOut` as returned (a fork
+execution delivered it exactly), route gas = the API's `gas` × `SWAPTOX_GAS_MULT_PCT`
+(150 %: a 1-hop route reported 112,634 and cost ~150k of a 184,988 receipt). It reaches the
+same Oku / Sushi v3 pools the pool plans swap on directly, and pays the sandbox + router +
+executor on top (fork fill, 100 USDRIF → USDT0: 464,379 gas vs ~290k for the Oku pull fill),
+so it ranks first only where its split or path out-earns that; on a tie Sushi / Nordstern
+keep the fill. **Latency, by ticket size**: a ticket under `SWAPTOX_LARGE_USD` ($500, its
+input valued on the pools) waits at most `SWAPTOX_TIMEOUT_MS` (3 s) on a fill and
+`SWAPTOX_QUOTE_TIMEOUT_MS` (2.5 s) on a `/quote` (both ≤ 3 s); a larger one up to
+`SWAPTOX_LARGE_TIMEOUT_MS` (5.5 s, ≤ 10 s; WRBTC routes answered in ~5–5.1 s), fills and quotes alike. The call starts at once
+with the long deadline and the ticket is valued alongside it. Why: `e2e/swaptox-probe.ts`
+(2026-11-24, 8 pairs × $10–$10k) found SwaptoX ahead net of gas only from $1k (up to +77 bps
+on USD₮0 → RIF at $10k), and every one of those answers took 3–5.4 s; below $1k it lost
+10–300 bps to its extra gas, so a small ticket gains nothing by waiting. All 32 probed
+routes executed on a fork to exactly the API's `amountOut`. At most
+`SWAPTOX_MAX_PER_SWEEP` calls per sweep; any miss is transient, no backoff strike.
+
 Per order:
 1. **classify** (above);
 2. **budgets**: `ROUTE_HOURLY_FILLS` fills per rolling hour, the gas-price ceiling and an
@@ -470,11 +504,11 @@ Per order:
    a pull order FORWARD (exact-input of the previewed input), a direct order BACKWARD
    (the input an exact-output of the owed amount needs: the route the plan executes,
    expressed as the equivalent output `owed × input / need` for the gate) — batched
-   through Multicall3, and, for a pull order, fetch + validate a Sushi and a
-   Nordstern route (in parallel); rank all candidates by output NET of each route's own
+   through Multicall3, and, for a pull order, fetch + validate a Sushi, a
+   Nordstern and a SwaptoX route (in parallel); rank all candidates by output NET of each route's own
    gas, priced like the fill gas: for a pool path the quoters' summed estimate, at least
    `POOL_HOP_GAS` (65k) per hop; Sushi's
-   `gasSpent` / Nordstern's `gasEstimate` × 1.2 **+ `SANDBOX_ROUTE_OVERHEAD_GAS`** (30k,
+   `gasSpent` / Nordstern's `gasEstimate` × 1.2 / SwaptoX's `gas` × `SWAPTOX_GAS_MULT_PCT` **+ `SANDBOX_ROUTE_OVERHEAD_GAS`** (30k,
    `src/route.ts`) for an API route — the sandbox and router hops a pool plan does not
    run (fork bench `packages/solvers/test/PoolRouteFork.t.sol`, block 9,295,925, net tx
    gas: sandbox − pool = 24.3k / 30.5k for 1-hop pull / direct, 29.2k / 34.5k for
@@ -497,7 +531,8 @@ Per order:
    before use (`validatePoolPlan`, above); Sushi — the validated
    snwap calldata, offset 36, refused if its `amountOutMin` < owed + gas + min profit;
    Nordstern — the validated guard calldata, `NO_PATCH`, refused if its `minAmountOut`
-   < owed + gas + min profit;
+   < owed + gas + min profit; SwaptoX — our `swap` encoding, offset 164, refused if its
+   `amountOut` < owed + gas + min profit;
 7. **simulate** `executeFill` (with the maker's permit, if the fill carries one) by `eth_call` from the operator, decode `fillAmountsOut`
    (must be non-zero, and ≤ the previewed owed on the pull path) and take
    `eth_estimateGas`;
@@ -790,6 +825,19 @@ Route strategy:
 | `NORDSTERN_HAIRCUT_BPS` | `2` | 0..1000: the candidate is priced at `toAmount × (1 − this)`; also the minimum slippage asked of the API |
 | `NORDSTERN_MAX_PER_SWEEP` | `10` | Nordstern API calls per sweep over the book, at most |
 | `NORDSTERN_TIMEOUT_MS` | `3000` | per-request timeout |
+| `SWAPTOX_API_KEY` | unset | a SECRET: sent as `X-API-Key` (higher rate limits); setting it turns the source on (chain 30) |
+| `SWAPTOX_ENABLED` | on iff `SWAPTOX_API_KEY` is set (chain 30) | the SwaptoX API route source (pull orders only); `0` turns it off with the key set |
+| `SWAPTOX_API_URL` | `https://api-v2.swaptox.com` | API base |
+| `SWAPTOX_ROUTER` | `0xdc39E2fda1A4FF4C97C503A86371bAfC4BCc7F1A` | the pinned SwaptoXRouter; any other `swapAddress` is refused |
+| `SWAPTOX_EXECUTOR` | `0x628F59C0f6Dfc4Ba3091C6CA1d83C6bF33a552d1` | the pinned executor: SwaptoX routes are refused while `router.swapAddress(SWAPTOX_VERSION)` is anything else |
+| `SWAPTOX_VERSION` | `1` | the `swapData` version (router executor slot) accepted |
+| `SWAPTOX_REFERRAL` | `0x0` | the router's `referral` argument (bound once per sandbox) |
+| `SWAPTOX_GAS_MULT_PCT` | `150` | 100..1000: the API's `gas` × this % is the route's gas for ranking |
+| `SWAPTOX_MAX_PER_SWEEP` | `10` | SwaptoX API calls per sweep over the book, at most |
+| `SWAPTOX_TIMEOUT_MS` | `3000` | per-request timeout on a fill, 1..3000 |
+| `SWAPTOX_QUOTE_TIMEOUT_MS` | `2500` | per-request timeout on a `/quote`, 1..3000 |
+| `SWAPTOX_LARGE_USD` | `500` | a ticket whose input is worth at least this (USD, on the pools) waits `SWAPTOX_LARGE_TIMEOUT_MS` instead |
+| `SWAPTOX_LARGE_TIMEOUT_MS` | `5500` | per-request timeout for a large ticket, fill or `/quote`, 1..10000 |
 
 Indicative quotes (`POST /quote` on the Worker, *Indicative quotes* above):
 
@@ -1029,8 +1077,11 @@ runs against the fork) fills through the sandbox, and a **Nordstern-routed pull*
 (100 USDRIF → USDT0, Oku and Sushi off, priced at 40 % — anvil's own blocks price gas at
 1 gwei) fills through the sandbox and prints the API's `toAmount`, the haircut figure,
 Oku's QuoterV2 figure and what the route delivered. The API cases need
-the fork to be recent (the APIs quote live state); `SKIP_SUSHI=1` / `SKIP_NORDSTERN=1`
-skip them. `FORK_URL`
+the fork to be recent (the APIs quote live state); a **SwaptoX-routed pull** order
+(100 USDRIF → USDT0, every other source off, `SWAPTOX_API_KEY` from the environment when
+set) fills through the sandbox and prints the API's `amountOut` and what was delivered
+(2026-11-24: 99,541,128 / 99,541,127 — the solver kept its one-wei seed). `SKIP_SUSHI=1` /
+`SKIP_NORDSTERN=1` / `SKIP_SWAPTOX=1` skip them. `FORK_URL`
 and `PORT` override the defaults.
 
 ## Known limits (beta)

@@ -114,6 +114,7 @@ describe("marketFigures — the quote is THE price", () => {
 
   it("sourceName", () => {
     expect(sourceName("sushi")).toBe("Sushi");
+    expect(sourceName("swaptox")).toBe("SwaptoX");
     expect(sourceName("uniswap-v3")).toBe("Uniswap");
     expect(sourceName("oku")).toBe("Uniswap"); // Oku runs a Uniswap v3 deployment; it is the indexer, not the venue
     expect(sourceName(null)).toBe("our filler");

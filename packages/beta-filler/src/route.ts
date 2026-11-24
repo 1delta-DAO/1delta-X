@@ -24,7 +24,8 @@ import { exclusivityFor, isDeltaVerify, plainShape, type Verdict } from "./polic
  * operator-gated `AggregatorFillSolver`, swapping the maker's input either along a
  * configured Uniswap-v3-style POOL path (Oku = venue 0, SushiSwap v3 = venue 1;
  * quoted locally on each venue's QuoterV2) or — pull orders only — along an API route
- * (Sushi ./sushi.ts, Nordstern ./nordstern.ts), whichever nets more after its own gas.
+ * (Sushi ./sushi.ts, Nordstern ./nordstern.ts, SwaptoX ./swaptox.ts), whichever nets
+ * more after its own gas.
  * Everything chain-dependent (previews, quotes, gas price) is passed in.
  *
  * Two plan kinds:
@@ -324,13 +325,13 @@ export const NATIVE_OUT_NOT_ROUTABLE =
  *     book would pass and cost an API call per sweep;
  *   • the pair must be routable on a configured pool or path, or a path over the
  *     discovered pool graph (`extras.graph`, ./poolGraph.ts) — or, for a PULL order
- *     with an API source enabled (Sushi, Nordstern), the API may find the route
+ *     with an API source enabled (Sushi, Nordstern, SwaptoX), the API may find the route
  *     instead. (Zero RPC: whether the pool's venue is quotable is the filler's call.)
  */
 export function classifyRoute(
   order: Order,
   rc: Pick<RouteConfig, "solver" | "pools" | "paths" | "routeTokens"> &
-    Partial<Pick<RouteConfig, "maxHops">> & { discovery?: Pick<RouteConfig["discovery"], "hubTokens">; sushi?: { enabled: boolean }; nordstern?: { enabled: boolean } },
+    Partial<Pick<RouteConfig, "maxHops">> & { discovery?: Pick<RouteConfig["discovery"], "hubTokens">; sushi?: { enabled: boolean }; nordstern?: { enabled: boolean }; swaptox?: { enabled: boolean } },
   extras: {
     hasPermitBatch?: boolean;
     sigless?: boolean;
@@ -370,7 +371,7 @@ export function classifyRoute(
   }
   const paths = routePaths(tokenIn, tokenOut, rc, extras.graph);
   // `anyPath`: the pool graph is not loaded yet, so "no path" would be a guess.
-  if (paths.length === 0 && !extras.anyPath && (direct || !(rc.sushi?.enabled || rc.nordstern?.enabled))) return { ok: false, reason: NO_ROUTE_REASON };
+  if (paths.length === 0 && !extras.anyPath && (direct || !(rc.sushi?.enabled || rc.nordstern?.enabled || rc.swaptox?.enabled))) return { ok: false, reason: NO_ROUTE_REASON };
   return {
     ok: true,
     direct,
@@ -590,10 +591,13 @@ export function validatePoolPlan(
   return { ok: true, plan };
 }
 
+/** The API route sources (pull orders only), each a sandbox plan. */
+export type ApiSource = "sushi" | "nordstern" | "swaptox";
+
 /** One executable route candidate. */
 export interface RouteCandidate {
   /** A local pool path (pool plan) or an API route (sandbox plan). */
-  source: "pool" | "sushi" | "nordstern";
+  source: "pool" | ApiSource;
   /** The quoted output for the fill's input. */
   out: bigint;
   /**

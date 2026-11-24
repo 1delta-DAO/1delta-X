@@ -160,6 +160,9 @@ NORDSTERN_REFERER = "https://1delta-x.pages.dev"
 NORDSTERN_HAIRCUT_BPS = "2"
 NORDSTERN_MAX_PER_SWEEP = "10"
 NORDSTERN_TIMEOUT_MS = "3000"
+# SwaptoX aggregator (2026-11-24): NO var here (the binding cap) — the SWAPTOX_API_KEY
+# secret turns it on (`wrangler secret put SWAPTOX_API_KEY`); router + executor pinned and
+# every knob at its code default (beta-filler README). Off again: delete the secret.
 # 2026-10-20: OFF — USDRIF ⇄ USD₮0 is the SPOT reserves' pair now (valued at the 0.05 % pool,
 # both directions). This direction priced the USDRIF it bought at the MoC redeem + RIF-sale exit,
 # ~0.4–0.5 % under the pool, and lost small tickets to the route (46 USDRIF: 45.16 vs 45.35).

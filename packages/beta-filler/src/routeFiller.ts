@@ -12,7 +12,7 @@ import {
   type Permit2612,
   type RoutePlan,
 } from "@1delta-x/sdk";
-import { decodeErrorResult, erc20Abi, type Address, type Hex } from "viem";
+import { decodeErrorResult, erc20Abi, formatUnits, type Address, type Hex } from "viem";
 
 import { previewBump, previewFill, type Chain } from "./chain";
 import { VENUE_OKU, VENUE_SUSHI_V3, type Config, type RouteConfig, type RoutePath } from "./config";
@@ -68,25 +68,28 @@ import {
   venueName,
   type PlanKind,
   type RouteCandidate,
+  type ApiSource,
   type RouteClass,
 } from "./route";
 import { sanitize } from "./sanitize";
 import { buildNordsternPlan, fetchNordsternRoute, type NordsternQuote } from "./nordstern";
 import { buildSushiPlan, fetchSushiRoute, type SushiQuote } from "./sushi";
+import { awaitBySize, buildSwaptoxPlan, fetchSwaptoxRoute, SWAPTOX_ROUTER_ABI, type SwaptoxQuote } from "./swaptox";
 import { okuPools, sushiPools } from "./poolIndexers";
 
 /** A validated API route (pull orders only), with the output it is priced at. */
 type ApiRaw =
   | { source: "sushi"; quote: SushiQuote; out: bigint; gasUnits: bigint }
-  | { source: "nordstern"; quote: NordsternQuote; out: bigint; gasUnits: bigint };
+  | { source: "nordstern"; quote: NordsternQuote; out: bigint; gasUnits: bigint }
+  | { source: "swaptox"; quote: SwaptoxQuote; out: bigint; gasUnits: bigint };
 
 /**
  * One ranked candidate: a local pool path (a pool plan) or a validated API route
- * (Sushi, Nordstern — a sandbox plan). A DIRECT pool candidate also carries `need`,
+ * (Sushi, Nordstern, SwaptoX — a sandbox plan). A DIRECT pool candidate also carries `need`,
  * the backward exact-output quote of the owed amount (its `out` is then the
  * equivalent output `owed × received / need`).
  */
-type Candidate = RouteCandidate & ({ source: "pool"; path: RoutePath; need?: bigint } | { source: "sushi"; quote: SushiQuote } | { source: "nordstern"; quote: NordsternQuote });
+type Candidate = RouteCandidate & ({ source: "pool"; path: RoutePath; need?: bigint } | { source: "sushi"; quote: SushiQuote } | { source: "nordstern"; quote: NordsternQuote } | { source: "swaptox"; quote: SwaptoxQuote });
 
 /** QuoterV2 / a venue factory's `factory()` view (not in the SDK's QuoterV2 ABI). */
 const FACTORY_VIEW_ABI = [{ type: "function", name: "factory", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] }] as const;
@@ -134,7 +137,7 @@ const ceilPct = (v: bigint, pct: bigint) => (v * pct + 99n) / 100n;
  * Per order: backoff check → classify → gas price ≤ MAX_GAS_PRICE_GWEI →
  * previewFill (filler = the SOLVER contract, which is msg.sender to Settlement) →
  * quote: every configured pool path on its venue's QuoterV2 and, for a PULL order,
- * the Sushi / Nordstern API routes (decoded and validated; capped per sweep) → rank
+ * the Sushi / Nordstern / SwaptoX API routes (decoded and validated; capped per sweep) → rank
  * by output net of each route's own gas (+ SANDBOX_ROUTE_OVERHEAD_GAS for an API
  * route) → profitability gate at the plan kind's pre-simulation estimate
  * (ROUTE_GAS_ESTIMATE for a sandbox plan, less the overhead for a pool plan, +
@@ -170,8 +173,9 @@ export class RouteFiller {
   private nativeOn: boolean | undefined;
   /** Our share of each fill's surplus after the solver's maker/protocol split, ppm. */
   private keepPpm = PPM;
-  private sushiCalls = 0;
-  private nordsternCalls = 0;
+  private readonly apiCalls: Record<ApiSource, number> = { sushi: 0, nordstern: 0, swaptox: 0 };
+  /** When the SwaptoX router's `swapAddress(version)` was last read, and whether it was the pinned executor. */
+  private swaptoxPin: { at: number; ok: boolean } | undefined;
   private readonly skipped = new Map<Hex, string>();
   private readonly prices = new Map<string, { at: number; perRef: bigint | undefined }>();
   private readonly decimals = new Map<string, number>();
@@ -441,7 +445,7 @@ export class RouteFiller {
       this.log(`⚠ NORDSTERN_EXECUTORS is empty: every Nordstern route will be refused (the pin is strict)`);
     }
     this.log(
-      `route strategy: solver ${s} (${gated ? "gated" : "OPEN"}), sandbox ${sandbox}, surplus split maker ${makerPpm} / protocol ${protocolPpm} ppm (we keep ${keep}), ${this.rc.pools.length} pool(s), ${this.rc.paths.length} path(s), discovery ${this.rc.discovery.enabled ? `on (≤${this.rc.maxHops} hops, ${this.rc.maxCandidates} candidates, ${activePools(this.graph, this.rc.discovery.minLiquidity).length} active pools)` : "off"}, venues ${[...this.quoters.keys()].map(venueName).join("+") || "none"}, sushi ${this.rc.sushi.enabled ? `on (${this.rc.sushi.router}, ≤${this.rc.sushi.maxPerSweep}/sweep)` : "off"}, nordstern ${this.rc.nordstern.enabled ? `on (${this.rc.nordstern.router}, ≤${this.rc.nordstern.maxPerSweep}/sweep, haircut ${this.rc.nordstern.haircutBps} bps)` : "off"}`,
+      `route strategy: solver ${s} (${gated ? "gated" : "OPEN"}), sandbox ${sandbox}, surplus split maker ${makerPpm} / protocol ${protocolPpm} ppm (we keep ${keep}), ${this.rc.pools.length} pool(s), ${this.rc.paths.length} path(s), discovery ${this.rc.discovery.enabled ? `on (≤${this.rc.maxHops} hops, ${this.rc.maxCandidates} candidates, ${activePools(this.graph, this.rc.discovery.minLiquidity).length} active pools)` : "off"}, venues ${[...this.quoters.keys()].map(venueName).join("+") || "none"}, sushi ${this.rc.sushi.enabled ? `on (${this.rc.sushi.router}, ≤${this.rc.sushi.maxPerSweep}/sweep)` : "off"}, nordstern ${this.rc.nordstern.enabled ? `on (${this.rc.nordstern.router}, ≤${this.rc.nordstern.maxPerSweep}/sweep, haircut ${this.rc.nordstern.haircutBps} bps)` : "off"}, swaptox ${this.rc.swaptox.enabled ? `on (${this.rc.swaptox.router} → ${this.rc.swaptox.executor}, ≤${this.rc.swaptox.maxPerSweep}/sweep, gas × ${this.rc.swaptox.gasMultPct} %, ${this.rc.swaptox.apiKey ? "keyed" : "no API key"})` : "off"}`,
     );
   }
 
@@ -511,14 +515,34 @@ export class RouteFiller {
     return pathVenues(path).every((v) => this.quoters.has(v));
   }
 
-  /** Reset the per-sweep API call counters (Sushi, Nordstern). */
+  /** Reset the per-sweep API call counters (Sushi, Nordstern, SwaptoX). */
   beginSweep(): void {
-    this.sushiCalls = 0;
-    this.nordsternCalls = 0;
+    for (const k of Object.keys(this.apiCalls) as ApiSource[]) this.apiCalls[k] = 0;
   }
 
   /**
-   * The API route candidates for a PULL fill of `amountIn`: Sushi and Nordstern, each
+   * Whether the SwaptoX router still sends its input to the PINNED executor: its admin
+   * can repoint `swapAddress(version)` at any time (./swaptox.ts). Read at most once per
+   * {@link PRICE_TTL_MS}; a failed read refuses the source until the next one.
+   */
+  private async swaptoxPinned(): Promise<boolean> {
+    const sx = this.rc.swaptox;
+    const now = Date.now();
+    if (this.swaptoxPin && now - this.swaptoxPin.at < PRICE_TTL_MS) return this.swaptoxPin.ok;
+    let ok = false;
+    try {
+      const at = (await this.chain.pub.readContract({ address: sx.router, abi: SWAPTOX_ROUTER_ABI, functionName: "swapAddress", args: [sx.version] })) as Address;
+      ok = eqAddr(at, sx.executor);
+      if (!ok) this.log(`⚠ [route] swaptox: router ${sx.router} swapAddress(${sx.version}) is ${at}, not the pinned SWAPTOX_EXECUTOR ${sx.executor}: SwaptoX routes refused`);
+    } catch (e) {
+      this.log(`· [route] swaptox: swapAddress read failed: ${sanitize(errorReason(e))}`);
+    }
+    this.swaptoxPin = { at: now, ok };
+    return ok;
+  }
+
+  /**
+   * The API route candidates for a PULL fill of `amountIn`: Sushi, Nordstern and SwaptoX, each
    * when enabled, fetched in PARALLEL and validated against this exact request. With
    * `orderHash` (a fill) each source is capped at its MAX_PER_SWEEP calls per sweep and
    * a refusal is logged; `/quote` (no hash) is bounded by its own rate limit and cache.
@@ -533,24 +557,42 @@ export class RouteFiller {
     const raw: ApiRaw[] = [];
     const reasons: string[] = [];
     let transient = false;
-    const admit = (name: "sushi" | "nordstern", max: number): boolean => {
+    const admit = (name: ApiSource, max: number): boolean => {
       if (!orderHash) return true;
-      const used = name === "sushi" ? this.sushiCalls : this.nordsternCalls;
-      if (used >= max) {
+      if (this.apiCalls[name] >= max) {
         transient = true;
         this.log(`· [route] ${orderHash} ${name}: per-sweep cap (${max}) reached`);
         return false;
       }
-      if (name === "sushi") this.sushiCalls++;
-      else this.nordsternCalls++;
+      this.apiCalls[name]++;
       return true;
     };
     const base = { chainId: cfg.chainId, tokenIn: a.tokenIn, tokenOut: a.tokenOut, amountIn: a.amountIn, recipient: rc.solver, slippageBps: a.slippageBps };
-    const [sushi, nordstern] = await Promise.all([
+    // SwaptoX waits by ticket size (./swaptox.ts LATENCY): a small ticket at most the fill
+    // (or, on a `/quote`, the shorter quote) timeout, one worth ≥ SWAPTOX_LARGE_USD up to
+    // SWAPTOX_LARGE_TIMEOUT_MS. The call starts with the long deadline at once; the
+    // ticket's USD value and the executor-pin read run alongside it.
+    const swaptox = async () => {
+      const sx = rc.swaptox;
+      const smallMs = orderHash ? sx.timeoutMs : sx.quoteTimeoutMs;
+      const call = fetchSwaptoxRoute({ ...sx, timeoutMs: Math.max(smallMs, sx.largeTimeoutMs) }, base);
+      const isLarge = this.usdOf(a.tokenIn, a.amountIn).then(
+        (usd) => usd !== undefined && usd >= sx.largeUsd,
+        () => false,
+      );
+      const [pinned, v] = await Promise.all([
+        this.swaptoxPinned(),
+        awaitBySize(call, { smallMs, isLarge, onSmall: () => ({ ok: false, reason: `swaptox: no answer within ${smallMs} ms (ticket under $${sx.largeUsd})` }) as const }),
+      ]);
+      return pinned ? v : ({ ok: false, reason: "swaptox: router executor is not the pinned SWAPTOX_EXECUTOR" } as const);
+    };
+    const [sushi, nordstern, sx] = await Promise.all([
       rc.sushi.enabled && admit("sushi", rc.sushi.maxPerSweep) ? fetchSushiRoute(rc.sushi, { ...base, sender: this.sandbox! }) : undefined,
       rc.nordstern.enabled && admit("nordstern", rc.nordstern.maxPerSweep) ? fetchNordsternRoute(rc.nordstern, base) : undefined,
+      rc.swaptox.enabled && admit("swaptox", rc.swaptox.maxPerSweep) ? swaptox() : undefined,
     ]);
-    for (const v of [sushi, nordstern]) {
+    // SwaptoX last: on a tie (the same pools at the same output) Sushi / Nordstern keep the fill.
+    for (const v of [sushi, nordstern, sx]) {
       if (!v) continue;
       // A route whose fill could never be sent under MAX_ROUTE_GAS is not a candidate.
       if (v.ok && !apiRouteFits(v.gasUnits, rc.maxGas)) {
@@ -560,7 +602,7 @@ export class RouteFiller {
         continue;
       }
       if (v.ok) {
-        raw.push(v.source === "sushi" ? { source: "sushi", quote: v, out: v.amountOut, gasUnits: v.gasUnits } : { source: "nordstern", quote: v, out: v.amountOut, gasUnits: v.gasUnits });
+        raw.push({ source: v.source, quote: v, out: v.amountOut, gasUnits: v.gasUnits } as ApiRaw);
       } else {
         transient = true;
         reasons.push(v.reason);
@@ -810,6 +852,9 @@ export class RouteFiller {
     const build = (c: Candidate, costOut: bigint): Verdict<{ plan: RoutePlan }> => {
       if (c.source === "sushi") return buildSushiPlan({ quote: c.quote, owed, costOut, profitRecipient: rc.profitRecipient, minBumpBps });
       if (c.source === "nordstern") return buildNordsternPlan({ quote: c.quote, owed, costOut, profitRecipient: rc.profitRecipient, minBumpBps });
+      if (c.source === "swaptox") {
+        return buildSwaptoxPlan({ quote: c.quote, owed, costOut, solver: rc.solver, profitRecipient: rc.profitRecipient, minBumpBps, referral: rc.swaptox.referral, nowSec: BigInt(Math.floor(Date.now() / 1000)) });
+      }
       try {
         const { plan } = buildPoolPlan({ direct, path: c.path, received, owed, quotedOut: c.out, costOut, profitRecipient: rc.profitRecipient, minBumpBps, liveOut });
         // Decode what we built and check it against the ORDER before anything is signed.
@@ -920,7 +965,9 @@ export class RouteFiller {
           ? `${pathLabel(v.c.path)} pool plan ${v.c.path.tokens.length - 1} hop [${v.c.path.fees.join(",")}]${v.c.need !== undefined ? ` need ${v.c.need}` : ""}`
           : v.c.source === "nordstern"
             ? `nordstern api ${v.c.quote.apiAmountOut}`
-            : "sushi api";
+            : v.c.source === "swaptox"
+              ? `swaptox api ${v.c.quote.pools.length} step(s)`
+              : "sushi api";
       const tag = `${direct ? (liveOut ? "direct+live" : "direct") : "pull"}${native ? "+native" : ""}${itemFill ? `+items(late ${itemFill.lateItems})` : ""}${permits.length > 0 ? "+permit" : ""}${quoted ? ` quoted ${quoted.id}` : ""} ${orderHash} in ${received} ${order.legsIn[0]!.token} → owed ${owed} ${tokenOut} (${via}, quote ${v.c.out}, margin ${v.margin})`;
       const t = await trial(v, tag);
       if (t.ok) {
@@ -1035,9 +1082,9 @@ export class RouteFiller {
     const inList = (t: Address) => rc.routeTokens.some((x) => x.toLowerCase() === t.toLowerCase());
     if (!inList(a.tokenIn) || !inList(a.tokenOut)) return { ok: false, reason: "route: pair outside ROUTE_TOKENS" };
     const paths = this.pathsFor(a.tokenIn, a.tokenOut);
-    const api = !a.direct && (rc.sushi.enabled || rc.nordstern.enabled);
+    const api = !a.direct && (rc.sushi.enabled || rc.nordstern.enabled || rc.swaptox.enabled);
     if (paths.length === 0 && !api) return { ok: false, reason: "route: no configured pool/path for the pair" };
-    const raw: Array<{ source: "pool" | "sushi" | "nordstern"; out: bigint; gasUnits: bigint; hops?: number; label: string; fees?: number[]; path?: RoutePath }> = [];
+    const raw: Array<{ source: "pool" | ApiSource; out: bigint; gasUnits: bigint; hops?: number; label: string; fees?: number[]; path?: RoutePath }> = [];
     // The API calls run alongside the pool quotes (one round trip, not three).
     const apiP = api
       ? this.apiRoutes({ tokenIn: a.tokenIn, tokenOut: a.tokenOut, amountIn: a.amountIn, slippageBps: haircutBps(rc, a.tokenIn, a.tokenOut) })
@@ -1164,6 +1211,20 @@ export class RouteFiller {
     if (fromPool === undefined) return fromUsd;
     if (fromUsd === undefined) return fromPool;
     return fromPool > fromUsd ? fromPool : fromUsd;
+  }
+
+  /**
+   * USD value of `amount` of `token`, for size-dependent waits (SwaptoX): a $1 token
+   * (`USD_TOKENS`) at face, WRBTC at the cached RBTC price, anything else at its best pool
+   * quote into the first $1 token; undefined when it cannot be priced.
+   */
+  private async usdOf(token: Address, amount: bigint): Promise<number | undefined> {
+    const usd = this.rc.usdTokens;
+    if (usd.some((t) => eqAddr(t, token))) return Number(formatUnits(amount, await this.tokenDecimals(token)));
+    const u = usd[0];
+    if (!u) return undefined;
+    const out = eqAddr(token, this.cfg.wrbtc) ? await this.nativeToToken(amount, u) : await this.dexQuote(token, u, amount);
+    return out === undefined ? undefined : Number(formatUnits(out, await this.tokenDecimals(u)));
   }
 
   private async tokenDecimals(token: Address): Promise<number> {

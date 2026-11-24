@@ -856,6 +856,10 @@ export class FillerDO extends DurableObject<Env> {
         nordstern: cfg.route
           ? { enabled: cfg.route.nordstern.enabled, executorsPinned: cfg.route.nordstern.executors.length, haircutBps: cfg.route.nordstern.haircutBps.toString() }
           : null,
+        // Never the API key itself.
+        swaptox: cfg.route
+          ? { enabled: cfg.route.swaptox.enabled, keyed: !!cfg.route.swaptox.apiKey, router: cfg.route.swaptox.router, executor: cfg.route.swaptox.executor, gasMultPct: cfg.route.swaptox.gasMultPct.toString() }
+          : null,
       },
       logTail: this.logTail.slice(-50),
     };

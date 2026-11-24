@@ -4,6 +4,7 @@ import { getAddress, isAddress, type Address, type Hex } from "viem";
 
 import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK, type NordsternConfig } from "./nordstern";
 import { SUSHI_RED_SNWAPPER_ROOTSTOCK, SUSHI_SNWAP_EXECUTOR_ROOTSTOCK, type SushiConfig } from "./sushi";
+import { SWAPTOX_EXECUTOR_ROOTSTOCK, SWAPTOX_MAX_LARGE_TIMEOUT_MS, SWAPTOX_MAX_TIMEOUT_MS, SWAPTOX_ROUTER_ROOTSTOCK, type SwaptoxConfig } from "./swaptox";
 import type { IndexerConfig } from "./poolIndexers";
 
 /** Rootstock mainnet addresses (chain 30). Verified on-chain — see the repo's MoC notes. */
@@ -216,6 +217,8 @@ export interface RouteConfig {
   sushi: SushiConfig;
   /** The Nordstern API route source (pull orders only; ./nordstern.ts). */
   nordstern: NordsternConfig;
+  /** The SwaptoX API route source (pull orders only; ./swaptox.ts). */
+  swaptox: SwaptoxConfig;
   /**
    * Whether the local pool plans (Oku and the other venues, `ROUTE_OKU_PULL`) compete
    * on PULL orders (default on). Off = API-only pull fills; the pools still price gas,
@@ -829,6 +832,24 @@ function loadRoute(env: Env): RouteConfig | undefined {
       maxPerSweep: posNum(env, "NORDSTERN_MAX_PER_SWEEP", 10),
       haircutBps: nordsternHaircut(env),
       gasMultPct: BigInt(rangeNum(env, "NORDSTERN_GAS_MULT_PCT", 200, 100, 1_000)),
+    },
+    swaptox: {
+      // ON by default once SWAPTOX_API_KEY (a secret) is set, on Rootstock: the key is the
+      // switch, so the Worker needs no extra var (wrangler.toml sits at the binding cap).
+      enabled: flag(env, "SWAPTOX_ENABLED", onRootstock && !!env.SWAPTOX_API_KEY),
+      baseUrl: env.SWAPTOX_API_URL ?? "https://api-v2.swaptox.com",
+      ...(env.SWAPTOX_API_KEY ? { apiKey: env.SWAPTOX_API_KEY } : {}),
+      router: addr(env, "SWAPTOX_ROUTER", SWAPTOX_ROUTER_ROOTSTOCK),
+      executor: addr(env, "SWAPTOX_EXECUTOR", SWAPTOX_EXECUTOR_ROOTSTOCK),
+      version: BigInt(rangeNum(env, "SWAPTOX_VERSION", 1, 0, 1_000_000)),
+      referral: addr(env, "SWAPTOX_REFERRAL", "0x0000000000000000000000000000000000000000"),
+      // Capped at 3 s below SWAPTOX_LARGE_USD: a slow API never holds a small ticket up longer.
+      timeoutMs: rangeNum(env, "SWAPTOX_TIMEOUT_MS", SWAPTOX_MAX_TIMEOUT_MS, 1, SWAPTOX_MAX_TIMEOUT_MS),
+      quoteTimeoutMs: rangeNum(env, "SWAPTOX_QUOTE_TIMEOUT_MS", 2_500, 1, SWAPTOX_MAX_TIMEOUT_MS),
+      largeUsd: rangeNum(env, "SWAPTOX_LARGE_USD", 500, 0, 1_000_000_000),
+      largeTimeoutMs: rangeNum(env, "SWAPTOX_LARGE_TIMEOUT_MS", 5_500, 1, SWAPTOX_MAX_LARGE_TIMEOUT_MS),
+      maxPerSweep: posNum(env, "SWAPTOX_MAX_PER_SWEEP", 10),
+      gasMultPct: BigInt(rangeNum(env, "SWAPTOX_GAS_MULT_PCT", 150, 100, 1_000)),
     },
   };
 }

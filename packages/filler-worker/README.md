@@ -280,7 +280,9 @@ npx wrangler login
   `NORDSTERN_REFERER` (the API answers 429 without a Referer), a 2 bps haircut on its
   `toAmount` and a per-sweep cap. Both compete with Oku on pull orders and on pull
   `/quote`s; `GET /status` → `config.sushi` / `config.nordstern` shows what is live.
-  Turning Nordstern off is `NORDSTERN_ENABLED = "0"` and a redeploy.
+  Turning Nordstern off is `NORDSTERN_ENABLED = "0"` and a redeploy. SwaptoX
+  (2026-11-24) has no var: the `SWAPTOX_API_KEY` secret (below) turns it on, and
+  `config.swaptox` shows it (`keyed`, never the key).
 
 **2. Secrets.** Each one is a separate `wrangler secret put`:
 
@@ -298,6 +300,8 @@ npx wrangler secret put ORDERBOOK_BINDING_KEY
 KEY=$(openssl rand -hex 32)
 echo "$KEY" | npx wrangler secret put QUOTE_BINDING_KEY
 echo "$KEY" | npx wrangler pages secret put FILLER_BINDING_KEY --project-name <pages-project>
+# optional: SwaptoX's API key — turns the SwaptoX route source on (pull orders only)
+npx wrangler secret put SWAPTOX_API_KEY
 ```
 
 **3. Service binding.** `wrangler.toml` already binds `ORDERBOOK` → `orderbook-1delta-rsk`.

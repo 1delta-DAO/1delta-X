@@ -25,6 +25,11 @@
 #                     the sandbox; prints the API's toAmount, the haircut figure, Oku's
 #                     QuoterV2 figure and what the route DELIVERED (maker + operator).
 #                     (SKIP_NORDSTERN=1 skips it; needs api.nordstern.finance)
+#        f. swaptox — 100 USDRIF → USDT0 pull, every other source off: the live SwaptoX
+#                     API route (our SwaptoXRouter.swap encoding, amountIn patched) runs
+#                     through the sandbox; prints the API's amountOut and what the route
+#                     DELIVERED. (SKIP_SWAPTOX=1 skips it; needs api-v2.swaptox.com;
+#                     SWAPTOX_API_KEY from the environment when set)
 #   3. feeds each order to `beta-filler fill-json` (bypassing the orderbook) in
 #      LIVE mode, route strategy only;
 #   4. asserts each maker received at least the owed USDT0 (and c. nothing).
@@ -134,6 +139,17 @@ if [ "${SKIP_NORDSTERN:-0}" != 1 ]; then
   n_api=$(grep -oE "nordstern api [0-9]+" "$WORK/nordstern.out" | tail -1 | awk '{print $3}')
   n_priced=$(grep -oE "nordstern api [0-9]+, quote [0-9]+" "$WORK/nordstern.out" | tail -1 | awk '{print $5}')
   echo "   NORDSTERN 100 USDRIF→USDT0: api toAmount $n_api | priced (−haircut) $n_priced | Oku QuoterV2 $n_oku | delivered $(( n_owed + op_gain )) (owed $n_owed + spread $op_gain)"
+fi
+# SwaptoX: the same USDRIF/USDT0 pool, after Nordstern's $100 moved it a little — the
+# 40 % price leaves the route's floor far below what it delivers.
+if [ "${SKIP_SWAPTOX:-0}" != 1 ]; then
+  op_before=$(balance "$USDT0" "$OPERATOR")
+  TOKEN_IN=USDRIF run_case swaptox pull 40 filled 6 ROUTE_OKU_PULL=0 SUSHI_ENABLED=0 NORDSTERN_ENABLED=0 SWAPTOX_ENABLED=1
+  grep -q "✓ \[route\] filled pull .*(swaptox api" "$WORK/swaptox.out" || { echo "FAIL swaptox: the fill did not go through the SwaptoX route"; exit 1; }
+  op_gain=$(( $(balance "$USDT0" "$OPERATOR") - op_before ))
+  s_owed=$(sed -nE 's/.* owed=([0-9]+).*/\1/p' "$WORK/swaptox.order")
+  s_api=$(grep -oE "swaptox api [0-9]+ step\(s\), quote [0-9]+" "$WORK/swaptox.out" | tail -1 | awk '{print $6}')
+  echo "   SWAPTOX 100 USDRIF→USDT0: api amountOut $s_api | delivered $(( s_owed + op_gain )) (owed $s_owed + spread $op_gain)"
 fi
 run_case direct direct 97 filled 1
 run_case pull pull 97 filled 2
