@@ -44,8 +44,10 @@ export type Delivery = "direct" | "pull";
 /**
  * What a request may ask for: a delivery, or `auto` — the filler prices the route on
  * DIRECT delivery and the inventory on PULL (the inventory EOA cannot fill a direct
- * order; a route fill on pull only costs more gas) and answers the better, naming its
- * delivery: the app then signs that one (2026-10-14, the RIF rail).
+ * order) and answers the better, naming its delivery: the app then signs that one
+ * (2026-10-14, the RIF rail). A ticket worth ≥ ROUTE_AUTO_PULL_USD also prices the route
+ * on PULL (2026-11-25): only there do the API sources compete, and on a large ticket their
+ * routing can beat the pools by more than the pull fill's extra gas.
  */
 export type RequestDelivery = Delivery | "auto";
 export type QuoteSide = "sell" | "buy";
@@ -423,7 +425,7 @@ export class Quoter {
     const { route, inventory } = this.strategies;
     // Both strategies price in PARALLEL (they were awaited one after the other).
     const t1 = Date.now();
-    const [rr, ri] = await Promise.all([
+    const [rr, ri, rp] = await Promise.all([
       route
         ? route
             .quoteRoute({
@@ -447,8 +449,24 @@ export class Quoter {
             .then((r) => (r.ok ? { ...r, candidate: { ...r.candidate, delivery: "pull" as const } } : r))
             .catch((e: unknown) => ({ ok: false as const, reason: `inventory: ${(e as Error).message?.split("\n")[0] ?? e}` }))
         : undefined,
+      // An `auto` ticket worth ≥ ROUTE_AUTO_PULL_USD: the route on PULL too, where the API
+      // sources (Sushi, Nordstern, SwaptoX) compete — they fill pull orders only, and on a
+      // large ticket one can out-earn its extra gas (10k USD₮0 → RIF, 2026-11-25: Nordstern
+      // on pull 204,317 RIF vs the direct pool route 197,324). The better net wins below.
+      route && req.delivery === "auto" && !req.nativeOut
+        ? route
+            .autoPullWorthIt(req.tokenIn, req.amountIn)
+            .then((go) =>
+              go
+                ? route
+                    .quoteRoute({ tokenIn: req.tokenIn, tokenOut: req.tokenOut, amountIn: req.amountIn, direct: false, gasPrice, permit: req.funding === "permit" })
+                    .then((r) => (r.ok ? { ...r, candidate: { ...r.candidate, delivery: "pull" as const } } : r))
+                : undefined,
+            )
+            .catch((e: unknown) => ({ ok: false as const, reason: `route (pull): ${(e as Error).message?.split("\n")[0] ?? e}` }))
+        : undefined,
     ]);
-    for (const r of [rr, ri]) {
+    for (const r of [rr, ri, rp]) {
       if (!r) continue;
       if (r.ok) priced.push(r.candidate);
       else reasons.push(r.reason);

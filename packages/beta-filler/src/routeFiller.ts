@@ -1214,6 +1214,23 @@ export class RouteFiller {
   }
 
   /**
+   * Whether an `auto` quote of `amountIn` should ALSO price the route on PULL delivery:
+   * an API source is on (they fill pull orders only) and the ticket is worth at least
+   * `ROUTE_AUTO_PULL_USD` ({@link RouteConfig.autoPullUsd}). Never throws.
+   */
+  async autoPullWorthIt(tokenIn: Address, amountIn: bigint): Promise<boolean> {
+    const rc = this.rc;
+    if (!(rc.sushi.enabled || rc.nordstern.enabled || rc.swaptox.enabled)) return false;
+    if (rc.autoPullUsd === 0) return true;
+    try {
+      const usd = await this.usdOf(tokenIn, amountIn);
+      return usd !== undefined && usd >= rc.autoPullUsd;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * USD value of `amount` of `token`, for size-dependent waits (SwaptoX): a $1 token
    * (`USD_TOKENS`) at face, WRBTC at the cached RBTC price, anything else at its best pool
    * quote into the first $1 token; undefined when it cannot be priced.

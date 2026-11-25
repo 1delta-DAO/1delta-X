@@ -226,6 +226,14 @@ export interface RouteConfig {
    */
   okuPull: boolean;
   /**
+   * `ROUTE_AUTO_PULL_USD` (default 500): an `auto` quote (the app's market tickets) worth at
+   * least this many USD also prices the route on PULL delivery — the only delivery the API
+   * sources (Sushi, Nordstern, SwaptoX) fill — and answers whichever nets more. Smaller
+   * tickets stay direct-only: an API route did not beat the pools under ~$1k (2026-11-24
+   * probe), and the API wait would only slow the quote down.
+   */
+  autoPullUsd: number;
+  /**
    * The NativeUnwrapModule orders may name to receive raw RBTC (`NATIVE_UNWRAP_MODULE`,
    * default the Rootstock deployment; "" = refuse such orders). The route fills exactly one
    * shape with it (policy.ts `nativeOutShape`): the WRBTC leg to the module + one MAKE item.
@@ -804,6 +812,7 @@ function loadRoute(env: Env): RouteConfig | undefined {
     profitRecipient: addr(env, "ROUTE_PROFIT_RECIPIENT", "0x0000000000000000000000000000000000000000"),
     hourlyFills: uint(env, "ROUTE_HOURLY_FILLS", 60),
     okuPull: flag(env, "ROUTE_OKU_PULL", true),
+    autoPullUsd: rangeNum(env, "ROUTE_AUTO_PULL_USD", 500, 0, 1_000_000_000),
     ...(nativeUnwrapOf(env) ? { nativeUnwrap: nativeUnwrapOf(env)! } : {}),
     ...(nativeBalanceEnv(env) ? { nativeBalance: nativeBalanceEnv(env)! } : {}),
     nativeDirectGas: uint(env, "NATIVE_DIRECT_GAS", 30_000),
